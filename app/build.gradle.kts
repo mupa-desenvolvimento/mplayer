@@ -10,6 +10,18 @@ android {
     namespace = "com.mupa.player.enterprise"
     compileSdk = 34
 
+    val localProps = Properties()
+    val localPropsFile = rootProject.file("local.properties")
+    if (localPropsFile.exists()) {
+        localPropsFile.inputStream().use { localProps.load(it) }
+    }
+
+    fun getConfig(name: String): String? {
+        return providers.gradleProperty(name).orNull
+            ?: localProps.getProperty(name)
+            ?: System.getenv(name)
+    }
+
     defaultConfig {
         applicationId = "com.mupa.player.enterprise"
         minSdk = 24
@@ -19,21 +31,7 @@ android {
 
         fun String.escapeForBuildConfig(): String = replace("\\", "\\\\").replace("\"", "\\\"")
 
-        val localProps = Properties()
-        val localPropsFile = rootProject.file("local.properties")
-        if (localPropsFile.exists()) {
-            localPropsFile.inputStream().use { localProps.load(it) }
-        }
-
-        val localSupabaseToken: String? = localProps.getProperty("SUPABASE_TOKEN")
-        val defaultSupabaseToken =
-            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml1cnFkZGt1aWhqc214dWJpYmFvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MzI2MzUxNzMsImV4cCI6MjA0ODIxMTE3M30.KNNp_wFMSDWOuDlvWs2xuuzC5wj-d3saoc-8zQ4AkN4"
-        val supabaseToken = (
-            providers.gradleProperty("SUPABASE_TOKEN").orNull
-                ?: localSupabaseToken
-                ?: System.getenv("SUPABASE_TOKEN")
-                ?: defaultSupabaseToken
-            ).trim()
+        val supabaseToken = (getConfig("SUPABASE_TOKEN") ?: "").trim()
 
         buildConfigField(
             "String",
@@ -59,41 +57,35 @@ android {
 
     signingConfigs {
         create("release") {
-            val localProps = Properties()
-            val localPropsFile = rootProject.file("local.properties")
-            if (localPropsFile.exists()) {
-                localPropsFile.inputStream().use { localProps.load(it) }
+            fun requireProp(name: String): String {
+                return (getConfig(name) ?: "").trim().ifBlank {
+                    throw GradleException(
+                        "Release signing not configured. Missing $name. " +
+                            "Set it in local.properties or as Gradle property/environment variable.",
+                    )
+                }
             }
 
-            val storeFilePath =
-                providers.gradleProperty("RELEASE_STORE_FILE").orNull
-                    ?: localProps.getProperty("RELEASE_STORE_FILE")
-                    ?: System.getenv("RELEASE_STORE_FILE")
-                    ?: "${System.getProperty("user.home")}\\.android\\debug.keystore"
+            val storeFilePath = (getConfig("RELEASE_STORE_FILE") ?: "").trim()
+            if (storeFilePath.isBlank()) return@create
 
             storeFile = file(storeFilePath)
-            storePassword =
-                providers.gradleProperty("RELEASE_STORE_PASSWORD").orNull
-                    ?: localProps.getProperty("RELEASE_STORE_PASSWORD")
-                    ?: System.getenv("RELEASE_STORE_PASSWORD")
-                    ?: "android"
-            keyAlias =
-                providers.gradleProperty("RELEASE_KEY_ALIAS").orNull
-                    ?: localProps.getProperty("RELEASE_KEY_ALIAS")
-                    ?: System.getenv("RELEASE_KEY_ALIAS")
-                    ?: "androiddebugkey"
-            keyPassword =
-                providers.gradleProperty("RELEASE_KEY_PASSWORD").orNull
-                    ?: localProps.getProperty("RELEASE_KEY_PASSWORD")
-                    ?: System.getenv("RELEASE_KEY_PASSWORD")
-                    ?: "android"
+            if (!storeFile!!.exists()) {
+                throw GradleException("Release keystore not found at: $storeFilePath")
+            }
+            storePassword = requireProp("RELEASE_STORE_PASSWORD")
+            keyAlias = requireProp("RELEASE_KEY_ALIAS")
+            keyPassword = requireProp("RELEASE_KEY_PASSWORD")
         }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("release")
+            val storeFilePath = (getConfig("RELEASE_STORE_FILE") ?: "").trim()
+            if (storeFilePath.isNotBlank()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
