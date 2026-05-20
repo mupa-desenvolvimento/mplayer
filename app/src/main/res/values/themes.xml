@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <style name="Theme.MupaPlayerEnterprise" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">@color/mupa_cyan</item>
+        <item name="colorSecondary">@color/mupa_cyan_dark</item>
+        <item name="android:statusBarColor">@color/enterprise_bg</item>
+        <item name="android:navigationBarColor">@color/enterprise_bg</item>
+        <item name="android:windowBackground">@color/enterprise_bg</item>
+    </style>
+
+    <style name="Theme.MupaPlayerEnterprise.Splash" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/enterprise_bg</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_mupa_logo</item>
+        <item name="postSplashScreenTheme">@style/Theme.MupaPlayerEnterprise</item>
+    </style>
+
+</resources>
+

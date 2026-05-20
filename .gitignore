@@ -1,0 +1,16 @@
+.gradle/
+_gradle_tmp/
+.idea/
+*.iml
+local.properties
+**/build/
+captures/
+.externalNativeBuild/
+.cxx/
+*.jks
+*.keystore
+*.p12
+*.apk
+*.zip
+*.tar
+*.rar

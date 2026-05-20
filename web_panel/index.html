@@ -1,0 +1,601 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Mupa MDM Panel (Básico)</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b0f14;
+        --card: #0f1722;
+        --line: #1b2a3c;
+        --text: #e7eef8;
+        --muted: #9bb0c7;
+        --cyan: #00d1ff;
+        --danger: #ff4d4d;
+        --ok: #47d16a;
+      }
+
+      html,
+      body {
+        height: 100%;
+      }
+
+      body {
+        margin: 0;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Apple Color Emoji",
+          "Segoe UI Emoji";
+        background: var(--bg);
+        color: var(--text);
+      }
+
+      .app {
+        display: grid;
+        grid-template-columns: 360px 1fr;
+        height: 100vh;
+      }
+
+      .left {
+        border-right: 1px solid var(--line);
+        padding: 16px;
+        overflow: auto;
+      }
+
+      .right {
+        padding: 16px;
+        overflow: auto;
+      }
+
+      .card {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 14px;
+      }
+
+      .stack {
+        display: grid;
+        gap: 12px;
+      }
+
+      .row {
+        display: grid;
+        gap: 10px;
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .row-1 {
+        display: grid;
+        gap: 10px;
+        grid-template-columns: 1fr;
+      }
+
+      .title {
+        font-size: 14px;
+        font-weight: 650;
+        letter-spacing: 0.2px;
+      }
+
+      .sub {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      input,
+      textarea,
+      select {
+        width: 100%;
+        box-sizing: border-box;
+        background: #0b1220;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        color: var(--text);
+        padding: 10px 12px;
+        outline: none;
+      }
+
+      textarea {
+        min-height: 140px;
+        resize: vertical;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+        font-size: 12px;
+        line-height: 1.35;
+      }
+
+      button {
+        appearance: none;
+        border: 1px solid var(--line);
+        background: #0b1220;
+        color: var(--text);
+        padding: 10px 12px;
+        border-radius: 10px;
+        cursor: pointer;
+        font-weight: 600;
+      }
+
+      button.primary {
+        border-color: color-mix(in srgb, var(--cyan), var(--line) 40%);
+        background: color-mix(in srgb, var(--cyan), #000 86%);
+      }
+
+      button.danger {
+        border-color: color-mix(in srgb, var(--danger), var(--line) 40%);
+        background: color-mix(in srgb, var(--danger), #000 86%);
+      }
+
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 10px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 12px;
+        white-space: nowrap;
+      }
+
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 99px;
+        background: var(--muted);
+      }
+
+      .dot.ok {
+        background: var(--ok);
+      }
+
+      .dot.bad {
+        background: var(--danger);
+      }
+
+      .list {
+        display: grid;
+        gap: 8px;
+        margin-top: 12px;
+      }
+
+      .device {
+        display: grid;
+        gap: 6px;
+        padding: 10px 12px;
+        border-radius: 12px;
+        border: 1px solid var(--line);
+        background: #0b1220;
+        cursor: pointer;
+      }
+
+      .device.selected {
+        border-color: color-mix(in srgb, var(--cyan), var(--line) 40%);
+        box-shadow: 0 0 0 1px color-mix(in srgb, var(--cyan), transparent 70%);
+      }
+
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      }
+
+      .split {
+        display: grid;
+        gap: 10px;
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .logs {
+        display: grid;
+        gap: 8px;
+        max-height: 380px;
+        overflow: auto;
+        padding-right: 6px;
+      }
+
+      .log {
+        border: 1px solid var(--line);
+        background: #0b1220;
+        border-radius: 12px;
+        padding: 10px 12px;
+        display: grid;
+        gap: 6px;
+      }
+
+      .footer {
+        margin-top: 8px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <aside class="left">
+        <div class="stack">
+          <div class="card">
+            <div class="title">Mupa MDM Panel (básico)</div>
+            <div class="sub">
+              Firebase RTDB: <span class="mono" id="dbUrl"></span>
+            </div>
+            <div style="margin-top: 10px; display: flex; gap: 10px; flex-wrap: wrap">
+              <span class="pill"><span class="dot" id="connDot"></span><span id="connText">Conectando…</span></span>
+              <span class="pill">Dispositivos: <span class="mono" id="deviceCount">0</span></span>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="row-1">
+              <input id="searchInput" placeholder="Buscar deviceId…" />
+            </div>
+            <div class="list" id="deviceList"></div>
+          </div>
+        </div>
+      </aside>
+
+      <main class="right">
+        <div class="stack">
+          <div class="card">
+            <div class="row">
+              <div>
+                <div class="title">Dispositivo selecionado</div>
+                <div class="sub mono" id="selectedId">—</div>
+              </div>
+              <div style="display: flex; justify-content: flex-end; gap: 10px; align-items: center">
+                <button id="refreshBtn">Atualizar</button>
+                <button class="danger" id="clearSelectionBtn">Limpar</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="split">
+            <div class="card">
+              <div class="title">Ações rápidas</div>
+              <div class="sub">Envia em <span class="mono">/commands/{deviceId}</span> com timestamp.</div>
+              <div style="margin-top: 12px" class="row-1">
+                <div class="row">
+                  <button class="primary" data-template="lock_device">Lock</button>
+                  <button class="primary" data-template="unlock_device">Unlock</button>
+                </div>
+                <div class="row">
+                  <button data-template="reset_app">Reload</button>
+                  <button data-template="clear_cache">Clear cache</button>
+                </div>
+                <div class="row">
+                  <button data-template="fullscreen">Fullscreen</button>
+                  <button data-template="fecha_app">Fechar app</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="title">Enviar comando</div>
+              <div class="sub">Você pode editar o JSON antes de enviar.</div>
+              <div style="margin-top: 12px" class="stack">
+                <textarea id="commandJson"></textarea>
+                <div class="row">
+                  <button id="fillAbrirUrlBtn">Template abrir_url</button>
+                  <button class="primary" id="sendBtn">Enviar</button>
+                </div>
+                <div class="footer" id="sendStatus"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="split">
+            <div class="card">
+              <div class="title">Detalhes (dispositivos/{deviceId})</div>
+              <div class="sub">Mostra o JSON atual do nó do dispositivo.</div>
+              <div style="margin-top: 12px">
+                <textarea id="deviceJson" readonly></textarea>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="title">Logs (device_logs/{deviceId})</div>
+              <div class="sub">Últimos 30 ACKs.</div>
+              <div style="margin-top: 12px" class="logs" id="logs"></div>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <script type="module">
+      import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js";
+      import {
+        getDatabase,
+        ref,
+        child,
+        get,
+        onValue,
+        onChildAdded,
+        off,
+        push,
+        set,
+        query,
+        limitToLast,
+      } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-database.js";
+
+      const firebaseConfig = {
+        apiKey: "AIzaSyBMxPXdguRbv1h0VrHDWOQFhjzv5ufTKgg",
+        databaseURL: "https://comandos-1621d-default-rtdb.firebaseio.com",
+        projectId: "comandos-1621d",
+        appId: "1:348140452021:android:0f699372d315b3d2f3e6fc",
+      };
+
+      const app = initializeApp(firebaseConfig);
+      const db = getDatabase(app);
+
+      const els = {
+        dbUrl: document.getElementById("dbUrl"),
+        connDot: document.getElementById("connDot"),
+        connText: document.getElementById("connText"),
+        deviceCount: document.getElementById("deviceCount"),
+        searchInput: document.getElementById("searchInput"),
+        deviceList: document.getElementById("deviceList"),
+        selectedId: document.getElementById("selectedId"),
+        refreshBtn: document.getElementById("refreshBtn"),
+        clearSelectionBtn: document.getElementById("clearSelectionBtn"),
+        commandJson: document.getElementById("commandJson"),
+        deviceJson: document.getElementById("deviceJson"),
+        logs: document.getElementById("logs"),
+        sendBtn: document.getElementById("sendBtn"),
+        fillAbrirUrlBtn: document.getElementById("fillAbrirUrlBtn"),
+        sendStatus: document.getElementById("sendStatus"),
+      };
+
+      els.dbUrl.textContent = firebaseConfig.databaseURL;
+
+      function setConn(ok, text) {
+        els.connDot.classList.toggle("ok", ok);
+        els.connDot.classList.toggle("bad", !ok);
+        els.connText.textContent = text;
+      }
+
+      function nowTs() {
+        return Date.now();
+      }
+
+      function jsonPretty(value) {
+        return JSON.stringify(value, null, 2);
+      }
+
+      function buildCommand(comando, extra = {}) {
+        return { comando, timestamp: nowTs(), ...extra };
+      }
+
+      const state = {
+        devices: new Map(),
+        filteredIds: [],
+        selectedId: "",
+        unsubSelected: null,
+        unsubLogs: null,
+      };
+
+      function renderDeviceList() {
+        const queryText = (els.searchInput.value || "").trim().toLowerCase();
+        const all = Array.from(state.devices.keys()).sort();
+        const filtered = queryText ? all.filter((id) => id.toLowerCase().includes(queryText)) : all;
+        state.filteredIds = filtered;
+        els.deviceCount.textContent = String(all.length);
+
+        els.deviceList.innerHTML = "";
+        for (const id of filtered.slice(0, 250)) {
+          const deviceNode = document.createElement("div");
+          deviceNode.className = "device" + (id === state.selectedId ? " selected" : "");
+          const meta = state.devices.get(id);
+          const online =
+            meta && typeof meta === "object"
+              ? meta.online === true || meta.status === "online" || meta.conectado === true
+              : false;
+          deviceNode.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+              <div class="mono" style="font-weight:650">${escapeHtml(id)}</div>
+              <span class="pill"><span class="dot ${online ? "ok" : "bad"}"></span>${
+                online ? "online" : "offline"
+              }</span>
+            </div>
+          `;
+          deviceNode.addEventListener("click", () => selectDevice(id));
+          els.deviceList.appendChild(deviceNode);
+        }
+      }
+
+      function escapeHtml(s) {
+        return String(s)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
+      function setSendStatus(text) {
+        els.sendStatus.textContent = text || "";
+      }
+
+      function setDefaultCommandJson(cmd) {
+        els.commandJson.value = jsonPretty(cmd);
+      }
+
+      setDefaultCommandJson(buildCommand("lock_device"));
+
+      async function selectDevice(id) {
+        state.selectedId = id;
+        els.selectedId.textContent = id;
+        renderDeviceList();
+        await subscribeSelected(id);
+      }
+
+      async function subscribeSelected(id) {
+        if (!id) return;
+
+        if (state.unsubSelected) state.unsubSelected();
+        if (state.unsubLogs) state.unsubLogs();
+
+        els.deviceJson.value = "";
+        els.logs.innerHTML = "";
+
+        const deviceRef = ref(db, `dispositivos/${id}`);
+        const logsRef = query(ref(db, `device_logs/${id}`), limitToLast(30));
+
+        const onDevice = onValue(
+          deviceRef,
+          (snap) => {
+            els.deviceJson.value = jsonPretty(snap.val());
+          },
+          () => {
+            els.deviceJson.value = "";
+          },
+        );
+
+        const logsItems = [];
+        const onLog = onChildAdded(
+          logsRef,
+          (snap) => {
+            const v = snap.val();
+            logsItems.push({ key: snap.key, value: v });
+            while (logsItems.length > 30) logsItems.shift();
+            renderLogs(logsItems);
+          },
+          () => {
+            renderLogs(logsItems);
+          },
+        );
+
+        state.unsubSelected = () => off(deviceRef, "value", onDevice);
+        state.unsubLogs = () => off(logsRef, "child_added", onLog);
+      }
+
+      function renderLogs(items) {
+        const sorted = [...items].sort((a, b) => {
+          const ta = (a.value && a.value.executado_em) || 0;
+          const tb = (b.value && b.value.executado_em) || 0;
+          return tb - ta;
+        });
+        els.logs.innerHTML = "";
+        for (const it of sorted) {
+          const v = it.value || {};
+          const status = (v.status || "").toLowerCase();
+          const ok = status === "success" || status === "ok";
+          const cmd = v.comando || "";
+          const ts = v.executado_em ? new Date(v.executado_em).toLocaleString() : "";
+          const d = document.createElement("div");
+          d.className = "log";
+          d.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+              <div class="mono" style="font-weight:650">${escapeHtml(cmd)}</div>
+              <span class="pill"><span class="dot ${ok ? "ok" : "bad"}"></span>${escapeHtml(
+                status || "unknown",
+              )}</span>
+            </div>
+            <div class="sub">${escapeHtml(ts)}</div>
+            ${v.detalhe ? `<div class="sub mono">${escapeHtml(v.detalhe)}</div>` : ""}
+          `;
+          els.logs.appendChild(d);
+        }
+      }
+
+      async function refreshAll() {
+        setConn(true, "Conectado");
+        const snap = await get(ref(db, "dispositivos"));
+        const val = snap.val() || {};
+        state.devices = new Map(Object.entries(val));
+        renderDeviceList();
+        if (!state.selectedId) {
+          const first = Array.from(state.devices.keys()).sort()[0];
+          if (first) await selectDevice(first);
+        }
+      }
+
+      onValue(
+        ref(db, ".info/connected"),
+        (snap) => {
+          const ok = snap.val() === true;
+          setConn(ok, ok ? "Conectado" : "Desconectado");
+        },
+        () => setConn(false, "Sem conexão"),
+      );
+
+      onValue(
+        ref(db, "dispositivos"),
+        (snap) => {
+          const val = snap.val() || {};
+          state.devices = new Map(Object.entries(val));
+          renderDeviceList();
+          if (state.selectedId && !state.devices.has(state.selectedId)) {
+            state.selectedId = "";
+            els.selectedId.textContent = "—";
+            els.deviceJson.value = "";
+            els.logs.innerHTML = "";
+          }
+        },
+        () => {
+          setConn(false, "Permissão negada (rules) ou erro de rede");
+        },
+      );
+
+      els.searchInput.addEventListener("input", () => renderDeviceList());
+      els.refreshBtn.addEventListener("click", () => refreshAll());
+      els.clearSelectionBtn.addEventListener("click", () => {
+        state.selectedId = "";
+        els.selectedId.textContent = "—";
+        els.deviceJson.value = "";
+        els.logs.innerHTML = "";
+        renderDeviceList();
+      });
+
+      document.querySelectorAll("button[data-template]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const cmd = btn.getAttribute("data-template");
+          if (!cmd) return;
+          setDefaultCommandJson(buildCommand(cmd));
+        });
+      });
+
+      els.fillAbrirUrlBtn.addEventListener("click", () => {
+        const id = state.selectedId || "";
+        const url = id ? `https://midias.mupa.app/player-consulta/${id}` : "https://midias.mupa.app/player-consulta/SEU_DEVICE_ID";
+        setDefaultCommandJson(buildCommand("abrir_url", { url }));
+      });
+
+      els.sendBtn.addEventListener("click", async () => {
+        const id = state.selectedId || "";
+        if (!id) {
+          setSendStatus("Selecione um dispositivo.");
+          return;
+        }
+        setSendStatus("");
+        let payload;
+        try {
+          payload = JSON.parse(els.commandJson.value);
+        } catch {
+          setSendStatus("JSON inválido.");
+          return;
+        }
+        if (!payload || typeof payload !== "object") {
+          setSendStatus("JSON inválido.");
+          return;
+        }
+        if (!payload.comando) {
+          setSendStatus("Campo 'comando' obrigatório.");
+          return;
+        }
+        if (!payload.timestamp) payload.timestamp = nowTs();
+
+        const r = push(ref(db, `commands/${id}`));
+        try {
+          await set(r, payload);
+          setSendStatus("Comando enviado.");
+        } catch (e) {
+          setSendStatus("Falha ao enviar (rules/auth?): " + (e && e.message ? e.message : String(e)));
+        }
+      });
+
+      await refreshAll();
+    </script>
+  </body>
+</html>

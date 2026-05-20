@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "348140452021",
+    "firebase_url": "https://comandos-1621d-default-rtdb.firebaseio.com",
+    "project_id": "comandos-1621d",
+    "storage_bucket": "comandos-1621d.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:348140452021:android:0f699372d315b3d2f3e6fc",
+        "android_client_info": {
+          "package_name": "com.mupa.player.enterprise"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBMxPXdguRbv1h0VrHDWOQFhjzv5ufTKgg"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

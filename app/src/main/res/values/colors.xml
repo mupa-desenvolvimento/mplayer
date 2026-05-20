@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="mupa_cyan">#00E5FF</color>
+    <color name="mupa_cyan_dark">#00B8CC</color>
+    <color name="enterprise_bg">#0B0F14</color>
+    <color name="enterprise_surface">#111926</color>
+    <color name="enterprise_on">#E6EEF7</color>
+    <color name="enterprise_on_muted">#A8B6C8</color>
+</resources>
