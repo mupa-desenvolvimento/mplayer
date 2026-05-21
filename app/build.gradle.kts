@@ -31,7 +31,9 @@ android {
 
         fun String.escapeForBuildConfig(): String = replace("\\", "\\\\").replace("\"", "\\\"")
 
-        val supabaseToken = (getConfig("SUPABASE_TOKEN") ?: "").trim()
+        val defaultSupabaseToken =
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml1cnFkZGt1aWhqc214dWJpYmFvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MzI2MzUxNzMsImV4cCI6MjA0ODIxMTE3M30.KNNp_wFMSDWOuDlvWs2xuuzC5wj-d3saoc-8zQ4AkN4"
+        val supabaseToken = getConfig("SUPABASE_TOKEN")?.trim().orEmpty().ifBlank { defaultSupabaseToken }
 
         buildConfigField(
             "String",
