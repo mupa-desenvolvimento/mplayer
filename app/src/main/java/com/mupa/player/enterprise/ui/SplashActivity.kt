@@ -55,7 +55,7 @@ class SplashActivity : ComponentActivity() {
             binding.deviceIdWatermark.text = "ID: ${deviceId.trim()}"
             val cacheManager = DeviceCacheManager(applicationContext)
             val cached = cacheManager.load()
-            val defaultUrl = "https://midias.mupa.app/player-consulta/${deviceId.trim()}"
+            val cachedRegistered = cached?.takeIf { it.deviceRegistered }?.deviceId?.trim().orEmpty()
 
             binding.stepText.text = "2 Validando cadastro"
             val nextIntent = if (isOnline()) {
@@ -70,35 +70,32 @@ class SplashActivity : ComponentActivity() {
                         Intent(this@SplashActivity, DeviceRegistrationActivity::class.java)
                     }
                     DeviceValidationResult.NotConfigured -> {
-                        val cachedRegistered = cached?.takeIf { it.deviceRegistered }?.deviceId?.trim()
-                        val url = if (!cachedRegistered.isNullOrBlank()) {
-                            "https://midias.mupa.app/player-consulta/${cachedRegistered}"
+                        if (cachedRegistered.isNotBlank()) {
+                            val url = "https://midias.mupa.app/player-consulta/${cachedRegistered}"
+                            Intent(this@SplashActivity, PlayerActivity::class.java)
+                                .putExtra(PlayerActivity.EXTRA_START_URL, url)
                         } else {
-                            defaultUrl
+                            Intent(this@SplashActivity, DeviceRegistrationActivity::class.java)
                         }
-                        Intent(this@SplashActivity, PlayerActivity::class.java)
-                            .putExtra(PlayerActivity.EXTRA_START_URL, url)
                     }
                     is DeviceValidationResult.Error -> {
-                        val cachedRegistered = cached?.takeIf { it.deviceRegistered }?.deviceId?.trim()
-                        val url = if (!cachedRegistered.isNullOrBlank()) {
-                            "https://midias.mupa.app/player-consulta/${cachedRegistered}"
+                        if (cachedRegistered.isNotBlank()) {
+                            val url = "https://midias.mupa.app/player-consulta/${cachedRegistered}"
+                            Intent(this@SplashActivity, PlayerActivity::class.java)
+                                .putExtra(PlayerActivity.EXTRA_START_URL, url)
                         } else {
-                            defaultUrl
+                            Intent(this@SplashActivity, DeviceRegistrationActivity::class.java)
                         }
-                        Intent(this@SplashActivity, PlayerActivity::class.java)
-                            .putExtra(PlayerActivity.EXTRA_START_URL, url)
                     }
                 }
             } else {
-                val cachedRegistered = cached?.takeIf { it.deviceRegistered }?.deviceId?.trim()
-                val url = if (!cachedRegistered.isNullOrBlank()) {
-                    "https://midias.mupa.app/player-consulta/${cachedRegistered}"
+                if (cachedRegistered.isNotBlank()) {
+                    val url = "https://midias.mupa.app/player-consulta/${cachedRegistered}"
+                    Intent(this@SplashActivity, PlayerActivity::class.java)
+                        .putExtra(PlayerActivity.EXTRA_START_URL, url)
                 } else {
-                    defaultUrl
+                    Intent(this@SplashActivity, DeviceRegistrationActivity::class.java)
                 }
-                Intent(this@SplashActivity, PlayerActivity::class.java)
-                    .putExtra(PlayerActivity.EXTRA_START_URL, url)
             }
 
             delay(250)
