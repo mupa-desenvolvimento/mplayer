@@ -49,6 +49,7 @@ class SplashActivity : ComponentActivity() {
         binding.deviceIdWatermark.text = "ID: -"
 
         lifecycleScope.launch {
+            val openSettings = intent?.getBooleanExtra(PlayerActivity.EXTRA_OPEN_SETTINGS_PANEL, false) == true
             binding.stepText.text = "1 Identificando dispositivo"
             SettingsManager(applicationContext).getOrCreateDeviceUuid()
             val deviceId = DeviceIdentityManager(applicationContext).getPersistentId()
@@ -100,6 +101,9 @@ class SplashActivity : ComponentActivity() {
 
             delay(250)
             binding.stepText.text = "3 Carregando"
+            if (openSettings && nextIntent.component?.className == PlayerActivity::class.java.name) {
+                nextIntent.putExtra(PlayerActivity.EXTRA_OPEN_SETTINGS_PANEL, true)
+            }
             startActivity(nextIntent)
             finish()
         }

@@ -20,6 +20,9 @@ data class AppSettings(
     val companyId: String,
     val tenantId: String,
     val deviceUuid: String,
+    val argosApiUrl: String,
+    val argosDeviceToken: String,
+    val autostartPackage: String,
     val kioskMode: Boolean,
     val devMode: Boolean,
     val allowedPackages: Set<String>,
@@ -34,6 +37,9 @@ class SettingsManager(private val context: Context) {
         val companyId = stringPreferencesKey("company_id")
         val tenantId = stringPreferencesKey("tenant_id")
         val deviceUuid = stringPreferencesKey("device_uuid")
+        val argosApiUrl = stringPreferencesKey("argos_api_url")
+        val argosDeviceToken = stringPreferencesKey("argos_device_token")
+        val autostartPackage = stringPreferencesKey("autostart_package")
         val kioskMode = booleanPreferencesKey("kiosk_mode")
         val devMode = booleanPreferencesKey("dev_mode")
         val tcServer = stringPreferencesKey("tc_server")
@@ -62,6 +68,15 @@ class SettingsManager(private val context: Context) {
                         ?: legacyPrefs.getString(LEGACY_KEY_TENANT_ID, "")
                         ?: "",
                     deviceUuid = deviceUuid,
+                    argosApiUrl = prefs[Keys.argosApiUrl]
+                        ?: legacyPrefs.getString(LEGACY_KEY_ARGOS_API_URL, "")
+                        ?: "",
+                    argosDeviceToken = prefs[Keys.argosDeviceToken]
+                        ?: legacyPrefs.getString(LEGACY_KEY_ARGOS_DEVICE_TOKEN, "")
+                        ?: "",
+                    autostartPackage = prefs[Keys.autostartPackage]
+                        ?: legacyPrefs.getString(LEGACY_KEY_AUTOSTART_PACKAGE, "")
+                        ?: "",
                     kioskMode = prefs[Keys.kioskMode]
                         ?: legacyPrefs.getBoolean(LEGACY_KEY_KIOSK_MODE, false),
                     devMode = prefs[Keys.devMode]
@@ -89,6 +104,31 @@ class SettingsManager(private val context: Context) {
 
     suspend fun setEnvironment(value: String) {
         persistString(Keys.environment, LEGACY_KEY_ENVIRONMENT, value.trim())
+    }
+
+    suspend fun setArgosApiUrl(value: String) {
+        val normalized = value.trim().trimEnd('/')
+        persistString(Keys.argosApiUrl, LEGACY_KEY_ARGOS_API_URL, normalized)
+    }
+
+    fun getArgosApiUrlCached(): String {
+        return legacyPrefs.getString(LEGACY_KEY_ARGOS_API_URL, "") ?: ""
+    }
+
+    suspend fun setArgosDeviceToken(value: String) {
+        persistString(Keys.argosDeviceToken, LEGACY_KEY_ARGOS_DEVICE_TOKEN, value.trim())
+    }
+
+    fun getArgosDeviceTokenCached(): String {
+        return legacyPrefs.getString(LEGACY_KEY_ARGOS_DEVICE_TOKEN, "") ?: ""
+    }
+
+    suspend fun setAutostartPackage(value: String) {
+        persistString(Keys.autostartPackage, LEGACY_KEY_AUTOSTART_PACKAGE, value.trim())
+    }
+
+    fun getAutostartPackageCached(): String {
+        return legacyPrefs.getString(LEGACY_KEY_AUTOSTART_PACKAGE, "") ?: ""
     }
 
     suspend fun setCompanyId(value: String) {
@@ -183,6 +223,9 @@ class SettingsManager(private val context: Context) {
         private const val LEGACY_KEY_COMPANY_ID = "company_id"
         private const val LEGACY_KEY_TENANT_ID = "tenant_id"
         private const val LEGACY_KEY_DEVICE_UUID = "device_uuid"
+        private const val LEGACY_KEY_ARGOS_API_URL = "argosApiUrl"
+        private const val LEGACY_KEY_ARGOS_DEVICE_TOKEN = "argosDeviceToken"
+        private const val LEGACY_KEY_AUTOSTART_PACKAGE = "autostartPackage"
         private const val LEGACY_KEY_KIOSK_MODE = "kiosk_mode"
         private const val LEGACY_KEY_DEV_MODE = "dev_mode"
         private const val LEGACY_KEY_TC_SERVER = "tcServer"

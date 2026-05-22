@@ -31,9 +31,7 @@ android {
 
         fun String.escapeForBuildConfig(): String = replace("\\", "\\\\").replace("\"", "\\\"")
 
-        val defaultSupabaseToken =
-            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml1cnFkZGt1aWhqc214dWJpYmFvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MzI2MzUxNzMsImV4cCI6MjA0ODIxMTE3M30.KNNp_wFMSDWOuDlvWs2xuuzC5wj-d3saoc-8zQ4AkN4"
-        val supabaseToken = getConfig("SUPABASE_TOKEN")?.trim().orEmpty().ifBlank { defaultSupabaseToken }
+        val supabaseToken = (getConfig("SUPABASE_TOKEN") ?: "").trim()
 
         buildConfigField(
             "String",
@@ -134,6 +132,8 @@ dependencies {
     implementation("androidx.datastore:datastore-preferences:1.1.1")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+
+    implementation(files("libs/EasyLayerUnificadaVarejo_1_0_3.aar"))
 
     implementation(platform("com.google.firebase:firebase-bom:33.2.0"))
     implementation("com.google.firebase:firebase-database-ktx")

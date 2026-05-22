@@ -52,6 +52,7 @@ import com.google.firebase.FirebaseApp
 import com.google.firebase.database.FirebaseDatabase
 import com.mupa.player.enterprise.bridge.AndroidBridge
 import com.mupa.player.enterprise.databinding.ActivityPlayerBinding
+import com.mupa.player.enterprise.argos.ArgosCommandScheduler
 import com.mupa.player.enterprise.kiosk.KioskManager
 import com.mupa.player.enterprise.kiosk.DeviceOwnerPolicyManager
 import com.mupa.player.enterprise.managers.DeviceIdentityManager
@@ -106,24 +107,19 @@ class PlayerActivity : ComponentActivity() {
     private var firebaseCommandService: FirebaseRealtimeCommandService? = null
     private var deviceIdForCommands: String = ""
     private var safePlayerUrl: String? = null
+    private val wedgeBuffer = StringBuilder()
+    private var wedgeLastCharAt: Long = 0L
 
     private var devTapCount = 0
     private var devTapStartMs = 0L
-    private var backUnlockTapCount = 0
-    private var backUnlockStartMs = 0L
     private var unlockDialogShowing = false
+    private var menuTapCount = 0
+    private var menuTapStartMs = 0L
 
     private var pendingWebPermissionRequest: PermissionRequest? = null
     private var pendingWebPermissionResources: Array<String>? = null
     private var pendingAndroidPermissions: Array<String> = emptyArray()
 
-    private val unlockHandler = Handler(Looper.getMainLooper())
-    private var unlockRunnable: Runnable? = null
-    private var secretTwoFingerDown = false
-    private var secretStartX = 0f
-    private var secretStartY = 0f
-    private var secretRunnable: Runnable? = null
-    private val secretHoldMs = 3000L
     private var navigatedToRegistration = false
     private var noPlaylistActive = false
     private var overlayMode: OverlayMode = OverlayMode.None
@@ -171,6 +167,7 @@ class PlayerActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val extraStartUrl = intent.getStringExtra(EXTRA_START_URL)?.trim().orEmpty()
         val openSettings = intent.getBooleanExtra(EXTRA_OPEN_SETTINGS_PANEL, false)
+        val enableAggressiveKioskOnStart = intent.getBooleanExtra(EXTRA_ENABLE_AGGRESSIVE_KIOSK_ON_START, false)
 
         settingsManager = SettingsManager(applicationContext)
         kioskManager = KioskManager(this, settingsManager)
@@ -193,6 +190,10 @@ class PlayerActivity : ComponentActivity() {
         runCatching { kioskManager.applyNow() }.onFailure {
             AndroidBridge.showToast(this, "Erro ao aplicar kiosk")
         }
+        if (enableAggressiveKioskOnStart) {
+            intent.removeExtra(EXTRA_ENABLE_AGGRESSIVE_KIOSK_ON_START)
+            kioskManager.enableAggressiveKiosk()
+        }
 
         binding.hiddenDevTapArea.setOnClickListener {
             val now = SystemClock.elapsedRealtime()
@@ -213,7 +214,6 @@ class PlayerActivity : ComponentActivity() {
 
         binding.webView.setOnTouchListener { _, event ->
             kioskManager.hideSystemBars()
-            handleSecretTwoFingerGesture(event)
             false
         }
 
@@ -224,7 +224,6 @@ class PlayerActivity : ComponentActivity() {
             }
         }
 
-        setupUnlockFab()
         if (openSettings) {
             binding.webView.post { openSettingsPanel() }
         }
@@ -233,7 +232,6 @@ class PlayerActivity : ComponentActivity() {
             override fun handleOnBackPressed() {
                 if (settingsManager.getMdmLockedCached() || settingsManager.getKioskModeCached()) {
                     kioskManager.hideSystemBars()
-                    if (!unlockDialogShowing) handleBackUnlockTap()
                     return
                 }
                 if (binding.webView.canGoBack()) {
@@ -313,6 +311,10 @@ class PlayerActivity : ComponentActivity() {
 
                 override fun showSystemBars() {
                     kioskManager.showSystemBars()
+                }
+
+                override fun scanBarcode(formatsCsv: String?) {
+                    AndroidBridge.showToast(this@PlayerActivity, "Use o leitor físico (modo teclado).")
                 }
             },
         )
@@ -410,7 +412,10 @@ class PlayerActivity : ComponentActivity() {
             val svc = FirebaseRealtimeCommandService(
                 context = applicationContext,
                 deviceId = effectiveId,
-                onCommand = { cmd -> runOnUiThread { executeCommand(effectiveId, cmd, sendFirebaseAck = true) } },
+                onCommand = {
+                    ArgosCommandScheduler.triggerOnce(applicationContext)
+                    runOnUiThread { viewModel.setLastAck("argos_wakeup ${formatTime(System.currentTimeMillis())}") }
+                },
                 onAck = { ack -> runOnUiThread { viewModel.setLastAck("${ack.comando} ${ack.status} ${formatTime(ack.executado_em)}") } },
             )
             firebaseCommandService = svc
@@ -488,6 +493,33 @@ class PlayerActivity : ComponentActivity() {
     private fun showNoPlaylistOverlay() {
         noPlaylistActive = true
         setOverlayMode(OverlayMode.NoPlaylist)
+    }
+
+    private fun notifyBarcodeScanned(barcodeType: String, data: String) {
+        val detail = JSONObject()
+            .put("type", barcodeType)
+            .put("data", data)
+            .toString()
+
+        val js =
+            """
+            (function(){
+              try {
+                var detail = $detail;
+                window.dispatchEvent(new CustomEvent('android-barcode', { detail: detail }));
+                window.dispatchEvent(new CustomEvent('consultaEAN', { detail: { ean: detail.data } }));
+                if (window.consultarProduto) { window.consultarProduto(detail.data); }
+                var el = document.activeElement;
+                if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {
+                  el.value = detail.data;
+                  el.dispatchEvent(new Event('input', { bubbles: true }));
+                  el.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+              } catch(e) {}
+            })();
+            """.trimIndent()
+
+        binding.webView.evaluateJavascript(js, null)
     }
 
     private fun setOverlayMode(mode: OverlayMode) {
@@ -714,76 +746,6 @@ class PlayerActivity : ComponentActivity() {
         Runtime.getRuntime().exit(0)
     }
 
-    private fun setupUnlockFab() {
-        val target = binding.unlockHotspot
-        target.setOnTouchListener { _, event ->
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    unlockRunnable?.let { unlockHandler.removeCallbacks(it) }
-                    val r = Runnable { showUnlockDialog() }
-                    unlockRunnable = r
-                    unlockHandler.postDelayed(r, 8000)
-                    true
-                }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    unlockRunnable?.let { unlockHandler.removeCallbacks(it) }
-                    unlockRunnable = null
-                    true
-                }
-                else -> false
-            }
-        }
-    }
-
-    private fun handleSecretTwoFingerGesture(event: MotionEvent) {
-        val slop = ViewConfiguration.get(this).scaledTouchSlop.toFloat()
-        when (event.actionMasked) {
-            MotionEvent.ACTION_POINTER_DOWN -> {
-                if (event.pointerCount == 2 && !secretTwoFingerDown) {
-                    secretTwoFingerDown = true
-                    val x0 = event.getX(0)
-                    val y0 = event.getY(0)
-                    val x1 = event.getX(1)
-                    val y1 = event.getY(1)
-                    secretStartX = (x0 + x1) / 2f
-                    secretStartY = (y0 + y1) / 2f
-
-                    secretRunnable?.let { unlockHandler.removeCallbacks(it) }
-                    val r = Runnable {
-                        if (secretTwoFingerDown) {
-                            showUnlockDialog()
-                        }
-                    }
-                    secretRunnable = r
-                    unlockHandler.postDelayed(r, secretHoldMs)
-                }
-            }
-            MotionEvent.ACTION_MOVE -> {
-                if (!secretTwoFingerDown || event.pointerCount < 2) return
-                val x0 = event.getX(0)
-                val y0 = event.getY(0)
-                val x1 = event.getX(1)
-                val y1 = event.getY(1)
-                val cx = (x0 + x1) / 2f
-                val cy = (y0 + y1) / 2f
-                val dx = kotlin.math.abs(cx - secretStartX)
-                val dy = kotlin.math.abs(cy - secretStartY)
-                if (dx > slop || dy > slop) {
-                    cancelSecretGesture()
-                }
-            }
-            MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                cancelSecretGesture()
-            }
-        }
-    }
-
-    private fun cancelSecretGesture() {
-        secretTwoFingerDown = false
-        secretRunnable?.let { unlockHandler.removeCallbacks(it) }
-        secretRunnable = null
-    }
-
     private fun showUnlockDialog() {
         if (unlockDialogShowing) return
         unlockDialogShowing = true
@@ -814,25 +776,57 @@ class PlayerActivity : ComponentActivity() {
             }
     }
 
-    private fun handleBackUnlockTap() {
-        val now = SystemClock.elapsedRealtime()
-        if (now - backUnlockStartMs > BACK_UNLOCK_WINDOW_MS) {
-            backUnlockStartMs = now
-            backUnlockTapCount = 0
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.actionMasked == MotionEvent.ACTION_DOWN) {
+            handleMenuTap()
         }
-        backUnlockTapCount += 1
-        if (backUnlockTapCount >= 5) {
-            backUnlockTapCount = 0
-            backUnlockStartMs = 0L
+        return super.dispatchTouchEvent(ev)
+    }
+
+    private fun handleMenuTap() {
+        if (unlockDialogShowing) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - menuTapStartMs > MENU_TAP_WINDOW_MS) {
+            menuTapStartMs = now
+            menuTapCount = 0
+        }
+        menuTapCount += 1
+        if (menuTapCount >= MENU_TAP_COUNT) {
+            menuTapCount = 0
+            menuTapStartMs = 0L
             showUnlockDialog()
         }
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action == KeyEvent.ACTION_DOWN) {
+            val focused = currentFocus
+            val allowWedge = focused !is EditText && !unlockDialogShowing
+            if (allowWedge) {
+                val now = SystemClock.elapsedRealtime()
+                if (event.keyCode == KeyEvent.KEYCODE_ENTER) {
+                    val text = wedgeBuffer.toString().trim()
+                    if (text.isNotBlank()) {
+                        wedgeBuffer.setLength(0)
+                        wedgeLastCharAt = 0L
+                        notifyBarcodeScanned("wedge", text)
+                        return true
+                    }
+                } else {
+                    val ch = event.unicodeChar
+                    if (ch > 0) {
+                        if (now - wedgeLastCharAt > 350) {
+                            wedgeBuffer.setLength(0)
+                        }
+                        wedgeLastCharAt = now
+                        wedgeBuffer.append(ch.toChar())
+                    }
+                }
+            }
+        }
         if (event.keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) {
             if (settingsManager.getMdmLockedCached() || settingsManager.getKioskModeCached()) {
                 kioskManager.hideSystemBars()
-                if (!unlockDialogShowing) handleBackUnlockTap()
                 return true
             }
         }
@@ -863,12 +857,12 @@ class PlayerActivity : ComponentActivity() {
         }
 
         val unlockBtn = MaterialButton(this).apply {
-            text = "Desbloquear"
+            text = "Sair do lock-task"
             isAllCaps = false
         }
         unlockBtn.setOnClickListener {
             kioskManager.disableKiosk()
-            AndroidBridge.showToast(this, "Desbloqueado")
+            AndroidBridge.showToast(this, "Saiu do lock-task")
         }
 
         val lockBtn = MaterialButton(this).apply {
@@ -941,6 +935,48 @@ class PlayerActivity : ComponentActivity() {
             }
         }
 
+        val argosBtn = MaterialButton(this).apply {
+            text = "Argos API"
+            isAllCaps = false
+        }
+        argosBtn.setOnClickListener {
+            if (settingsManager.getMdmLockedCached() || settingsManager.getKioskModeCached()) {
+                AndroidBridge.showToast(this, "Desbloqueie para ajustar")
+                return@setOnClickListener
+            }
+            val urlInput = EditText(this).apply {
+                hint = "https://argos.seudominio.com"
+                inputType = InputType.TYPE_CLASS_TEXT
+                setText(settingsManager.getArgosApiUrlCached())
+                isSingleLine = true
+            }
+            val tokenInput = EditText(this).apply {
+                hint = "Token do dispositivo (opcional)"
+                inputType = InputType.TYPE_CLASS_TEXT
+                setText(settingsManager.getArgosDeviceTokenCached())
+                isSingleLine = true
+            }
+            val box = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(48, 24, 48, 0)
+                addView(urlInput)
+                addView(tokenInput)
+            }
+            MaterialAlertDialogBuilder(this)
+                .setTitle("Argos API")
+                .setView(box)
+                .setPositiveButton("Salvar") { d, _ ->
+                    lifecycleScope.launch {
+                        settingsManager.setArgosApiUrl(urlInput.text?.toString().orEmpty())
+                        settingsManager.setArgosDeviceToken(tokenInput.text?.toString().orEmpty())
+                        ArgosCommandScheduler.triggerOnce(applicationContext)
+                    }
+                    d.dismiss()
+                }
+                .setNegativeButton("Cancelar") { d, _ -> d.dismiss() }
+                .show()
+        }
+
         val commandPanelBtn = MaterialButton(this).apply {
             text = "Painel"
             isAllCaps = false
@@ -974,6 +1010,7 @@ class PlayerActivity : ComponentActivity() {
         buttonsRow2.addView(allowedAppsBtn)
         buttonsRow3.addView(overlayBtn)
         buttonsRow3.addView(batteryBtn)
+        buttonsRow3.addView(argosBtn)
 
         container.addView(info)
         container.addView(buttonsRow1)
@@ -1259,6 +1296,10 @@ class PlayerActivity : ComponentActivity() {
                     binding.webView.evaluateJavascript(js, null)
                 }
 
+                "scan_barcode", "scan_code" -> {
+                    AndroidBridge.showToast(this, "Use o leitor físico (modo teclado).")
+                }
+
                 "reset_app" -> {
                     binding.webView.reload()
                 }
@@ -1419,7 +1460,10 @@ class PlayerActivity : ComponentActivity() {
     companion object {
         const val EXTRA_START_URL = "extra_start_url"
         const val EXTRA_OPEN_SETTINGS_PANEL = "extra_open_settings_panel"
+        const val EXTRA_ENABLE_AGGRESSIVE_KIOSK_ON_START = "extra_enable_aggressive_kiosk_on_start"
         const val UNLOCK_PASSWORD = "040816050223"
+        private const val MENU_TAP_COUNT = 8
+        private const val MENU_TAP_WINDOW_MS = 6000L
         private const val BACK_UNLOCK_WINDOW_MS = 6000L
     }
 }

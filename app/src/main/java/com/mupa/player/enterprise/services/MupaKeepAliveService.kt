@@ -12,6 +12,7 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.mupa.player.enterprise.R
+import com.mupa.player.enterprise.argos.ArgosCommandScheduler
 import com.mupa.player.enterprise.managers.SettingsManager
 import com.mupa.player.enterprise.ui.LauncherActivity
 import com.mupa.player.enterprise.ui.PlayerActivity
@@ -27,20 +28,35 @@ class MupaKeepAliveService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIFICATION_ID, buildNotification())
         startService(Intent(this, MupaLocalApiService::class.java))
+        ArgosCommandScheduler.ensurePeriodic(applicationContext)
         return START_STICKY
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         val settings = SettingsManager(applicationContext)
-        val target = if (settings.getKioskModeCached() || settings.getMdmLockedCached()) {
-            LauncherActivity::class.java
+        val locked = settings.getKioskModeCached() || settings.getMdmLockedCached()
+        val autostart = settings.getAutostartPackageCached().trim()
+        if (locked) {
+            val startIntent = Intent(this, LauncherActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            }
+            runCatching { startActivity(startIntent) }
+        } else if (autostart.isNotBlank()) {
+            val intent = packageManager.getLaunchIntentForPackage(autostart)
+            if (intent != null) {
+                runCatching { startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)) }
+            } else {
+                val startIntent = Intent(this, PlayerActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                }
+                runCatching { startActivity(startIntent) }
+            }
         } else {
-            PlayerActivity::class.java
+            val startIntent = Intent(this, PlayerActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            }
+            runCatching { startActivity(startIntent) }
         }
-        val startIntent = Intent(this, target).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-        }
-        runCatching { startActivity(startIntent) }
         super.onTaskRemoved(rootIntent)
     }
 

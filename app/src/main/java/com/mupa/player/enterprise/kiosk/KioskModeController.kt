@@ -1,6 +1,7 @@
 package com.mupa.player.enterprise.kiosk
 
 import androidx.activity.ComponentActivity
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -51,8 +52,10 @@ class KioskModeController(
         if (watchdog?.isActive == true) return
         watchdog = activity.lifecycleScope.launch {
             while (isActive) {
-                hideSystemBars()
-                delay(900)
+                val insets = ViewCompat.getRootWindowInsets(activity.window.decorView)
+                val visible = insets?.isVisible(WindowInsetsCompat.Type.systemBars()) ?: true
+                if (visible) hideSystemBars()
+                delay(2500)
             }
         }
     }

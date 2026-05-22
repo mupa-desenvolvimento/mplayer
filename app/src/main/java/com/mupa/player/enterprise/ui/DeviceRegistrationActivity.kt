@@ -19,9 +19,11 @@ import androidx.activity.viewModels
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.button.MaterialButton
 import com.mupa.player.enterprise.databinding.ActivityDeviceRegistrationBinding
 import com.mupa.player.enterprise.managers.DeviceIdentityManager
+import com.mupa.player.enterprise.managers.SettingsManager
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -40,6 +42,7 @@ class DeviceRegistrationActivity : ComponentActivity() {
 
     private var lastOverlayState: Boolean = false
     private var activeEdit: EditText? = null
+    private var handledSuccess: Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -96,9 +99,10 @@ class DeviceRegistrationActivity : ComponentActivity() {
                         binding.statusText.text = state.status
                         binding.registerButton.isEnabled = !state.isLoading
 
-                        if (!state.isLoading && state.status == "OK") {
+                        if (!state.isLoading && state.status == "OK" && !handledSuccess) {
+                            handledSuccess = true
                             lifecycleScope.launch {
-                                openPlayerAndFinish(state.deviceId.trim())
+                                promptLockAfterRegistrationAndProceed(state.deviceId.trim())
                             }
                         }
                     }
@@ -121,10 +125,34 @@ class DeviceRegistrationActivity : ComponentActivity() {
         applyAlwaysOnScreen()
     }
 
-    private fun openPlayerAndFinish(serial: String) {
+    private suspend fun promptLockAfterRegistrationAndProceed(serial: String) {
+        val settingsManager = SettingsManager(applicationContext)
+        val alreadyLocked = settingsManager.getMdmLockedCached() || settingsManager.getKioskModeCached()
+        if (alreadyLocked) {
+            openPlayerAndFinish(serial, lockNow = false)
+            return
+        }
+
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Bloquear dispositivo?")
+            .setMessage("Deseja bloquear agora? Isso vai esconder as barras e fixar o app.")
+            .setPositiveButton("Bloquear") { dialog, _ ->
+                dialog.dismiss()
+                openPlayerAndFinish(serial, lockNow = true)
+            }
+            .setNegativeButton("Agora não") { dialog, _ ->
+                dialog.dismiss()
+                openPlayerAndFinish(serial, lockNow = false)
+            }
+            .setCancelable(false)
+            .show()
+    }
+
+    private fun openPlayerAndFinish(serial: String, lockNow: Boolean) {
         val url = "https://midias.mupa.app/player-consulta/${serial.trim()}"
         val intent = Intent(this, PlayerActivity::class.java)
             .putExtra(PlayerActivity.EXTRA_START_URL, url)
+            .putExtra(PlayerActivity.EXTRA_ENABLE_AGGRESSIVE_KIOSK_ON_START, lockNow)
             .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK)
         startActivity(intent)
         finish()

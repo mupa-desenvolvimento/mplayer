@@ -37,7 +37,6 @@ import com.mupa.player.enterprise.managers.DeviceIdentityManager
 import com.mupa.player.enterprise.managers.SettingsManager
 import com.mupa.player.enterprise.services.FirebaseRealtimePolicyService
 import kotlinx.coroutines.launch
-import kotlin.math.abs
 
 class LauncherActivity : ComponentActivity() {
     override fun attachBaseContext(newBase: Context) {
@@ -52,15 +51,9 @@ class LauncherActivity : ComponentActivity() {
     private lateinit var settingsManager: SettingsManager
     private lateinit var kioskManager: KioskManager
     private var policyReceiver: BroadcastReceiver? = null
-    private var backUnlockTapCount = 0
-    private var backUnlockStartMs = 0L
     private var unlockDialogShowing = false
-
-    private val uiHandler = Handler(Looper.getMainLooper())
-    private var secretTwoFingerDown = false
-    private var secretStartX = 0f
-    private var secretStartY = 0f
-    private var secretRunnable: Runnable? = null
+    private var menuTapCount = 0
+    private var menuTapStartMs = 0L
 
     private var listMode = false
     private val adapter = AppsAdapter { item -> openItem(item) }
@@ -91,16 +84,10 @@ class LauncherActivity : ComponentActivity() {
             }
         })
 
-        binding.appsRecycler.setOnTouchListener { _, event ->
-            handleSecretTwoFingerGesture(event)
-            false
-        }
-
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 if (settingsManager.getMdmLockedCached() || settingsManager.getKioskModeCached()) {
                     kioskManager.hideSystemBars()
-                    if (!unlockDialogShowing) handleBackUnlockTap()
                     return
                 }
                 finish()
@@ -158,6 +145,28 @@ class LauncherActivity : ComponentActivity() {
             policyReceiver = null
         }
         super.onStop()
+    }
+
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.actionMasked == MotionEvent.ACTION_DOWN) {
+            handleMenuTap()
+        }
+        return super.dispatchTouchEvent(ev)
+    }
+
+    private fun handleMenuTap() {
+        if (unlockDialogShowing) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - menuTapStartMs > MENU_TAP_WINDOW_MS) {
+            menuTapStartMs = now
+            menuTapCount = 0
+        }
+        menuTapCount += 1
+        if (menuTapCount >= MENU_TAP_COUNT) {
+            menuTapCount = 0
+            menuTapStartMs = 0L
+            showUnlockDialog()
+        }
     }
 
     private fun applyLayoutMode() {
@@ -256,53 +265,6 @@ class LauncherActivity : ComponentActivity() {
         }
     }
 
-    private fun handleSecretTwoFingerGesture(event: MotionEvent) {
-        val slop = ViewConfiguration.get(this).scaledTouchSlop.toFloat()
-        when (event.actionMasked) {
-            MotionEvent.ACTION_POINTER_DOWN -> {
-                if (event.pointerCount == 2 && !secretTwoFingerDown) {
-                    secretTwoFingerDown = true
-                    val x0 = event.getX(0)
-                    val y0 = event.getY(0)
-                    val x1 = event.getX(1)
-                    val y1 = event.getY(1)
-                    secretStartX = (x0 + x1) / 2f
-                    secretStartY = (y0 + y1) / 2f
-
-                    secretRunnable?.let { uiHandler.removeCallbacks(it) }
-                    val r = Runnable {
-                        if (secretTwoFingerDown) {
-                            showUnlockDialog()
-                        }
-                    }
-                    secretRunnable = r
-                    uiHandler.postDelayed(r, SECRET_HOLD_MS)
-                }
-            }
-            MotionEvent.ACTION_MOVE -> {
-                if (!secretTwoFingerDown || event.pointerCount < 2) return
-                val x0 = event.getX(0)
-                val y0 = event.getY(0)
-                val x1 = event.getX(1)
-                val y1 = event.getY(1)
-                val cx = (x0 + x1) / 2f
-                val cy = (y0 + y1) / 2f
-                val dx = abs(cx - secretStartX)
-                val dy = abs(cy - secretStartY)
-                if (dx > slop || dy > slop) {
-                    cancelSecretGesture()
-                }
-            }
-            MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> cancelSecretGesture()
-        }
-    }
-
-    private fun cancelSecretGesture() {
-        secretTwoFingerDown = false
-        secretRunnable?.let { uiHandler.removeCallbacks(it) }
-        secretRunnable = null
-    }
-
     private fun showUnlockDialog() {
         if (unlockDialogShowing) return
         unlockDialogShowing = true
@@ -333,29 +295,19 @@ class LauncherActivity : ComponentActivity() {
             }
     }
 
-    private fun handleBackUnlockTap() {
-        val now = SystemClock.elapsedRealtime()
-        if (now - backUnlockStartMs > BACK_UNLOCK_WINDOW_MS) {
-            backUnlockStartMs = now
-            backUnlockTapCount = 0
-        }
-        backUnlockTapCount += 1
-        if (backUnlockTapCount >= 5) {
-            backUnlockTapCount = 0
-            backUnlockStartMs = 0L
-            showUnlockDialog()
-        }
-    }
-
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) {
             if (settingsManager.getMdmLockedCached() || settingsManager.getKioskModeCached()) {
                 kioskManager.hideSystemBars()
-                if (!unlockDialogShowing) handleBackUnlockTap()
                 return true
             }
         }
         return super.dispatchKeyEvent(event)
+    }
+
+    companion object {
+        private const val MENU_TAP_COUNT = 8
+        private const val MENU_TAP_WINDOW_MS = 6000L
     }
 
     private data class LauncherItem(
@@ -420,8 +372,4 @@ class LauncherActivity : ComponentActivity() {
         }
     }
 
-    companion object {
-        private const val SECRET_HOLD_MS = 3000L
-        private const val BACK_UNLOCK_WINDOW_MS = 6000L
-    }
 }

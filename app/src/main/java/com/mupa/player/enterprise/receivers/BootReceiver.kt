@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Handler
 import android.os.Looper
+import com.mupa.player.enterprise.argos.ArgosCommandScheduler
 import com.mupa.player.enterprise.kiosk.DeviceOwnerPolicyManager
 import com.mupa.player.enterprise.managers.SettingsManager
 import com.mupa.player.enterprise.services.MupaKeepAliveService
@@ -15,8 +16,8 @@ class BootReceiver : BroadcastReceiver() {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
 
         MupaKeepAliveService.start(context)
-
         val appContext = context.applicationContext
+        ArgosCommandScheduler.ensurePeriodic(appContext)
         val pending = goAsync()
         Handler(Looper.getMainLooper()).postDelayed({
             val settings = SettingsManager(appContext)
