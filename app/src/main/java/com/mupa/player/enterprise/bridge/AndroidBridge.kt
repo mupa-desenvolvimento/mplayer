@@ -2,18 +2,30 @@ package com.mupa.player.enterprise.bridge
 
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.BatteryManager
 import android.provider.Settings
 import android.webkit.JavascriptInterface
 import android.widget.Toast
+import androidx.palette.graphics.Palette
 import com.mupa.player.enterprise.managers.SettingsManager
 import com.mupa.player.enterprise.utils.NetworkInfoProvider
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.io.ByteArrayInputStream
+import java.io.InputStream
+import java.net.HttpURLConnection
+import java.net.URL
 
 class AndroidBridge(
     private val context: Context,
     private val settingsManager: SettingsManager,
     private val commands: Commands,
+    private val evaluateJs: (String) -> Unit,
 ) {
     interface Commands {
         fun onCommandReceived(commandJson: String)
@@ -133,6 +145,62 @@ class AndroidBridge(
     @JavascriptInterface
     fun showToast(message: String) {
         showToast(context, message)
+    }
+
+    @JavascriptInterface
+    fun extractImageColors(imageUrlOrBase64: String, callbackId: String) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val bitmap = loadBitmap(imageUrlOrBase64)
+                val palette = Palette.from(bitmap).generate()
+                
+                val colors = JSONObject()
+                colors.put("dominant", colorToHex(palette.dominantSwatch?.rgb))
+                colors.put("vibrant", colorToHex(palette.vibrantSwatch?.rgb))
+                colors.put("lightVibrant", colorToHex(palette.lightVibrantSwatch?.rgb))
+                colors.put("darkVibrant", colorToHex(palette.darkVibrantSwatch?.rgb))
+                colors.put("muted", colorToHex(palette.mutedSwatch?.rgb))
+                colors.put("lightMuted", colorToHex(palette.lightMutedSwatch?.rgb))
+                colors.put("darkMuted", colorToHex(palette.darkMutedSwatch?.rgb))
+                
+                val result = JSONObject()
+                result.put("success", true)
+                result.put("colors", colors)
+                result.put("callbackId", callbackId)
+                
+                withContext(Dispatchers.Main) {
+                    evaluateJs("window.onImageColorsExtracted && window.onImageColorsExtracted(${result.toString()})")
+                }
+            } catch (e: Exception) {
+                val error = JSONObject()
+                error.put("success", false)
+                error.put("error", e.message)
+                error.put("callbackId", callbackId)
+                
+                withContext(Dispatchers.Main) {
+                    evaluateJs("window.onImageColorsExtracted && window.onImageColorsExtracted(${error.toString()})")
+                }
+            }
+        }
+    }
+
+    private fun loadBitmap(source: String): Bitmap {
+        return if (source.startsWith("data:image")) {
+            val base64Data = source.substringAfter("base64,")
+            val decodedBytes = android.util.Base64.decode(base64Data, android.util.Base64.DEFAULT)
+            BitmapFactory.decodeByteArray(decodedBytes, 0, decodedBytes.size)
+        } else {
+            val url = URL(source)
+            val connection = url.openConnection() as HttpURLConnection
+            connection.doInput = true
+            connection.connect()
+            val input: InputStream = connection.inputStream
+            BitmapFactory.decodeStream(input)
+        }
+    }
+
+    private fun colorToHex(color: Int?): String? {
+        return color?.let { String.format("#%06X", 0xFFFFFF and it) }
     }
 
     companion object {

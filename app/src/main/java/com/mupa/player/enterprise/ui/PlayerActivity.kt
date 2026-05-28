@@ -317,6 +317,7 @@ class PlayerActivity : ComponentActivity() {
                     AndroidBridge.showToast(this@PlayerActivity, "Use o leitor físico (modo teclado).")
                 }
             },
+            evaluateJs = { js -> binding.webView.post { binding.webView.evaluateJavascript(js, null) } },
         )
         binding.webView.addJavascriptInterface(bridge, "Android")
 
