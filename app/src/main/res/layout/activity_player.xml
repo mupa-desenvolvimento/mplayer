@@ -5,133 +5,521 @@
     android:layout_height="match_parent"
     android:background="@color/enterprise_bg">
 
-    <WebView
-        android:id="@+id/webView"
+    <FrameLayout
+        android:id="@+id/playerContainer"
         android:layout_width="match_parent"
-        android:layout_height="match_parent" />
+        android:layout_height="match_parent">
 
-    <ImageView
-        android:id="@+id/hiddenDevTapArea"
-        android:layout_width="56dp"
-        android:layout_height="56dp"
-        android:layout_gravity="top|start"
-        android:alpha="0.01"
-        android:clickable="true"
-        android:focusable="true"
-        android:src="@drawable/ic_mupa_logo" />
+        <FrameLayout
+            android:id="@+id/layerA"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent">
 
-    <com.google.android.material.floatingactionbutton.FloatingActionButton
-        android:id="@+id/unlockFab"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="top|end"
-        android:layout_margin="12dp"
+            <androidx.media3.ui.PlayerView
+                android:id="@+id/playerViewA"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                app:resize_mode="zoom"
+                app:surface_type="texture_view"
+                app:use_controller="false" />
+
+            <ImageView
+                android:id="@+id/imageViewA"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:scaleType="centerCrop" />
+        </FrameLayout>
+
+        <FrameLayout
+            android:id="@+id/layerB"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:alpha="0">
+
+            <androidx.media3.ui.PlayerView
+                android:id="@+id/playerViewB"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                app:resize_mode="zoom"
+                app:surface_type="texture_view"
+                app:use_controller="false" />
+
+            <ImageView
+                android:id="@+id/imageViewB"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:scaleType="centerCrop" />
+        </FrameLayout>
+    </FrameLayout>
+
+    <EditText
+        android:id="@+id/hiddenBarcodeInput"
+        android:layout_width="1dp"
+        android:layout_height="1dp"
         android:alpha="0"
-        android:clickable="true"
         android:focusable="true"
-        android:src="@drawable/ic_mupa_logo"
-        app:backgroundTint="@color/enterprise_surface"
-        app:fabSize="mini"
-        app:tint="@color/mupa_cyan" />
+        android:focusableInTouchMode="true"
+        android:focusedByDefault="true"
+        android:imeOptions="actionDone"
+        android:importantForAutofill="no"
+        android:inputType="textNoSuggestions"
+        android:longClickable="false"
+        android:maxLines="1"
+        android:singleLine="true" />
 
-    <ImageView
-        android:id="@+id/unlockHotspot"
-        android:layout_width="140dp"
-        android:layout_height="140dp"
-        android:layout_gravity="top|end"
-        android:alpha="0.01"
-        android:clickable="true"
-        android:focusable="true"
-        android:src="@drawable/ic_mupa_logo" />
-
-    <androidx.constraintlayout.widget.ConstraintLayout
-        android:id="@+id/offlineOverlay"
+    <FrameLayout
+        android:id="@+id/priceOverlay"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:alpha="0"
+        android:visibility="gone">
+
+        <androidx.constraintlayout.widget.ConstraintLayout
+            android:id="@+id/priceOverlayRoot"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent">
+
+            <FrameLayout
+                android:id="@+id/priceLoadingContainer"
+                android:layout_width="0dp"
+                android:layout_height="0dp"
+                android:background="#AA000000"
+                android:visibility="gone"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toTopOf="parent">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:gravity="center"
+                    android:orientation="vertical"
+                    android:padding="28dp">
+
+                    <com.google.android.material.textview.MaterialTextView
+                        android:id="@+id/priceLoadingTitle"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:includeFontPadding="false"
+                        android:text="🔎 Aguarde um instante"
+                        android:textColor="#FFFFFF"
+                        android:textSize="22sp"
+                        android:textStyle="bold" />
+
+                    <com.google.android.material.textview.MaterialTextView
+                        android:id="@+id/priceLoadingSubtitle"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="10dp"
+                        android:includeFontPadding="false"
+                        android:text="Estamos buscando o melhor preço para você..."
+                        android:textColor="#E6FFFFFF"
+                        android:textSize="14sp" />
+
+                    <com.google.android.material.progressindicator.CircularProgressIndicator
+                        android:id="@+id/priceLoadingSpinner"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="18dp"
+                        app:indicatorColor="@color/mupa_cyan" />
+                </LinearLayout>
+            </FrameLayout>
+
+            <androidx.constraintlayout.widget.ConstraintLayout
+                android:id="@+id/priceResultRoot"
+                android:layout_width="0dp"
+                android:layout_height="0dp"
+                android:visibility="gone"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toTopOf="parent">
+
+                <androidx.constraintlayout.widget.Guideline
+                    android:id="@+id/priceImageSplitGuide"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    app:layout_constraintGuide_percent="0.45" />
+
+                <androidx.constraintlayout.widget.Guideline
+                    android:id="@+id/priceLandscapeSplitGuide"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    app:layout_constraintGuide_percent="0.50" />
+
+                <androidx.constraintlayout.widget.ConstraintLayout
+                    android:id="@+id/priceLeftPanel"
+                    android:layout_width="0dp"
+                    android:layout_height="0dp"
+                    android:padding="22dp"
+                    app:layout_constraintBottom_toBottomOf="parent"
+                    app:layout_constraintEnd_toStartOf="@id/priceLandscapeSplitGuide"
+                    app:layout_constraintStart_toStartOf="parent"
+                    app:layout_constraintTop_toTopOf="parent">
+
+                    <FrameLayout
+                        android:id="@+id/priceNameBar"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:padding="18dp"
+                        app:layout_constraintEnd_toEndOf="parent"
+                        app:layout_constraintStart_toStartOf="parent"
+                        app:layout_constraintTop_toTopOf="parent">
+
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="vertical">
+
+                            <com.google.android.material.textview.MaterialTextView
+                                android:id="@+id/priceNameText"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:includeFontPadding="false"
+                                android:maxLines="2"
+                                android:text="PRODUTO"
+                                android:textAllCaps="false"
+                                android:textColor="#FFFFFF"
+                                android:textSize="34sp"
+                                android:textStyle="bold" />
+
+                            <com.google.android.material.textview.MaterialTextView
+                                android:id="@+id/priceSubtitleText"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="6dp"
+                                android:includeFontPadding="false"
+                                android:text="SUBTITULO"
+                                android:textColor="#E6FFFFFF"
+                                android:textSize="16sp"
+                                android:visibility="gone" />
+                        </LinearLayout>
+                    </FrameLayout>
+
+                    <LinearLayout
+                        android:id="@+id/priceBadgesRow"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="14dp"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal"
+                        app:layout_constraintEnd_toEndOf="parent"
+                        app:layout_constraintStart_toStartOf="parent"
+                        app:layout_constraintTop_toBottomOf="@id/priceNameBar">
+
+                        <com.google.android.material.textview.MaterialTextView
+                            android:id="@+id/priceLeftBadgeText"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:paddingLeft="14dp"
+                            android:paddingRight="14dp"
+                            android:paddingTop="8dp"
+                            android:paddingBottom="8dp"
+                            android:text="LEVE 3"
+                            android:textAllCaps="true"
+                            android:textColor="#FFFFFF"
+                            android:textSize="12sp"
+                            android:textStyle="bold"
+                            android:visibility="gone" />
+
+                        <com.google.android.material.textview.MaterialTextView
+                            android:id="@+id/priceRightBadgeText"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="10dp"
+                            android:paddingLeft="14dp"
+                            android:paddingRight="14dp"
+                            android:paddingTop="8dp"
+                            android:paddingBottom="8dp"
+                            android:text="PAGUE 2"
+                            android:textAllCaps="true"
+                            android:textColor="#FFFFFF"
+                            android:textSize="12sp"
+                            android:textStyle="bold"
+                            android:visibility="gone" />
+
+                        <com.google.android.material.textview.MaterialTextView
+                            android:id="@+id/priceOfflineBadge"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="10dp"
+                            android:paddingLeft="12dp"
+                            android:paddingRight="12dp"
+                            android:paddingTop="8dp"
+                            android:paddingBottom="8dp"
+                            android:text="OFFLINE"
+                            android:textAllCaps="true"
+                            android:textColor="#FFFFFF"
+                            android:textSize="12sp"
+                            android:textStyle="bold"
+                            android:visibility="gone" />
+                    </LinearLayout>
+
+                    <FrameLayout
+                        android:id="@+id/priceMainContainer"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="18dp"
+                        android:paddingLeft="20dp"
+                        android:paddingRight="20dp"
+                        android:paddingTop="16dp"
+                        android:paddingBottom="16dp"
+                        app:layout_constraintEnd_toEndOf="parent"
+                        app:layout_constraintStart_toStartOf="parent"
+                        app:layout_constraintTop_toBottomOf="@id/priceBadgesRow">
+
+                        <androidx.constraintlayout.widget.ConstraintLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content">
+
+                            <com.google.android.material.textview.MaterialTextView
+                                android:id="@+id/priceCurrencyText"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:fontFamily="sans-serif-condensed"
+                                android:includeFontPadding="false"
+                                android:text="R$"
+                                android:textColor="#FFFFFF"
+                                android:textSize="26sp"
+                                android:textStyle="bold"
+                                app:layout_constraintBaseline_toBaselineOf="@id/priceIntegerText"
+                                app:layout_constraintStart_toStartOf="parent" />
+
+                            <com.google.android.material.textview.MaterialTextView
+                                android:id="@+id/priceIntegerText"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:layout_marginStart="10dp"
+                                android:fontFamily="sans-serif-condensed"
+                                android:includeFontPadding="false"
+                                android:text="0"
+                                android:textColor="#FFFFFF"
+                                android:textSize="86sp"
+                                android:textStyle="bold"
+                                app:layout_constraintStart_toEndOf="@id/priceCurrencyText"
+                                app:layout_constraintTop_toTopOf="parent" />
+
+                            <com.google.android.material.textview.MaterialTextView
+                                android:id="@+id/priceDecimalText"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:layout_marginStart="6dp"
+                                android:fontFamily="sans-serif-condensed"
+                                android:includeFontPadding="false"
+                                android:text=",00"
+                                android:textColor="#FFFFFF"
+                                android:textSize="40sp"
+                                android:textStyle="bold"
+                                app:layout_constraintBaseline_toBaselineOf="@id/priceIntegerText"
+                                app:layout_constraintStart_toEndOf="@id/priceIntegerText" />
+                        </androidx.constraintlayout.widget.ConstraintLayout>
+                    </FrameLayout>
+
+                    <LinearLayout
+                        android:id="@+id/priceOfferContainer"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="16dp"
+                        android:orientation="vertical"
+                        android:padding="16dp"
+                        android:visibility="gone"
+                        app:layout_constraintEnd_toEndOf="parent"
+                        app:layout_constraintStart_toStartOf="parent"
+                        app:layout_constraintTop_toBottomOf="@id/priceMainContainer">
+
+                        <com.google.android.material.textview.MaterialTextView
+                            android:id="@+id/priceOfferText"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:includeFontPadding="false"
+                            android:text="Oferta"
+                            android:textColor="#FFFFFF"
+                            android:textSize="14sp" />
+                    </LinearLayout>
+
+                    <LinearLayout
+                        android:id="@+id/priceSecondUnitContainer"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="16dp"
+                        android:orientation="vertical"
+                        android:padding="16dp"
+                        android:visibility="gone"
+                        app:layout_constraintEnd_toEndOf="parent"
+                        app:layout_constraintStart_toStartOf="parent"
+                        app:layout_constraintTop_toBottomOf="@id/priceOfferContainer">
+
+                        <com.google.android.material.textview.MaterialTextView
+                            android:id="@+id/priceSecondUnitLabel"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:includeFontPadding="false"
+                            android:text="Cada unidade sai por:"
+                            android:textColor="#E6FFFFFF"
+                            android:textSize="14sp"
+                            android:textStyle="bold" />
+
+                        <com.google.android.material.textview.MaterialTextView
+                            android:id="@+id/priceSecondUnitValue"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="10dp"
+                            android:includeFontPadding="false"
+                            android:paddingLeft="14dp"
+                            android:paddingRight="14dp"
+                            android:paddingTop="10dp"
+                            android:paddingBottom="10dp"
+                            android:text="R$ 0,00"
+                            android:textColor="#FFFFFF"
+                            android:textSize="18sp"
+                            android:textStyle="bold" />
+                    </LinearLayout>
+
+                    <LinearLayout
+                        android:id="@+id/pricePacksContainer"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="16dp"
+                        android:orientation="vertical"
+                        android:visibility="gone"
+                        app:layout_constraintEnd_toEndOf="parent"
+                        app:layout_constraintStart_toStartOf="parent"
+                        app:layout_constraintTop_toBottomOf="@id/priceSecondUnitContainer" />
+
+                    <com.google.android.material.textview.MaterialTextView
+                        android:id="@+id/priceCodeText"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="18dp"
+                        android:includeFontPadding="false"
+                        android:text="Código:"
+                        android:textColor="#E6FFFFFF"
+                        android:textSize="12sp"
+                        app:layout_constraintBottom_toBottomOf="parent"
+                        app:layout_constraintEnd_toEndOf="parent"
+                        app:layout_constraintStart_toStartOf="parent"
+                        app:layout_constraintTop_toBottomOf="@id/pricePacksContainer" />
+                </androidx.constraintlayout.widget.ConstraintLayout>
+
+                <FrameLayout
+                    android:id="@+id/priceRightPanel"
+                    android:layout_width="0dp"
+                    android:layout_height="0dp"
+                    android:background="#FFFFFF"
+                    android:padding="24dp"
+                    app:layout_constraintBottom_toBottomOf="parent"
+                    app:layout_constraintEnd_toEndOf="parent"
+                    app:layout_constraintStart_toStartOf="@id/priceLandscapeSplitGuide"
+                    app:layout_constraintTop_toTopOf="parent">
+
+                    <ImageView
+                        android:id="@+id/priceProductImage"
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent"
+                        android:adjustViewBounds="true"
+                        android:scaleType="fitCenter"
+                        android:src="@drawable/ic_mplayer" />
+                </FrameLayout>
+
+            </androidx.constraintlayout.widget.ConstraintLayout>
+
+        </androidx.constraintlayout.widget.ConstraintLayout>
+
+    </FrameLayout>
+
+    <androidx.constraintlayout.widget.ConstraintLayout
+        android:id="@+id/syncOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
         android:background="@color/enterprise_bg"
         android:visibility="gone">
 
-        <com.google.android.material.card.MaterialCardView
-            android:id="@+id/offlineCard"
+        <LinearLayout
+            android:id="@+id/syncContent"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_margin="24dp"
-            app:cardBackgroundColor="@color/enterprise_surface"
-            app:cardCornerRadius="20dp"
-            app:cardElevation="0dp"
-            app:strokeColor="@color/mupa_cyan"
-            app:strokeWidth="1dp"
+            android:gravity="center_horizontal"
+            android:orientation="vertical"
+            android:padding="28dp"
             app:layout_constraintBottom_toBottomOf="parent"
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toTopOf="parent"
-            app:layout_constraintWidth_max="520dp">
+            app:layout_constraintWidth_max="720dp">
 
-            <androidx.constraintlayout.widget.ConstraintLayout
-                android:layout_width="match_parent"
+            <ImageView
+                android:id="@+id/syncLogo"
+                android:layout_width="92dp"
+                android:layout_height="92dp"
+                android:src="@drawable/ic_mplayer" />
+
+            <com.google.android.material.textview.MaterialTextView
+                android:id="@+id/syncStatusText"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:padding="24dp">
+                android:layout_marginTop="18dp"
+                android:includeFontPadding="false"
+                android:text="Sincronizando conteúdos..."
+                android:textColor="@color/enterprise_on"
+                android:textSize="20sp"
+                android:textStyle="bold" />
 
-                <ImageView
-                    android:id="@+id/offlineLogo"
-                    android:layout_width="40dp"
-                    android:layout_height="40dp"
-                    android:src="@drawable/ic_mupa_logo"
-                    app:layout_constraintBottom_toBottomOf="parent"
-                    app:layout_constraintStart_toStartOf="parent"
-                    app:layout_constraintTop_toTopOf="parent" />
+            <com.google.android.material.textview.MaterialTextView
+                android:id="@+id/deviceNameText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:includeFontPadding="false"
+                android:maxLines="1"
+                android:textColor="@color/enterprise_on_muted"
+                android:textSize="12sp"
+                android:visibility="gone" />
 
-                <com.google.android.material.textview.MaterialTextView
-                    android:id="@+id/offlineTitle"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="16dp"
-                    android:text="@string/reconnecting"
-                    android:textColor="@color/enterprise_on"
-                    android:textSize="18sp"
-                    app:layout_constraintEnd_toStartOf="@id/offlineProgress"
-                    app:layout_constraintStart_toEndOf="@id/offlineLogo"
-                    app:layout_constraintTop_toTopOf="@id/offlineLogo" />
+            <com.google.android.material.textview.MaterialTextView
+                android:id="@+id/syncCountText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:includeFontPadding="false"
+                android:textColor="@color/enterprise_on"
+                android:textSize="14sp" />
 
-                <com.google.android.material.progressindicator.CircularProgressIndicator
-                    android:id="@+id/offlineProgress"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    app:indicatorColor="@color/mupa_cyan"
-                    app:layout_constraintBottom_toBottomOf="@id/offlineLogo"
-                    app:layout_constraintEnd_toEndOf="parent"
-                    app:layout_constraintTop_toTopOf="@id/offlineLogo" />
+            <com.google.android.material.textview.MaterialTextView
+                android:id="@+id/syncFileText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:includeFontPadding="false"
+                android:textColor="@color/enterprise_on"
+                android:textSize="14sp" />
 
-            </androidx.constraintlayout.widget.ConstraintLayout>
+            <com.google.android.material.textview.MaterialTextView
+                android:id="@+id/syncDetailText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:includeFontPadding="false"
+                android:textColor="@color/enterprise_on_muted"
+                android:textSize="12sp" />
 
-        </com.google.android.material.card.MaterialCardView>
+            <com.google.android.material.progressindicator.LinearProgressIndicator
+                android:id="@+id/syncProgressBar"
+                android:layout_width="match_parent"
+                android:layout_height="4dp"
+                android:layout_marginTop="18dp"
+                app:indicatorColor="#1E6FFF" />
+
+            <com.google.android.material.progressindicator.CircularProgressIndicator
+                android:id="@+id/syncSpinner"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="18dp"
+                app:indicatorColor="@color/mupa_cyan" />
+        </LinearLayout>
 
     </androidx.constraintlayout.widget.ConstraintLayout>
-
-    <com.google.android.material.card.MaterialCardView
-        android:id="@+id/devOverlayCard"
-        android:layout_width="320dp"
-        android:layout_height="wrap_content"
-        android:layout_gravity="top|end"
-        android:layout_margin="16dp"
-        android:alpha="0.92"
-        android:visibility="gone"
-        app:cardBackgroundColor="@color/enterprise_surface"
-        app:cardCornerRadius="18dp"
-        app:cardElevation="0dp"
-        app:strokeColor="@color/mupa_cyan"
-        app:strokeWidth="1dp">
-
-        <com.google.android.material.textview.MaterialTextView
-            android:id="@+id/devOverlayText"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:padding="16dp"
-            android:textColor="@color/enterprise_on"
-            android:textSize="12sp" />
-
-    </com.google.android.material.card.MaterialCardView>
 
     <com.google.android.material.textview.MaterialTextView
         android:id="@+id/deviceIdWatermark"
@@ -141,6 +529,17 @@
         android:layout_marginStart="10dp"
         android:layout_marginBottom="10dp"
         android:alpha="0.38"
+        android:textColor="@color/enterprise_on_muted"
+        android:textSize="11sp" />
+
+    <com.google.android.material.textview.MaterialTextView
+        android:id="@+id/apkVersionWatermark"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end"
+        android:layout_marginEnd="10dp"
+        android:layout_marginBottom="10dp"
+        android:alpha="0.34"
         android:textColor="@color/enterprise_on_muted"
         android:textSize="11sp" />
 

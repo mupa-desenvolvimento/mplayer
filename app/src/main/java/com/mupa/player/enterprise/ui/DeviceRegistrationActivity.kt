@@ -16,14 +16,13 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import androidx.activity.ComponentActivity
 import androidx.activity.viewModels
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
-import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.button.MaterialButton
 import com.mupa.player.enterprise.databinding.ActivityDeviceRegistrationBinding
 import com.mupa.player.enterprise.managers.DeviceIdentityManager
-import com.mupa.player.enterprise.managers.SettingsManager
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -125,41 +124,21 @@ class DeviceRegistrationActivity : ComponentActivity() {
         applyAlwaysOnScreen()
     }
 
-    private suspend fun promptLockAfterRegistrationAndProceed(serial: String) {
-        val settingsManager = SettingsManager(applicationContext)
-        val alreadyLocked = settingsManager.getMdmLockedCached() || settingsManager.getKioskModeCached()
-        if (alreadyLocked) {
-            openPlayerAndFinish(serial, lockNow = false)
-            return
-        }
-
-        MaterialAlertDialogBuilder(this)
-            .setTitle("Bloquear dispositivo?")
-            .setMessage("Deseja bloquear agora? Isso vai esconder as barras e fixar o app.")
-            .setPositiveButton("Bloquear") { dialog, _ ->
-                dialog.dismiss()
-                openPlayerAndFinish(serial, lockNow = true)
-            }
-            .setNegativeButton("Agora não") { dialog, _ ->
-                dialog.dismiss()
-                openPlayerAndFinish(serial, lockNow = false)
-            }
-            .setCancelable(false)
-            .show()
+    private fun promptLockAfterRegistrationAndProceed(serial: String) {
+        openPlayerAndFinish(serial)
     }
 
-    private fun openPlayerAndFinish(serial: String, lockNow: Boolean) {
-        val url = "https://midias.mupa.app/player-consulta/${serial.trim()}"
+    private fun openPlayerAndFinish(serial: String) {
         val intent = Intent(this, PlayerActivity::class.java)
-            .putExtra(PlayerActivity.EXTRA_START_URL, url)
-            .putExtra(PlayerActivity.EXTRA_ENABLE_AGGRESSIVE_KIOSK_ON_START, lockNow)
+            .putExtra(PlayerActivity.EXTRA_DEVICE_ID, serial.trim())
             .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK)
         startActivity(intent)
         finish()
     }
 
     private fun isOnline(): Boolean {
-        val cm = getSystemService(ConnectivityManager::class.java)
+        val cm = ContextCompat.getSystemService(this, ConnectivityManager::class.java)
+            ?: return false
         val network = cm.activeNetwork ?: return false
         val caps = cm.getNetworkCapabilities(network) ?: return false
         return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
@@ -179,11 +158,14 @@ class DeviceRegistrationActivity : ComponentActivity() {
         }
     }
 
-    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (shouldBlockHardwareKeyboard(event)) {
-            return true
-        }
-        return super.dispatchKeyEvent(event)
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (shouldBlockHardwareKeyboard(event)) return true
+        return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+        if (shouldBlockHardwareKeyboard(event)) return true
+        return super.onKeyUp(keyCode, event)
     }
 
     private fun shouldBlockHardwareKeyboard(event: KeyEvent): Boolean {
@@ -198,8 +180,8 @@ class DeviceRegistrationActivity : ComponentActivity() {
     }
 
     private fun hideSoftKeyboard(view: View) {
-        val imm = getSystemService(InputMethodManager::class.java)
-        imm.hideSoftInputFromWindow(view.windowToken, 0)
+        val imm = ContextCompat.getSystemService(this, InputMethodManager::class.java)
+        imm?.hideSoftInputFromWindow(view.windowToken, 0)
     }
 
     private fun setActiveField(editText: EditText, label: String) {

@@ -14,3 +14,24 @@ captures/
 *.zip
 *.tar
 *.rar
+
+# JVM crash logs
+hs_err_pid*.log
+replay_pid*.log
+
+# Gradle caches
+.gradle-home/
+.gradle_user/
+app/.gradle_user/
+app/.gradle_user_sandbox/
+
+# Argos agent (projeto separado)
+agent/
+PACOTE_ARGOS/
+
+# Screenshots e dumps de debug (raiz)
+/*.png
+/*.xml
+icon_argos.png
+bg_argos_*.png
+logo_argos_*.png

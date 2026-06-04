@@ -1,0 +1,25 @@
+package com.mupa.player.enterprise.network
+
+import okhttp3.ResponseBody
+import retrofit2.http.Body
+import retrofit2.http.GET
+import retrofit2.http.Headers
+import retrofit2.http.POST
+import retrofit2.http.Query
+import retrofit2.http.Url
+
+interface SupabaseApi {
+    @Headers("Content-Type: application/json", "Accept: application/json")
+    @POST
+    suspend fun postJson(
+        @Url url: String,
+        @Body body: Map<String, @JvmSuppressWildcards Any?>,
+    ): ResponseBody
+
+    @GET
+    suspend fun getCompaniesByCode(
+        @Url url: String,
+        @Query("select") select: String = "*",
+        @Query("code") codeEq: String,
+    ): ResponseBody
+}

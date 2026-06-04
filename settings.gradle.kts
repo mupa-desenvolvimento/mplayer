@@ -16,4 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "mupa_player_enterprise"
 include(":app")
-
+include(":agent")

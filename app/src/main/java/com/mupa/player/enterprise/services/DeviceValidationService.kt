@@ -4,14 +4,11 @@ import android.content.Context
 import com.mupa.player.enterprise.BuildConfig
 import com.mupa.player.enterprise.managers.DeviceCache
 import com.mupa.player.enterprise.managers.DeviceCacheManager
+import com.mupa.player.enterprise.network.SupabaseClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.BufferedWriter
-import java.io.OutputStreamWriter
-import java.net.HttpURLConnection
-import java.net.URL
 
 sealed class DeviceValidationResult {
     data class Found(val cache: DeviceCache) : DeviceValidationResult()
@@ -22,36 +19,19 @@ sealed class DeviceValidationResult {
 
 class DeviceValidationService(private val context: Context) {
     private val cacheManager = DeviceCacheManager(context)
+    private val api = SupabaseClient.createApi()
 
     suspend fun validateDevice(deviceId: String): DeviceValidationResult = withContext(Dispatchers.IO) {
         val token = BuildConfig.SUPABASE_TOKEN.trim()
         if (token.isBlank()) return@withContext DeviceValidationResult.NotConfigured
 
-        val url = URL(BuildConfig.SUPABASE_DEVICE_RPC_URL)
-        val conn = (url.openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            connectTimeout = 12_000
-            readTimeout = 12_000
-            doInput = true
-            doOutput = true
-            setRequestProperty("Content-Type", "application/json")
-            setRequestProperty("Accept", "application/json")
-            setRequestProperty("apikey", token)
-            setRequestProperty("Authorization", "Bearer $token")
-        }
-
         return@withContext runCatching {
-            val body = JSONObject().put("p_serial", deviceId).toString()
-            BufferedWriter(OutputStreamWriter(conn.outputStream)).use { it.write(body) }
-
-            val code = conn.responseCode
-            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-            val responseText = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
-
-            if (code !in 200..299) {
-                val suffix = if (responseText.isBlank()) "" else " $responseText"
-                return@runCatching DeviceValidationResult.Error("http_$code$suffix")
-            }
+            val responseText = api
+                .postJson(
+                    url = BuildConfig.SUPABASE_DEVICE_RPC_URL,
+                    body = mapOf("p_serial" to deviceId),
+                )
+                .string()
 
             val parsed = parseDeviceResponse(responseText)
                 ?: return@runCatching DeviceValidationResult.NotFound
@@ -60,8 +40,6 @@ class DeviceValidationService(private val context: Context) {
             DeviceValidationResult.Found(parsed)
         }.getOrElse {
             DeviceValidationResult.Error(it.javaClass.simpleName)
-        }.also {
-            conn.disconnect()
         }
     }
 

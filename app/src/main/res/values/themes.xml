@@ -11,9 +11,8 @@
 
     <style name="Theme.MupaPlayerEnterprise.Splash" parent="Theme.SplashScreen">
         <item name="windowSplashScreenBackground">@color/enterprise_bg</item>
-        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_mupa_logo</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_mplayer</item>
         <item name="postSplashScreenTheme">@style/Theme.MupaPlayerEnterprise</item>
     </style>
 
 </resources>
-

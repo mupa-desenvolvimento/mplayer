@@ -3,23 +3,20 @@ package com.mupa.player.enterprise.ui
 import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
-import android.app.KeyguardManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
-import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.lifecycleScope
 import com.mupa.player.enterprise.databinding.ActivitySplashBinding
 import com.mupa.player.enterprise.managers.DeviceCacheManager
 import com.mupa.player.enterprise.managers.DeviceIdentityManager
-import com.mupa.player.enterprise.managers.SettingsManager
 import com.mupa.player.enterprise.services.DeviceValidationResult
 import com.mupa.player.enterprise.services.DeviceValidationService
-import com.mupa.player.enterprise.services.MupaKeepAliveService
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -38,20 +35,13 @@ class SplashActivity : ComponentActivity() {
         installSplashScreen()
         super.onCreate(savedInstanceState)
 
-        MupaKeepAliveService.start(this)
-        val settings = SettingsManager(applicationContext)
-        if (settings.getKioskModeCached() || settings.getMdmLockedCached()) {
-            applyWakeAndUnlock()
-        }
         applyAlwaysOnScreen()
         binding = ActivitySplashBinding.inflate(layoutInflater)
         setContentView(binding.root)
         binding.deviceIdWatermark.text = "ID: -"
 
         lifecycleScope.launch {
-            val openSettings = intent?.getBooleanExtra(PlayerActivity.EXTRA_OPEN_SETTINGS_PANEL, false) == true
             binding.stepText.text = "1 Identificando dispositivo"
-            SettingsManager(applicationContext).getOrCreateDeviceUuid()
             val deviceId = DeviceIdentityManager(applicationContext).getPersistentId()
             binding.deviceIdWatermark.text = "ID: ${deviceId.trim()}"
             val cacheManager = DeviceCacheManager(applicationContext)
@@ -63,27 +53,24 @@ class SplashActivity : ComponentActivity() {
                 when (val result = DeviceValidationService(applicationContext).validateDevice(deviceId)) {
                     is DeviceValidationResult.Found -> {
                         val serial = result.cache.deviceId.ifBlank { deviceId }
-                        val url = "https://midias.mupa.app/player-consulta/${serial.trim()}"
                         Intent(this@SplashActivity, PlayerActivity::class.java)
-                            .putExtra(PlayerActivity.EXTRA_START_URL, url)
+                            .putExtra(PlayerActivity.EXTRA_DEVICE_ID, serial.trim())
                     }
                     DeviceValidationResult.NotFound -> {
                         Intent(this@SplashActivity, DeviceRegistrationActivity::class.java)
                     }
                     DeviceValidationResult.NotConfigured -> {
                         if (cachedRegistered.isNotBlank()) {
-                            val url = "https://midias.mupa.app/player-consulta/${cachedRegistered}"
                             Intent(this@SplashActivity, PlayerActivity::class.java)
-                                .putExtra(PlayerActivity.EXTRA_START_URL, url)
+                                .putExtra(PlayerActivity.EXTRA_DEVICE_ID, cachedRegistered)
                         } else {
                             Intent(this@SplashActivity, DeviceRegistrationActivity::class.java)
                         }
                     }
                     is DeviceValidationResult.Error -> {
                         if (cachedRegistered.isNotBlank()) {
-                            val url = "https://midias.mupa.app/player-consulta/${cachedRegistered}"
                             Intent(this@SplashActivity, PlayerActivity::class.java)
-                                .putExtra(PlayerActivity.EXTRA_START_URL, url)
+                                .putExtra(PlayerActivity.EXTRA_DEVICE_ID, cachedRegistered)
                         } else {
                             Intent(this@SplashActivity, DeviceRegistrationActivity::class.java)
                         }
@@ -91,9 +78,8 @@ class SplashActivity : ComponentActivity() {
                 }
             } else {
                 if (cachedRegistered.isNotBlank()) {
-                    val url = "https://midias.mupa.app/player-consulta/${cachedRegistered}"
                     Intent(this@SplashActivity, PlayerActivity::class.java)
-                        .putExtra(PlayerActivity.EXTRA_START_URL, url)
+                        .putExtra(PlayerActivity.EXTRA_DEVICE_ID, cachedRegistered)
                 } else {
                     Intent(this@SplashActivity, DeviceRegistrationActivity::class.java)
                 }
@@ -101,16 +87,14 @@ class SplashActivity : ComponentActivity() {
 
             delay(250)
             binding.stepText.text = "3 Carregando"
-            if (openSettings && nextIntent.component?.className == PlayerActivity::class.java.name) {
-                nextIntent.putExtra(PlayerActivity.EXTRA_OPEN_SETTINGS_PANEL, true)
-            }
             startActivity(nextIntent)
             finish()
         }
     }
 
     private fun isOnline(): Boolean {
-        val cm = getSystemService(ConnectivityManager::class.java)
+        val cm = ContextCompat.getSystemService(this, ConnectivityManager::class.java)
+            ?: return false
         val network = cm.activeNetwork ?: return false
         val caps = cm.getNetworkCapabilities(network) ?: return false
         return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
@@ -137,23 +121,6 @@ class SplashActivity : ComponentActivity() {
                     255,
                 )
             }
-        }
-    }
-
-    private fun applyWakeAndUnlock() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            setShowWhenLocked(true)
-            setTurnScreenOn(true)
-        } else {
-            window.addFlags(
-                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
-                    WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD,
-            )
-        }
-        val km = getSystemService(KeyguardManager::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            runCatching { km.requestDismissKeyguard(this, null) }
         }
     }
 }

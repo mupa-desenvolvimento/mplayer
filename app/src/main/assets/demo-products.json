@@ -1,0 +1,32 @@
+[
+  {
+    "ean": "53016701999",
+    "nome": "Perfume Polo Blue Ralph Lauren Masculino Eau de Toilette 200ml",
+    "imagem": "file:///android_asset/demo-products/53016701999.jpg",
+    "preco": "969.90",
+    "parcelamento": "10x de R$ 96,99 sem juros no Cartão Renner",
+    "de_por": null,
+    "marca": "Ralph Lauren",
+    "categoria": "Perfume"
+  },
+  {
+    "ean": "57899168111",
+    "nome": "Perfume La Rive Miss Dream Eau de Parfum 100ml",
+    "imagem": "file:///android_asset/demo-products/57899168111.jpg",
+    "preco": "119.90",
+    "parcelamento": "3x de R$39,97 sem juros no Cartão Renner",
+    "de_por": null,
+    "marca": "La Rive",
+    "categoria": "Perfume"
+  },
+  {
+    "ean": "92989642444",
+    "nome": "Eudora Pulse Boost Colonia Masculino 100ml",
+    "imagem": "file:///android_asset/demo-products/92989642444.jpg",
+    "preco": "79.90",
+    "preco_antigo": "99.90",
+    "parcelamento": "2x de R$39,95 sem juros no Cartão Renner",
+    "marca": "Eudora",
+    "categoria": "Perfume"
+  }
+]

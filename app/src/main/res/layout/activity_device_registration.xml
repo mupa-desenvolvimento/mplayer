@@ -29,7 +29,7 @@
                 android:layout_width="56dp"
                 android:layout_height="56dp"
                 android:contentDescription="@string/app_name"
-                android:src="@drawable/ic_mupa_logo"
+                android:src="@drawable/ic_mplayer"
                 app:layout_constraintEnd_toEndOf="parent"
                 app:layout_constraintStart_toStartOf="parent"
                 app:layout_constraintTop_toTopOf="parent" />
