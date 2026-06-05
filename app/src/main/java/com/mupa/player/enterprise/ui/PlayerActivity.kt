@@ -204,6 +204,61 @@ class PlayerActivity : ComponentActivity() {
             ensureBarcodeFocus()
             false
         }
+<<<<<<< HEAD
+=======
+
+        val bridge = AndroidBridge(
+            context = applicationContext,
+            settingsManager = settingsManager,
+            commands = object : AndroidBridge.Commands {
+                override fun onCommandReceived(commandJson: String) {
+                    viewModel.setLastCommand(commandJson)
+                    binding.webView.post {
+                        binding.webView.evaluateJavascript(
+                            "window.confirmAndroidExecution && window.confirmAndroidExecution()",
+                            null,
+                        )
+                    }
+                }
+
+                override fun reload() {
+                    binding.webView.reload()
+                }
+
+                override fun clearCache() {
+                    binding.webView.clearCache(true)
+                    binding.webView.clearHistory()
+                }
+
+                override fun restartApp() {
+                    restartApp()
+                }
+
+                override fun closeApp() {
+                    finishAffinity()
+                }
+
+                override fun toggleKiosk(enabled: Boolean) {
+                    lifecycleScope.launch { settingsManager.setKioskMode(enabled) }
+                    kioskManager.applyNow()
+                }
+
+                override fun hideSystemBars() {
+                    kioskManager.hideSystemBars()
+                }
+
+                override fun showSystemBars() {
+                    kioskManager.showSystemBars()
+                }
+
+                override fun scanBarcode(formatsCsv: String?) {
+                    AndroidBridge.showToast(this@PlayerActivity, "Use o leitor físico (modo teclado).")
+                }
+            },
+            evaluateJs = { js -> binding.webView.post { binding.webView.evaluateJavascript(js, null) } },
+        )
+        binding.webView.addJavascriptInterface(bridge, "Android")
+>>>>>>> 52b55b93ce53a2da8ab1f97fe0923baa2a233be4
 
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {

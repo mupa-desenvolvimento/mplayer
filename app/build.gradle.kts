@@ -129,6 +129,11 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.activity:activity-ktx:1.9.0")
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
+<<<<<<< HEAD
+=======
+    implementation("androidx.recyclerview:recyclerview:1.3.2")
+    implementation("androidx.palette:palette-ktx:1.0.0")
+>>>>>>> 52b55b93ce53a2da8ab1f97fe0923baa2a233be4
 
     implementation("com.google.android.material:material:1.12.0")
 
