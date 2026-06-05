@@ -462,7 +462,8 @@ class PriceQueryEngine(
         val tmp = File(target.parentFile, target.name + ".tmp")
         FileOutputStream(tmp).use { out ->
             val fmt =
-                if (Build.VERSION.SDK_INT >= 30) Bitmap.CompressFormat.WEBP_LOSSY else Bitmap.CompressFormat.WEBP
+                @Suppress("DEPRECATION")
+                    if (Build.VERSION.SDK_INT >= 30) Bitmap.CompressFormat.WEBP_LOSSY else Bitmap.CompressFormat.WEBP
             if (!bitmap.compress(fmt, 82, out)) {
                 bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
             }
@@ -556,6 +557,7 @@ class PriceQueryEngine(
             val tmpOptimized = File(productsDir(), "$ean.webp.tmp")
             FileOutputStream(tmpOptimized).use { out ->
                 val fmt =
+                    @Suppress("DEPRECATION")
                     if (Build.VERSION.SDK_INT >= 30) Bitmap.CompressFormat.WEBP_LOSSY else Bitmap.CompressFormat.WEBP
                 if (!scaled.compress(fmt, 82, out)) {
                     scaled.compress(Bitmap.CompressFormat.JPEG, 86, out)
@@ -632,7 +634,8 @@ class PriceQueryEngine(
         val tmpOptimized = File(productsDir(), "$ean.webp.tmp")
         FileOutputStream(tmpOptimized).use { out ->
             val fmt =
-                if (Build.VERSION.SDK_INT >= 30) Bitmap.CompressFormat.WEBP_LOSSY else Bitmap.CompressFormat.WEBP
+                @Suppress("DEPRECATION")
+                    if (Build.VERSION.SDK_INT >= 30) Bitmap.CompressFormat.WEBP_LOSSY else Bitmap.CompressFormat.WEBP
             if (!scaled.compress(fmt, 82, out)) {
                 scaled.compress(Bitmap.CompressFormat.JPEG, 86, out)
             }
@@ -795,7 +798,7 @@ class PriceQueryEngine(
         }
     }
 
-    private fun buildRequestBodyForStep(step: PriceStep, state: JSONObject): JSONObject {
+    private fun buildRequestBodyForStep(@Suppress("UNUSED_PARAMETER") step: PriceStep, state: JSONObject): JSONObject {
         val o = JSONObject()
         o.put("ean", state.optString("ean"))
         val keys = listOf("internal_code", "SEQPRODUTO", "codigo_interno", "product_id")

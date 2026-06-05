@@ -225,7 +225,7 @@ class AudienceAnalyticsWebViewEngine(
         }
 
         @JavascriptInterface
-        fun onError(requestId: String, error: String) {
+        fun onError(requestId: String, @Suppress("UNUSED_PARAMETER") error: String) {
             val deferred = pending.remove(requestId) ?: return
             deferred.complete(
                 AudienceFrameResult(

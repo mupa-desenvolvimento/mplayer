@@ -217,7 +217,7 @@ class ManifestManager(private val context: Context) {
         cleanup(deviceId, keep, mediaDir)
     }
 
-    private suspend fun cleanup(deviceId: String, keepMediaIds: Set<String>, mediaDir: File) {
+    private suspend fun cleanup(@Suppress("UNUSED_PARAMETER") deviceId: String, keepMediaIds: Set<String>, mediaDir: File) {
         val files = mediaDir.listFiles().orEmpty()
         for (f in files) {
             if (f.name == "manifest.json") continue

@@ -83,9 +83,11 @@ class DeviceIdentityManager(private val context: Context) {
         if (!zebraId.isNullOrBlank()) return zebraId
 
         val serial = runCatching {
-            when {
-                Build.VERSION.SDK_INT >= 26 -> Build.getSerial()
-                else -> Build.SERIAL
+            if (Build.VERSION.SDK_INT >= 26) {
+                Build.getSerial()
+            } else {
+                @Suppress("DEPRECATION")
+                Build.SERIAL
             }
         }.getOrNull()?.trim().orEmpty()
         if (serial.isBlank()) return null

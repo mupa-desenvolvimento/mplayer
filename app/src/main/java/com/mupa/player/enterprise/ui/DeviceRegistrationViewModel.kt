@@ -122,11 +122,7 @@ class DeviceRegistrationViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
 
-            val resolvedCompany = company
-            if (resolvedCompany == null) {
-                setLoadingDone("Empresa não encontrada")
-                return@launch
-            }
+            val resolvedCompany = checkNotNull(company) { "company must be non-null after lookup" }
 
             setLoading("Cadastrando dispositivo...")
             when (val reg = registrationService.register(
