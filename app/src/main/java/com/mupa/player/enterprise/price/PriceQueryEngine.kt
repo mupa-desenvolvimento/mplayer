@@ -270,7 +270,9 @@ class PriceQueryEngine(
                     JSONObject()
                 }
 
-            val stockPriceArr = stockObj.optJSONArray("stock_price") ?: JSONArray()
+            val stockPriceArr = stockObj.optJSONArray("stock_price")
+                ?: stockObj.optJSONArray("stock_prices")
+                ?: JSONArray()
 
             var mainPrice: Double? = null
             var stock: Int? = null
@@ -278,11 +280,13 @@ class PriceQueryEngine(
             for (i in 0 until stockPriceArr.length()) {
                 val o = stockPriceArr.optJSONObject(i) ?: continue
                 val unitPack = o.optInt("unit_pack", 0)
-                val pricePack = o.optDouble("price_pack", Double.NaN).takeIf { !it.isNaN() } ?: 0.0
+                val promPrice = o.optDouble("price_prom_pack", Double.NaN).takeIf { !it.isNaN() && it > 0.0 }
+                val pricePack = promPrice ?: o.optDouble("price_pack", Double.NaN).takeIf { !it.isNaN() } ?: 0.0
                 if (pricePack <= 0.0) continue
                 if (unitPack == 1) {
                     mainPrice = pricePack
                     stock = o.optInt("stock_avaliable", Int.MIN_VALUE).takeIf { it != Int.MIN_VALUE }
+                        ?: o.optInt("stock_available", Int.MIN_VALUE).takeIf { it != Int.MIN_VALUE }
                 } else if (unitPack > 1) {
                     val unit = pricePack / unitPack.toDouble()
                     packs += PricePack(
