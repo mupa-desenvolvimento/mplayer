@@ -31,6 +31,7 @@ class PriceAnalyticsSyncManager(private val context: Context) {
                 JSONObject()
                     .put("id", e.id)
                     .put("device_id", e.deviceId)
+                    .put("filial", e.filial)
                     .put("ean", e.ean)
                     .put("created_at_epoch_ms", e.createdAtEpochMs)
                     .put("response_time_ms", e.responseTimeMs)

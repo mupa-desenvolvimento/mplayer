@@ -106,7 +106,7 @@ class SplashActivity : ComponentActivity() {
         p.screenBrightness = 1f
         window.attributes = p
 
-        if (Settings.System.canWrite(this)) {
+        if (android.os.Build.VERSION.SDK_INT >= 23 && Settings.System.canWrite(this)) {
             runCatching {
                 Settings.System.putInt(
                     contentResolver,

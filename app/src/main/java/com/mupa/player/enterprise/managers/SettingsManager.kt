@@ -20,6 +20,7 @@ data class AppSettings(
     val tenantId: String,
     val deviceUuid: String,
     val devMode: Boolean,
+    val demoMode: Boolean,
 )
 
 class SettingsManager(private val context: Context) {
@@ -32,6 +33,7 @@ class SettingsManager(private val context: Context) {
         val tenantId = stringPreferencesKey("tenant_id")
         val deviceUuid = stringPreferencesKey("device_uuid")
         val devMode = booleanPreferencesKey("dev_mode")
+        val demoMode = booleanPreferencesKey("demo_mode")
     }
 
     val settingsFlow: Flow<AppSettings> =
@@ -57,6 +59,8 @@ class SettingsManager(private val context: Context) {
                     deviceUuid = deviceUuid,
                     devMode = prefs[Keys.devMode]
                         ?: legacyPrefs.getBoolean(LEGACY_KEY_DEV_MODE, false),
+                    demoMode = prefs[Keys.demoMode]
+                        ?: legacyPrefs.getBoolean(LEGACY_KEY_DEMO_MODE, false),
                 )
             }
             .distinctUntilChanged()
@@ -89,6 +93,10 @@ class SettingsManager(private val context: Context) {
 
     suspend fun setDevMode(enabled: Boolean) {
         persistBoolean(Keys.devMode, LEGACY_KEY_DEV_MODE, enabled)
+    }
+
+    suspend fun setDemoMode(enabled: Boolean) {
+        persistBoolean(Keys.demoMode, LEGACY_KEY_DEMO_MODE, enabled)
     }
 
     suspend fun getOrCreateDeviceUuid(): String {
@@ -138,6 +146,7 @@ class SettingsManager(private val context: Context) {
         private const val LEGACY_KEY_TENANT_ID = "tenant_id"
         private const val LEGACY_KEY_DEVICE_UUID = "device_uuid"
         private const val LEGACY_KEY_DEV_MODE = "dev_mode"
+        private const val LEGACY_KEY_DEMO_MODE = "demo_mode"
 
         private const val ANDROID_ID_BUG = "9774d56d682e549c"
     }

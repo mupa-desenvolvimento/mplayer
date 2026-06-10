@@ -16,6 +16,7 @@ import androidx.room.PrimaryKey
 data class PriceQueryEventEntity(
     @PrimaryKey val id: String,
     val deviceId: String,
+    val filial: String,
     val ean: String,
     val createdAtEpochMs: Long,
     val responseTimeMs: Long,

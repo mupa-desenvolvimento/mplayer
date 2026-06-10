@@ -11,6 +11,7 @@ import android.graphics.Typeface
 import android.os.Build
 import android.util.Log
 import com.mupa.player.enterprise.BuildConfig
+import com.mupa.player.enterprise.managers.DeviceCacheManager
 import com.mupa.player.enterprise.network.TlsCompat
 import com.mupa.player.enterprise.storage.db.AppDatabase
 import com.mupa.player.enterprise.storage.db.PriceCacheEntity
@@ -33,6 +34,31 @@ class PriceQueryEngine(
 ) {
     private val db = AppDatabase.get(context)
     private val http = TlsCompat.newClient()
+    private val sessionState = JSONObject()
+
+    private suspend fun insertEvent(
+        ean: String,
+        filial: String,
+        responseTimeMs: Long,
+        fromCache: Boolean,
+        success: Boolean
+    ) = withContext(Dispatchers.IO) {
+        runCatching {
+            db.priceQueryEventDao().insert(
+                PriceQueryEventEntity(
+                    id = UUID.randomUUID().toString(),
+                    deviceId = deviceId,
+                    filial = filial,
+                    ean = ean,
+                    createdAtEpochMs = System.currentTimeMillis(),
+                    responseTimeMs = responseTimeMs,
+                    fromCache = fromCache,
+                    success = success,
+                    uploadedAtEpochMs = null,
+                )
+            )
+        }
+    }
 
     private data class ProductImageMeta(
         val imageUrl: String?,
@@ -51,6 +77,7 @@ class PriceQueryEngine(
         if (normalizedEan.isBlank()) return@withContext null
 
         val now = System.currentTimeMillis()
+        val filial = runCatching { DeviceCacheManager(context).load()?.filial }.getOrNull().orEmpty()
 
         val cache = db.priceCacheDao().getByEan(normalizedEan)
         val fromCache =
@@ -58,40 +85,30 @@ class PriceQueryEngine(
 
         if (fromCache) {
             val product = normalizeCachedProduct(parseProductFromCache(normalizedEan, cache))
-            db.priceQueryEventDao().insert(
-                PriceQueryEventEntity(
-                    id = UUID.randomUUID().toString(),
-                    deviceId = deviceId,
-                    ean = normalizedEan,
-                    createdAtEpochMs = now,
-                    responseTimeMs = 0L,
-                    fromCache = true,
-                    success = product != null,
-                    uploadedAtEpochMs = null,
-                ),
+            insertEvent(
+                ean = normalizedEan,
+                filial = filial,
+                responseTimeMs = 0L,
+                fromCache = true,
+                success = product != null,
             )
             return@withContext product
         }
 
         if (!isOnline) {
             val product = normalizeCachedProduct(parseProductFromCache(normalizedEan, cache))?.copy(offline = true)
-            db.priceQueryEventDao().insert(
-                PriceQueryEventEntity(
-                    id = UUID.randomUUID().toString(),
-                    deviceId = deviceId,
-                    ean = normalizedEan,
-                    createdAtEpochMs = now,
-                    responseTimeMs = 0L,
-                    fromCache = false,
-                    success = product != null,
-                    uploadedAtEpochMs = null,
-                ),
+            insertEvent(
+                ean = normalizedEan,
+                filial = filial,
+                responseTimeMs = 0L,
+                fromCache = false,
+                success = product != null,
             )
             return@withContext product
         }
 
         if (config.integration == "integra-assai") {
-            return@withContext runCatching { queryAssai(normalizedEan, config, isOnline) }
+            return@withContext runCatching { queryAssai(normalizedEan, config, isOnline, filial) }
                 .onFailure {
                     Log.w(
                         "MPlayerPrice",
@@ -105,12 +122,40 @@ class PriceQueryEngine(
         val state = JSONObject()
             .put("ean", normalizedEan)
             .put("device", deviceId)
+            .put("filial", filial)
+            .put("loja", filial)
+            .put("store_id", filial)
             .put("integration", config.integration)
 
         var product: PriceProduct? = null
         try {
             for (step in config.steps) {
                 when (step.type) {
+                    "authenticate" -> {
+                        val cachedToken = sessionState.optString("access_token", "")
+                        val cachedAt = sessionState.optLong("access_token_at", 0L)
+                        val currentTime = System.currentTimeMillis()
+                        if (cachedToken.isNotBlank() && (currentTime - cachedAt) < 50 * 60 * 1000L) {
+                            state.put("access_token", cachedToken)
+                            sessionState.keys().forEach { k ->
+                                if (k != "access_token_at") {
+                                    state.put(k, sessionState.opt(k))
+                                }
+                            }
+                        } else {
+                            val resp = executeStep(step, state)
+                            applyMapping(resp, step.mapping, state)
+                            step.mapping.keys.forEach { targetKey ->
+                                val v = state.opt(targetKey)
+                                if (v != null) {
+                                    sessionState.put(targetKey, v)
+                                    if (targetKey == "access_token") {
+                                        sessionState.put("access_token_at", currentTime)
+                                    }
+                                }
+                            }
+                        }
+                    }
                     "lookup_internal_code" -> {
                         val resp = executeStep(step, state)
                         applyMapping(resp, step.mapping, state)
@@ -148,24 +193,19 @@ class PriceQueryEngine(
             )
         } finally {
             val took = System.currentTimeMillis() - startedAt
-            db.priceQueryEventDao().insert(
-                PriceQueryEventEntity(
-                    id = UUID.randomUUID().toString(),
-                    deviceId = deviceId,
-                    ean = normalizedEan,
-                    createdAtEpochMs = now,
-                    responseTimeMs = took,
-                    fromCache = false,
-                    success = product != null,
-                    uploadedAtEpochMs = null,
-                ),
+            insertEvent(
+                ean = normalizedEan,
+                filial = filial,
+                responseTimeMs = took,
+                fromCache = false,
+                success = product != null,
             )
         }
 
         product
     }
 
-    private suspend fun queryAssai(ean: String, config: PriceConfig, isOnline: Boolean): PriceProduct? {
+    private suspend fun queryAssai(ean: String, config: PriceConfig, isOnline: Boolean, filial: String): PriceProduct? {
         val now = System.currentTimeMillis()
         val cache = db.priceCacheDao().getByEan(ean)
         val fromCache =
@@ -173,34 +213,24 @@ class PriceQueryEngine(
 
         if (fromCache) {
             val product = normalizeCachedProduct(parseProductFromCache(ean, cache))
-            db.priceQueryEventDao().insert(
-                PriceQueryEventEntity(
-                    id = UUID.randomUUID().toString(),
-                    deviceId = deviceId,
-                    ean = ean,
-                    createdAtEpochMs = now,
-                    responseTimeMs = 0L,
-                    fromCache = true,
-                    success = product != null,
-                    uploadedAtEpochMs = null,
-                ),
+            insertEvent(
+                ean = ean,
+                filial = filial,
+                responseTimeMs = 0L,
+                fromCache = true,
+                success = product != null,
             )
             return product
         }
 
         if (!isOnline) {
             val product = normalizeCachedProduct(parseProductFromCache(ean, cache))?.copy(offline = true)
-            db.priceQueryEventDao().insert(
-                PriceQueryEventEntity(
-                    id = UUID.randomUUID().toString(),
-                    deviceId = deviceId,
-                    ean = ean,
-                    createdAtEpochMs = now,
-                    responseTimeMs = 0L,
-                    fromCache = false,
-                    success = product != null,
-                    uploadedAtEpochMs = null,
-                ),
+            insertEvent(
+                ean = ean,
+                filial = filial,
+                responseTimeMs = 0L,
+                fromCache = false,
+                success = product != null,
             )
             return product
         }
@@ -294,6 +324,8 @@ class PriceQueryEngine(
                     ean = ean,
                     description = descCompleta.ifBlank { null },
                     price = mainPrice,
+                    originalPrice = null,
+                    clubPrice = null,
                     stock = stock,
                     image = localImagePath,
                     offer = null,
@@ -316,17 +348,12 @@ class PriceQueryEngine(
             )
         } finally {
             val took = System.currentTimeMillis() - startedAt
-            db.priceQueryEventDao().insert(
-                PriceQueryEventEntity(
-                    id = UUID.randomUUID().toString(),
-                    deviceId = deviceId,
-                    ean = ean,
-                    createdAtEpochMs = now,
-                    responseTimeMs = took,
-                    fromCache = false,
-                    success = product != null,
-                    uploadedAtEpochMs = null,
-                ),
+            insertEvent(
+                ean = ean,
+                filial = filial,
+                responseTimeMs = took,
+                fromCache = false,
+                success = product != null,
             )
         }
 
@@ -759,6 +786,8 @@ class PriceQueryEngine(
                 ean = ean,
                 description = o.optString("description", "").ifBlank { null },
                 price = o.optDouble("price", Double.NaN).takeIf { !it.isNaN() },
+                originalPrice = o.optDouble("originalPrice", Double.NaN).takeIf { !it.isNaN() },
+                clubPrice = o.optDouble("clubPrice", Double.NaN).takeIf { !it.isNaN() },
                 stock = o.optInt("stock", Int.MIN_VALUE).takeIf { it != Int.MIN_VALUE },
                 image = o.optString("image", "").ifBlank { null },
                 offer = offer,
@@ -776,9 +805,13 @@ class PriceQueryEngine(
         val reqBuilder = Request.Builder().url(url)
         step.headers.forEach { (k, v) -> reqBuilder.header(k, interpolate(v, state)) }
 
-        val bodyJson = buildRequestBodyForStep(step, state)
         if (method == "POST" || method == "PUT" || method == "PATCH") {
-            val body = bodyJson.toString().toRequestBody("application/json".toMediaType())
+            val bodyStr = if (!step.body.isNullOrBlank()) {
+                interpolate(step.body, state)
+            } else {
+                buildRequestBodyForStep(step, state).toString()
+            }
+            val body = bodyStr.toRequestBody("application/json".toMediaType())
             reqBuilder.method(method, body)
         } else {
             reqBuilder.get()
@@ -787,7 +820,8 @@ class PriceQueryEngine(
         http.newCall(reqBuilder.build()).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
-                throw IllegalStateException("http_${resp.code}")
+                Log.e("MPlayerPrice", "HTTP Error ${resp.code}: $text")
+                throw IllegalStateException("http_${resp.code} body=$text")
             }
             val trimmed = text.trim()
             return if (trimmed.startsWith("[")) {
@@ -801,6 +835,10 @@ class PriceQueryEngine(
     private fun buildRequestBodyForStep(@Suppress("UNUSED_PARAMETER") step: PriceStep, state: JSONObject): JSONObject {
         val o = JSONObject()
         o.put("ean", state.optString("ean"))
+        val serial = state.optString("device", "").ifBlank { deviceId }
+        if (serial.isNotBlank()) {
+            o.put("serial", serial)
+        }
         val keys = listOf("internal_code", "SEQPRODUTO", "codigo_interno", "product_id")
         for (k in keys) {
             val v = state.optString(k, "")
@@ -847,6 +885,8 @@ class PriceQueryEngine(
 
         val desc = state.optString("description", "").ifBlank { state.optString("DESCCOMPLETA", "").ifBlank { null } }
         val price = state.optDouble("price", Double.NaN).takeIf { !it.isNaN() }
+        val originalPrice = state.optDouble("originalPrice", Double.NaN).takeIf { !it.isNaN() }
+        val clubPrice = state.optDouble("clubPrice", Double.NaN).takeIf { !it.isNaN() }
         val stock = state.optInt("stock", Int.MIN_VALUE).takeIf { it != Int.MIN_VALUE }
         val image = state.optString("image", "").ifBlank { null }
 
@@ -887,6 +927,8 @@ class PriceQueryEngine(
             ean = ean,
             description = desc,
             price = price,
+            originalPrice = originalPrice,
+            clubPrice = clubPrice,
             stock = stock,
             image = image,
             offer = offer,
@@ -930,6 +972,8 @@ class PriceQueryEngine(
             .put("ean", product.ean)
             .put("description", product.description)
             .put("price", product.price)
+            .put("originalPrice", product.originalPrice)
+            .put("clubPrice", product.clubPrice)
             .put("stock", product.stock)
             .put("image", product.image)
             .put("offer", offer)

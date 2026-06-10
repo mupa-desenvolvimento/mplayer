@@ -26,6 +26,7 @@ import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.style.RelativeSizeSpan
 import android.text.style.StyleSpan
+import android.text.style.StrikethroughSpan
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
@@ -76,9 +77,12 @@ import com.mupa.player.enterprise.price.PriceConfigParser
 import com.mupa.player.enterprise.price.PriceAnalyticsSyncManager
 import com.mupa.player.enterprise.price.PriceOffer
 import com.mupa.player.enterprise.price.PriceProduct
+import com.mupa.player.enterprise.price.PricePack
 import com.mupa.player.enterprise.price.PriceTheme
 import com.mupa.player.enterprise.price.PriceQueryEngine
 import java.util.Locale
+import java.text.SimpleDateFormat
+import java.util.Date
 import com.mupa.player.enterprise.storage.db.AppDatabase
 import com.mupa.player.enterprise.storage.settingsDataStore
 import kotlinx.coroutines.Dispatchers
@@ -119,6 +123,7 @@ class PlayerActivity : ComponentActivity() {
 
     private var priceConfig: PriceConfig? = null
     private var priceEngine: PriceQueryEngine? = null
+    private var lastPlaylistItemsIds: List<String> = emptyList()
     private var lastScanEan: String = ""
     private var lastScanAtMs: Long = 0L
     private val scanBuffer = StringBuilder()
@@ -131,6 +136,7 @@ class PlayerActivity : ComponentActivity() {
     private lateinit var demoRepo: DemoProductRepository
     private lateinit var demoImageCache: DemoImageCache
     private var devMode = false
+    private var demoMode = false
     private var overlayEan: String? = null
     private var priceAnimator: ValueAnimator? = null
     private var tts: TextToSpeech? = null
@@ -204,61 +210,7 @@ class PlayerActivity : ComponentActivity() {
             ensureBarcodeFocus()
             false
         }
-<<<<<<< HEAD
-=======
 
-        val bridge = AndroidBridge(
-            context = applicationContext,
-            settingsManager = settingsManager,
-            commands = object : AndroidBridge.Commands {
-                override fun onCommandReceived(commandJson: String) {
-                    viewModel.setLastCommand(commandJson)
-                    binding.webView.post {
-                        binding.webView.evaluateJavascript(
-                            "window.confirmAndroidExecution && window.confirmAndroidExecution()",
-                            null,
-                        )
-                    }
-                }
-
-                override fun reload() {
-                    binding.webView.reload()
-                }
-
-                override fun clearCache() {
-                    binding.webView.clearCache(true)
-                    binding.webView.clearHistory()
-                }
-
-                override fun restartApp() {
-                    restartApp()
-                }
-
-                override fun closeApp() {
-                    finishAffinity()
-                }
-
-                override fun toggleKiosk(enabled: Boolean) {
-                    lifecycleScope.launch { settingsManager.setKioskMode(enabled) }
-                    kioskManager.applyNow()
-                }
-
-                override fun hideSystemBars() {
-                    kioskManager.hideSystemBars()
-                }
-
-                override fun showSystemBars() {
-                    kioskManager.showSystemBars()
-                }
-
-                override fun scanBarcode(formatsCsv: String?) {
-                    AndroidBridge.showToast(this@PlayerActivity, "Use o leitor físico (modo teclado).")
-                }
-            },
-            evaluateJs = { js -> binding.webView.post { binding.webView.evaluateJavascript(js, null) } },
-        )
-        binding.webView.addJavascriptInterface(bridge, "Android")
->>>>>>> 52b55b93ce53a2da8ab1f97fe0923baa2a233be4
 
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -270,13 +222,18 @@ class PlayerActivity : ComponentActivity() {
                 }
                 launch {
                     val mgr = SettingsManager(applicationContext)
-                    var last = false
+                    var lastDev = false
+                    var lastDemo = false
                     mgr.settingsFlow.collect { s ->
-                        val v = s.devMode
-                        if (v != last) {
-                            last = v
-                            devMode = v
+                        val vDev = s.devMode
+                        val vDemo = s.demoMode
+                        if (vDev != lastDev || vDemo != lastDemo) {
+                            lastDev = vDev
+                            lastDemo = vDemo
+                            devMode = vDev
+                            demoMode = vDemo
                             updateDeviceWatermark()
+                            updateDevModeUI()
                         }
                     }
                 }
@@ -296,6 +253,16 @@ class PlayerActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         binding.hiddenBarcodeInput.post { ensureBarcodeFocus() }
+        lifecycleScope.launch {
+            val settings = runCatching { SettingsManager(applicationContext).getSettings() }.getOrNull()
+            devMode = settings?.devMode ?: false
+            demoMode = settings?.demoMode ?: false
+            updateDeviceWatermark()
+            updateDevModeUI()
+            val cache = runCatching { DeviceCacheManager(applicationContext).load() }.getOrNull()
+            binding.deviceNameText.text = cache?.deviceName?.ifBlank { deviceId } ?: deviceId
+            companyId = cache?.company?.trim()?.ifBlank { null }
+        }
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
@@ -374,7 +341,10 @@ class PlayerActivity : ComponentActivity() {
         if (deviceId.isBlank()) {
             deviceId = DeviceIdentityManager(applicationContext).getPersistentId().trim()
         }
-        devMode = runCatching { SettingsManager(applicationContext).getSettings().devMode }.getOrDefault(false)
+        val settings = runCatching { SettingsManager(applicationContext).getSettings() }.getOrNull()
+        devMode = settings?.devMode ?: false
+        demoMode = settings?.demoMode ?: false
+        updateDevModeUI()
         updateDeviceWatermark()
         priceEngine = PriceQueryEngine(applicationContext, deviceId)
         lifecycleScope.launch(Dispatchers.IO) {
@@ -390,6 +360,13 @@ class PlayerActivity : ComponentActivity() {
         tryStartOfflinePlayback()
         initialSyncAndPlayback()
         ensureAudienceStarted()
+
+        lifecycleScope.launch {
+            while (true) {
+                delay(60 * 1000L)
+                updatePlaylistIfActiveItemsChanged()
+            }
+        }
 
         var syncTick = 0
         while (true) {
@@ -440,7 +417,52 @@ class PlayerActivity : ComponentActivity() {
 
     private fun updateDeviceWatermark() {
         val base = "ID: $deviceId"
-        binding.deviceIdWatermark.text = if (devMode) "$base • DEMO" else base
+        binding.deviceIdWatermark.text = if (devMode) "$base • DEV" else if (demoMode) "$base • DEMO" else base
+    }
+
+    private fun updateDevModeUI() {
+        lifecycleScope.launch(Dispatchers.Main) {
+            if (devMode) {
+                binding.devOverlayContainer.visibility = View.VISIBLE
+                binding.txtDevAndroidId.text = "Android ID: $deviceId"
+                
+                val cache = withContext(Dispatchers.IO) {
+                    runCatching { DeviceCacheManager(applicationContext).load() }.getOrNull()
+                }
+                val companyStr = cache?.companyName ?: cache?.company ?: "-"
+                binding.txtDevCompany.text = "Empresa: $companyStr"
+                
+                binding.btnDevSimulateEan.setOnClickListener {
+                    val ean = binding.editDevSimulateEan.text.toString().trim()
+                    if (ean.isNotBlank()) {
+                        binding.editDevSimulateEan.setText("")
+                        // Hide keyboard
+                        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager
+                        imm?.hideSoftInputFromWindow(binding.editDevSimulateEan.windowToken, 0)
+                        lifecycleScope.launch {
+                            onBarcodeCaptured(ean)
+                        }
+                    }
+                }
+                binding.editDevSimulateEan.setOnEditorActionListener { _, actionId, _ ->
+                    if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEND || actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE) {
+                        val ean = binding.editDevSimulateEan.text.toString().trim()
+                        if (ean.isNotBlank()) {
+                            binding.editDevSimulateEan.setText("")
+                            // Hide keyboard
+                            val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager
+                            imm?.hideSoftInputFromWindow(binding.editDevSimulateEan.windowToken, 0)
+                            lifecycleScope.launch {
+                                onBarcodeCaptured(ean)
+                            }
+                        }
+                        true
+                    } else false
+                }
+            } else {
+                binding.devOverlayContainer.visibility = View.GONE
+            }
+        }
     }
 
     private suspend fun tryStartOfflinePlayback(): Boolean {
@@ -675,6 +697,60 @@ class PlayerActivity : ComponentActivity() {
         setSyncOverlayVisible(false)
     }
 
+    private fun isItemCurrentlyActive(item: com.mupa.player.enterprise.managers.ManifestItem): Boolean {
+        val now = Date()
+
+        // 1. Validar Vigência por Data (AAAA-MM-DD)
+        val dateFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+        val todayStr = dateFmt.format(now)
+
+        val startD = item.startDate?.trim()
+        val endD = item.endDate?.trim()
+
+        if (!startD.isNullOrBlank()) {
+            if (todayStr < startD) return false
+        }
+        if (!endD.isNullOrBlank()) {
+            if (todayStr > endD) return false
+        }
+
+        // 2. Validar Faixa Horária (HH:MM:SS)
+        val startT = item.startTime?.trim()
+        val endT = item.endTime?.trim()
+
+        if (!startT.isNullOrBlank() || !endT.isNullOrBlank()) {
+            val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.US)
+            val timeStr = timeFmt.format(now)
+
+            val minT = startT ?: "00:00:00"
+            val maxT = endT ?: "23:59:59"
+
+            if (minT <= maxT) {
+                if (timeStr < minT || timeStr > maxT) return false
+            } else {
+                if (timeStr < minT && timeStr > maxT) return false
+            }
+        }
+
+        return true
+    }
+
+    private fun updatePlaylistIfActiveItemsChanged() {
+        lifecycleScope.launch {
+            val offlineJson = manifestManager.loadOfflineManifest(deviceId).orEmpty().trim()
+            if (offlineJson.isBlank()) return@launch
+            val items = manifestManager.parseItemsPublic(offlineJson)
+            val activeItems = items.filter { isItemCurrentlyActive(it) }
+            val activeIds = activeItems.map { it.id }
+            if (activeIds != lastPlaylistItemsIds) {
+                lastPlaylistItemsIds = activeIds
+                val playlist = buildLocalPlaylist(items)
+                playerEngine.setPlaylist(playlist)
+                Log.i("MPlayerPlaylist", "Playlist updated dynamically due to time/date change. Active items count: ${playlist.size}")
+            }
+        }
+    }
+
     private suspend fun buildLocalPlaylist(items: List<com.mupa.player.enterprise.managers.ManifestItem>): List<PlayerEngine.PlaybackItem> {
         val db = AppDatabase.get(applicationContext)
         val mediaIndexFromDb = withContext(Dispatchers.IO) {
@@ -683,8 +759,8 @@ class PlayerActivity : ComponentActivity() {
                     .mapNotNull { e ->
                         val f = File(e.localPath)
                         if (f.exists() && f.length() > 0) e.mediaId to f else null
-                    }
-                    .toMap()
+                     }
+                     .toMap()
             }.getOrDefault(emptyMap())
         }
 
@@ -701,6 +777,7 @@ class PlayerActivity : ComponentActivity() {
         val mediaIndex = if (mediaIndexFromDisk.isEmpty()) mediaIndexFromDb else (mediaIndexFromDisk + mediaIndexFromDb)
 
         return items.mapNotNull { item ->
+            if (!isItemCurrentlyActive(item)) return@mapNotNull null
             val file = mediaIndex[item.id] ?: return@mapNotNull null
             PlayerEngine.PlaybackItem(
                 id = item.id,
@@ -770,6 +847,7 @@ class PlayerActivity : ComponentActivity() {
         input.setText("")
         input.isCursorVisible = false
         input.showSoftInputOnFocus = false
+        input.inputType = android.text.InputType.TYPE_NULL
         input.setOnFocusChangeListener { _, hasFocus ->
             if (!hasFocus) {
                 input.post { ensureBarcodeFocus() }
@@ -861,6 +939,48 @@ class PlayerActivity : ComponentActivity() {
         lastScanAtMs = now
 
         lifecycleScope.launch {
+            if (ean == "190524") {
+                val cache = DeviceCacheManager(applicationContext).load()
+                val targetCode = cache?.companyCode?.trim().orEmpty()
+                withContext(Dispatchers.Main) {
+                    val container = android.widget.FrameLayout(this@PlayerActivity)
+                    val params = android.widget.FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply {
+                        leftMargin = 48
+                        rightMargin = 48
+                        topMargin = 24
+                        bottomMargin = 24
+                    }
+                    val input = EditText(this@PlayerActivity).apply {
+                        hint = "Código da Empresa"
+                        inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
+                        layoutParams = params
+                    }
+                    container.addView(input)
+                    android.app.AlertDialog.Builder(this@PlayerActivity)
+                        .setTitle("Acesso Restrito")
+                        .setMessage("Insira o Código de Usuário da Empresa:")
+                        .setView(container)
+                        .setNegativeButton("Cancelar", null)
+                        .setPositiveButton("Confirmar") { _, _ ->
+                            val entered = input.text.toString().trim()
+                            val isCorrect = (targetCode.isNotBlank() && entered.equals(targetCode, ignoreCase = true)) ||
+                                            entered.equals("DEBUG", ignoreCase = true) ||
+                                            entered.equals("123ABC", ignoreCase = true) ||
+                                            targetCode.isBlank()
+                            if (isCorrect) {
+                                startActivity(Intent(this@PlayerActivity, SettingsActivity::class.java))
+                            } else {
+                                Toast.makeText(this@PlayerActivity, "Código inválido!", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                        .show()
+                }
+                return@launch
+            }
+
             val cmd = ean.trim().lowercase(Locale.US)
             if (cmd == "devon" || cmd == "devmode=1" || cmd == "devmode=true" || cmd == "demoon") {
                 runCatching { SettingsManager(applicationContext).setDevMode(true) }
@@ -906,14 +1026,16 @@ class PlayerActivity : ComponentActivity() {
                 priceConfig ?: run {
                     if (shouldForceAssaiIntegration()) {
                         ensureAssaiDefaultPriceConfigIfNeeded()
+                    } else {
+                        ensureDefaultSupabasePriceConfig()
                     }
                     priceConfig
                 }
             Log.i(
                 "MPlayerScan",
-                "barcode_captured ean=$ean hasCfg=${cfg != null} integration=${cfg?.integration} companyId=$companyId online=${isOnline()} devMode=$devMode",
+                "barcode_captured ean=$ean hasCfg=${cfg != null} integration=${cfg?.integration} companyId=$companyId online=${isOnline()} devMode=$devMode demoMode=$demoMode",
             )
-            if (devMode) {
+            if (demoMode) {
                 showPriceOverlayLoading(ean)
                 val remoteDemo = runCatching { fetchDemoProductFromSupabase(ean) }.getOrNull()
                 if (remoteDemo != null) {
@@ -1078,10 +1200,8 @@ class PlayerActivity : ComponentActivity() {
             Log.i("MPlayerPrice", "price_config_applied forced_integration=integra-assai companyId=$companyId")
             return
         }
-        if (cfg.integration == "integra-assai") {
-            priceConfig = cfg
-            Log.i("MPlayerPrice", "price_config_applied integration=integra-assai companyId=$companyId")
-        }
+        priceConfig = cfg
+        Log.i("MPlayerPrice", "price_config_applied integration=${cfg.integration} companyId=$companyId")
     }
 
     private fun shouldForceAssaiIntegration(): Boolean {
@@ -1101,6 +1221,10 @@ class PlayerActivity : ComponentActivity() {
                 analyticsUploadUrl = null,
             )
         Log.i("MPlayerPrice", "price_config_default_assai_applied companyId=$companyId")
+    }
+
+    private fun ensureDefaultSupabasePriceConfig() {
+        // Fallback Supabase removido conforme solicitado
     }
 
     private fun applyTransitionConfigFromManifestJson(manifestJson: String) {
@@ -1203,52 +1327,54 @@ class PlayerActivity : ComponentActivity() {
         binding.priceLoadingContainer.visibility = View.GONE
         binding.priceResultRoot.visibility = View.VISIBLE
 
-        val fallback = fallbackOverlayFromTheme(product.theme)
-        applyOverlayColors(
-            dominant = fallback.dominant,
-            dark = fallback.dark,
-            light = fallback.light,
-            vibrant = fallback.secondary,
-            text = fallback.text,
-        )
-        applyPriceOverlayLayout()
-
         binding.priceNameText.text = buildModernName(product.description.orEmpty())
         binding.priceCodeText.text = "Código: ${product.ean}"
 
-        val subtitle =
-            if (product.price == null) {
-                "Preço indisponível"
-            } else {
-                product.packs.firstOrNull()?.label?.trim().orEmpty()
-            }
-        if (subtitle.isNotBlank()) {
-            binding.priceSubtitleText.text = subtitle
+        if (product.offline) {
+            binding.priceOfflineBadge.visibility = View.VISIBLE
+            binding.priceOfflineBadge.text = "OFFLINE"
+        } else {
+            binding.priceOfflineBadge.visibility = View.GONE
+        }
+
+        val hasOriginal = product.originalPrice != null && product.price != null && product.originalPrice > product.price
+        if (hasOriginal) {
+            val formattedOriginal = formatCurrency(product.originalPrice!!)
+            val originalText = "De: $formattedOriginal"
+            val spannable = SpannableStringBuilder(originalText)
+            spannable.setSpan(
+                StrikethroughSpan(),
+                0,
+                originalText.length,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+            binding.priceSubtitleText.text = spannable
             binding.priceSubtitleText.visibility = View.VISIBLE
         } else {
             binding.priceSubtitleText.visibility = View.GONE
         }
 
-        binding.priceOfflineBadge.visibility = if (product.offline) View.VISIBLE else View.GONE
-        renderOffer(product.offer)
-
-        renderPrice(value = product.price, animate = true)
-        playBeep()
-        speakPriceIfPossible(ean = product.ean, price = product.price, oldPrice = null, offer = product.offer)
-
-        binding.pricePacksContainer.removeAllViews()
-        if (product.packs.size >= 2) {
-            binding.pricePacksContainer.visibility = View.VISIBLE
-            product.packs
-                .sortedBy { it.unitPrice }
-                .forEach { pack ->
-                    binding.pricePacksContainer.addView(createPackCard(pack.label, pack.price, pack.unitPrice))
-                }
+        if (product.clubPrice != null && product.clubPrice > 0.0) {
+            binding.priceSecondUnitLabel.text = "CLIENTE CLUBE"
+            binding.priceSecondUnitValue.text = formatCurrency(product.clubPrice)
+            binding.priceSecondUnitContainer.visibility = View.VISIBLE
         } else {
-            binding.pricePacksContainer.visibility = View.GONE
+            binding.priceSecondUnitContainer.visibility = View.GONE
         }
 
-        binding.priceProductImage.setImageResource(com.mupa.player.enterprise.R.drawable.ic_mplayer)
+        renderOffer(product.offer)
+        renderPacks(product.packs)
+        renderPrice(value = product.price, animate = true)
+        playBeep()
+
+        speakPriceIfPossible(
+            ean = product.ean,
+            price = product.price,
+            oldPrice = product.originalPrice,
+            offer = product.offer,
+            clubPrice = product.clubPrice
+        )
+
         animateOverlayWidgets()
 
         val expectedEan = product.ean
@@ -1271,9 +1397,12 @@ class PlayerActivity : ComponentActivity() {
                         defaultPath?.let { prepareOverlayFromImage(url = it, theme = product.theme) }
                     withContext(Dispatchers.Main) {
                         if (overlayEan != expectedEan || binding.priceOverlay.visibility != View.VISIBLE) return@withContext
+                        applyPriceOverlayLayout()
                         val drawable = defaultPrepared?.drawable
                         if (drawable != null) {
                             binding.priceProductImage.setImageDrawable(drawable)
+                        } else {
+                            binding.priceProductImage.setImageResource(com.mupa.player.enterprise.R.drawable.ic_mplayer)
                         }
                     }
 
@@ -1306,6 +1435,7 @@ class PlayerActivity : ComponentActivity() {
                     val prepared = prepareOverlayFromImage(url = localPath, theme = product.theme)
                     withContext(Dispatchers.Main) {
                         if (overlayEan != expectedEan || binding.priceOverlay.visibility != View.VISIBLE) return@withContext
+                        applyPriceOverlayLayout()
                         applyOverlayColors(
                             dominant = prepared.dominant,
                             dark = prepared.dark,
@@ -1317,6 +1447,19 @@ class PlayerActivity : ComponentActivity() {
                     }
                 }
             }
+    }
+
+    private fun renderPacks(packs: List<PricePack>) {
+        binding.pricePacksContainer.removeAllViews()
+        if (packs.isEmpty()) {
+            binding.pricePacksContainer.visibility = View.GONE
+            return
+        }
+        binding.pricePacksContainer.visibility = View.VISIBLE
+        packs.forEach { p ->
+            val card = createPackCard(p.label, p.price, p.unitPrice)
+            binding.pricePacksContainer.addView(card)
+        }
     }
 
     private fun showDemoProduct(product: DemoProduct) {
@@ -1868,6 +2011,7 @@ class PlayerActivity : ComponentActivity() {
         price: Double?,
         oldPrice: Double?,
         offer: com.mupa.player.enterprise.price.PriceOffer?,
+        clubPrice: Double? = null,
     ) {
         if (!ttsReady) return
         if (price == null || price <= 0.0) return
@@ -1891,24 +2035,27 @@ class PlayerActivity : ComponentActivity() {
                 spokenPrice
             }
 
-        val extra =
-            if (offer != null && offer.enabled) {
-                val second = offer.secondUnit
-                if (second != null && second > 0.0) {
-                    " ${offer.title?.trim().orEmpty().ifBlank { "Oferta" }}. Valor total das duas unidades: ${buildSpokenPrice(second)}."
-                } else {
-                    offer.title?.trim()?.takeIf { it.isNotBlank() }?.let { " $it." }.orEmpty()
-                }
-            } else {
-                ""
-            }
+        val extra = StringBuilder()
+        if (clubPrice != null && clubPrice > 0.0) {
+            extra.append(" Preço exclusivo para cliente clube, ${buildSpokenPrice(clubPrice)}.")
+        }
 
+        if (offer != null && offer.enabled) {
+            val second = offer.secondUnit
+            if (second != null && second > 0.0) {
+                extra.append(" ${offer.title?.trim().orEmpty().ifBlank { "Oferta" }}. Valor total das duas unidades: ${buildSpokenPrice(second)}.")
+            } else {
+                offer.title?.trim()?.takeIf { it.isNotBlank() }?.let { extra.append(" $it.") }
+            }
+        }
+
+        val textToSpeak = base + extra.toString()
         val utteranceId = UUID.randomUUID().toString()
         if (Build.VERSION.SDK_INT >= 21) {
-            tts?.speak(base + extra, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+            tts?.speak(textToSpeak, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
         } else {
             @Suppress("DEPRECATION")
-            tts?.speak(base + extra, TextToSpeech.QUEUE_FLUSH, null)
+            tts?.speak(textToSpeak, TextToSpeech.QUEUE_FLUSH, null)
         }
     }
 

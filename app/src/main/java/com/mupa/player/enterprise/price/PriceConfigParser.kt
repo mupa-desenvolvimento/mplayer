@@ -17,6 +17,7 @@ data class PriceStep(
     val method: String,
     val headers: Map<String, String>,
     val mapping: Map<String, String>,
+    val body: String? = null,
 )
 
 object PriceConfigParser {
@@ -50,12 +51,21 @@ object PriceConfigParser {
                 mapping[k] = mappingObj.optString(k, "")
             }
 
+            val bodyObj = o.opt("body")
+            val body = when (bodyObj) {
+                is JSONObject -> bodyObj.toString()
+                is JSONArray -> bodyObj.toString()
+                is String -> bodyObj.trim()
+                else -> null
+            }
+
             steps += PriceStep(
                 type = type,
                 url = url,
                 method = method,
                 headers = headers,
                 mapping = mapping,
+                body = body,
             )
         }
 

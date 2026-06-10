@@ -543,4 +543,82 @@
         android:textColor="@color/enterprise_on_muted"
         android:textSize="11sp" />
 
+    <!-- Dev Mode Overlay Container -->
+    <LinearLayout
+        android:id="@+id/devOverlayContainer"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:padding="16dp"
+        android:visibility="gone"
+        android:clickable="false"
+        android:focusable="false">
+
+        <!-- Top Input box to simulate EAN -->
+        <LinearLayout
+            android:layout_width="320dp"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|center_horizontal"
+            android:background="#DD000000"
+            android:padding="8dp"
+            android:orientation="horizontal"
+            android:clickable="true"
+            android:focusable="true">
+
+            <EditText
+                android:id="@+id/editDevSimulateEan"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:hint="Simular EAN..."
+                android:textColor="#FFFFFF"
+                android:textColorHint="#88FFFFFF"
+                android:textSize="14sp"
+                android:imeOptions="actionSend"
+                android:inputType="number"
+                android:singleLine="true" />
+
+            <Button
+                android:id="@+id/btnDevSimulateEan"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Consultar"
+                android:textSize="12sp"
+                android:backgroundTint="@color/mupa_cyan"
+                android:textColor="#000000" />
+        </LinearLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+
+        <!-- Bottom info boxes -->
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom|start"
+            android:background="#DD000000"
+            android:padding="8dp"
+            android:orientation="vertical"
+            android:layout_marginBottom="32dp">
+
+            <TextView
+                android:id="@+id/txtDevAndroidId"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="#00FF00"
+                android:textSize="12sp"
+                android:text="Android ID: -" />
+
+            <TextView
+                android:id="@+id/txtDevCompany"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="#00FF00"
+                android:textSize="12sp"
+                android:text="Empresa: -" />
+        </LinearLayout>
+    </LinearLayout>
+
 </FrameLayout>

@@ -5,6 +5,8 @@ data class PriceProduct(
     val ean: String,
     val description: String?,
     val price: Double?,
+    val originalPrice: Double?,
+    val clubPrice: Double?,
     val stock: Int?,
     val image: String?,
     val offer: PriceOffer?,

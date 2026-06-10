@@ -15,7 +15,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         PriceCacheEntity::class,
         PriceQueryEventEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -39,6 +39,7 @@ abstract class AppDatabase : RoomDatabase() {
                     .addMigrations(MIGRATION_1_2)
                     .addMigrations(MIGRATION_2_3)
                     .addMigrations(MIGRATION_3_4)
+                    .addMigrations(MIGRATION_4_5)
                     .build()
                     .also { instance = it }
             }
@@ -111,6 +112,13 @@ abstract class AppDatabase : RoomDatabase() {
                 override fun migrate(db: SupportSQLiteDatabase) {
                     db.execSQL("ALTER TABLE price_query_events ADD COLUMN uploadedAtEpochMs INTEGER")
                     db.execSQL("CREATE INDEX IF NOT EXISTS index_price_query_events_uploadedAtEpochMs ON price_query_events(uploadedAtEpochMs)")
+                }
+            }
+
+        private val MIGRATION_4_5 =
+            object : Migration(4, 5) {
+                override fun migrate(db: SupportSQLiteDatabase) {
+                    db.execSQL("ALTER TABLE price_query_events ADD COLUMN filial TEXT NOT NULL DEFAULT ''")
                 }
             }
     }
