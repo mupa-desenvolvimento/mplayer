@@ -16,6 +16,10 @@ object YuvToJpeg {
     }
 
     private fun imageProxyToNv21(image: ImageProxy): ByteArray {
+        val width = image.width
+        val height = image.height
+        val nv21 = ByteArray(width * height * 3 / 2)
+
         val yPlane = image.planes[0]
         val uPlane = image.planes[1]
         val vPlane = image.planes[2]
@@ -24,24 +28,36 @@ object YuvToJpeg {
         val uBuffer = uPlane.buffer
         val vBuffer = vPlane.buffer
 
-        // Rewind to ensure we read from the beginning
+        // Rewind buffers
         yBuffer.rewind()
         uBuffer.rewind()
         vBuffer.rewind()
 
-        val ySize = yBuffer.remaining()
+        val yRowStride = yPlane.rowStride
+        val yPixelStride = yPlane.pixelStride
+
+        // Copy Y plane row by row, discarding padding
+        var idY = 0
+        if (yPixelStride == 1 && yRowStride == width) {
+            yBuffer.get(nv21, 0, width * height)
+        } else {
+            val rowBuffer = ByteArray(yRowStride)
+            for (row in 0 until height) {
+                yBuffer.position(row * yRowStride)
+                yBuffer.get(rowBuffer, 0, yRowStride)
+                for (col in 0 until width) {
+                    nv21[idY++] = rowBuffer[col * yPixelStride]
+                }
+            }
+        }
+
+        // Copy chroma planes U/V
+        val chromaRowStride = uPlane.rowStride
+        val chromaPixelStride = uPlane.pixelStride
         val uSize = uBuffer.remaining()
         val vSize = vBuffer.remaining()
 
-        val nv21 = ByteArray(ySize + uSize + vSize)
-        yBuffer.get(nv21, 0, ySize)
-
-        val chromaRowStride = uPlane.rowStride
-        val chromaPixelStride = uPlane.pixelStride
-        val width = image.width
-        val height = image.height
-
-        var offset = ySize
+        var offset = width * height
         for (row in 0 until height / 2) {
             for (col in 0 until width / 2) {
                 val uIndex = row * chromaRowStride + col * chromaPixelStride
@@ -60,4 +76,3 @@ object YuvToJpeg {
         return nv21
     }
 }
-
