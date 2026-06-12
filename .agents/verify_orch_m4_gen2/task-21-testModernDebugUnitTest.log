@@ -1,0 +1,44 @@
+Starting a Gradle Daemon, 1 incompatible and 6 stopped Daemons could not be reused, use --status for details
+Warning: SDK processing. This version only understands SDK XML versions up to 3 but an SDK XML file of version 4 was encountered. This can happen if you use versions of Android Studio and the command-line tools that were released at different times.
+> Task :app:checkKotlinGradlePluginConfigurationErrors
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preModernDebugBuild UP-TO-DATE
+> Task :app:dataBindingMergeDependencyArtifactsModernDebug UP-TO-DATE
+> Task :app:generateModernDebugResValues UP-TO-DATE
+> Task :app:generateModernDebugResources UP-TO-DATE
+> Task :app:mergeModernDebugResources UP-TO-DATE
+> Task :app:packageModernDebugResources UP-TO-DATE
+> Task :app:parseModernDebugLocalResources UP-TO-DATE
+> Task :app:dataBindingGenBaseClassesModernDebug UP-TO-DATE
+> Task :app:generateModernDebugBuildConfig UP-TO-DATE
+> Task :app:checkModernDebugAarMetadata UP-TO-DATE
+> Task :app:mapModernDebugSourceSetPaths UP-TO-DATE
+> Task :app:createModernDebugCompatibleScreenManifests UP-TO-DATE
+> Task :app:extractDeepLinksModernDebug UP-TO-DATE
+> Task :app:processModernDebugMainManifest UP-TO-DATE
+> Task :app:processModernDebugManifest UP-TO-DATE
+> Task :app:processModernDebugManifestForPackage UP-TO-DATE
+> Task :app:processModernDebugResources UP-TO-DATE
+> Task :app:kaptGenerateStubsModernDebugKotlin UP-TO-DATE
+> Task :app:kaptModernDebugKotlin UP-TO-DATE
+> Task :app:compileModernDebugKotlin UP-TO-DATE
+> Task :app:javaPreCompileModernDebug UP-TO-DATE
+> Task :app:compileModernDebugJavaWithJavac UP-TO-DATE
+> Task :app:preModernDebugUnitTestBuild UP-TO-DATE
+> Task :app:mergeModernDebugShaders UP-TO-DATE
+> Task :app:compileModernDebugShaders NO-SOURCE
+> Task :app:generateModernDebugAssets UP-TO-DATE
+> Task :app:mergeModernDebugAssets UP-TO-DATE
+> Task :app:javaPreCompileModernDebugUnitTest
+> Task :app:packageModernDebugUnitTestForUnitTest
+> Task :app:processModernDebugJavaRes UP-TO-DATE
+> Task :app:generateModernDebugUnitTestConfig
+> Task :app:bundleModernDebugClassesToCompileJar
+> Task :app:bundleModernDebugClassesToRuntimeJar
+> Task :app:kaptGenerateStubsModernDebugUnitTestKotlin
+> Task :app:kaptModernDebugUnitTestKotlin
+> Task :app:compileModernDebugUnitTestKotlin
+> Task :app:compileModernDebugUnitTestJavaWithJavac NO-SOURCE
+> Task :app:processModernDebugUnitTestJavaRes
+OpenJDK 64-Bit Server VM warning: Sharing is only supported for boot loader classes because bootstrap classpath has been appended
+> Task :app:testModernDebugUnitTest

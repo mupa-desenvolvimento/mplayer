@@ -81,7 +81,7 @@ class PriceQueryEngine(
 
         val cache = db.priceCacheDao().getByEan(normalizedEan)
         val fromCache =
-            cache != null && (now - cache.updatedAtEpochMs) <= 3 * 60 * 1000L
+            cache != null && (now - cache.updatedAtEpochMs) <= config.cacheMinutes * 60 * 1000L
 
         if (fromCache) {
             val product = normalizeCachedProduct(parseProductFromCache(normalizedEan, cache))
@@ -209,7 +209,7 @@ class PriceQueryEngine(
         val now = System.currentTimeMillis()
         val cache = db.priceCacheDao().getByEan(ean)
         val fromCache =
-            cache != null && (now - cache.updatedAtEpochMs) <= 3 * 60 * 1000L
+            cache != null && (now - cache.updatedAtEpochMs) <= config.cacheMinutes * 60 * 1000L
 
         if (fromCache) {
             val product = normalizeCachedProduct(parseProductFromCache(ean, cache))
@@ -245,7 +245,7 @@ class PriceQueryEngine(
             val descCompleta = seqInfo.second
             Log.i("ASSAI_SEQPRODUTO", "[ASSAI_SEQPRODUTO] ean=$ean seqProduto=$seqProduto")
 
-            val storeId = 144
+            val storeId = filial.toIntOrNull() ?: 144
             val state =
                 JSONObject()
                     .put("ean", ean)
@@ -312,7 +312,7 @@ class PriceQueryEngine(
                     }
                 }
                 if (bestUnit != null && bestPackPrice != null) {
-                    mainPrice = bestPackPrice
+                    mainPrice = if (bestUnit > 1) bestPackPrice / bestUnit.toDouble() else bestPackPrice
                 }
             }
 

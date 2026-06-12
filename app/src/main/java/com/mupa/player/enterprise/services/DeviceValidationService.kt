@@ -65,6 +65,7 @@ class DeviceValidationService(private val context: Context) {
         val company = obj.optString("empresa", "").ifBlank { obj.optString("company", "") }
         val tenant = obj.optString("tenant_id", "").ifBlank { obj.optString("tenant", "") }
         val dbId = obj.optLong("id", 0L)
+        val licenseType = obj.optString("tipo_da_licenca", "").takeIf { it.isNotBlank() && it != "null" }
 
         return DeviceCache(
             deviceDbId = dbId,
@@ -77,6 +78,7 @@ class DeviceValidationService(private val context: Context) {
             tenant = tenant,
             lastSyncEpochMs = System.currentTimeMillis(),
             deviceRegistered = true,
+            tipoDaLicenca = licenseType,
         )
     }
 }

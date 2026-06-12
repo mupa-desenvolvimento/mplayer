@@ -396,3 +396,89 @@ JSON:
 }
 ```
 
+---
+
+## 11) Audience Analytics Activation (License + Hardware Gate)
+
+### Overview
+
+Audience analytics in MPlayer Enterprise is gated by **two independent conditions** that must both be satisfied before any camera or ML engine is initialized. Neither gate can be bypassed by a remote command — they are evaluated locally on the device during each Supabase validation sync.
+
+### Gate 1: License Check (Supabase `tipo_da_licenca`)
+
+During the background device validation sync, MPlayer calls the Supabase RPC `get_dispositivo_por_serial`. The returned `tipo_da_licenca` field determines whether the analytics feature is authorized for this device.
+
+| `tipo_da_licenca` | License Gate | Result |
+|---|---|---|
+| `"facial"` | ✅ Pass | Analytics feature authorized |
+| `"analytics"` | ✅ Pass | Analytics feature authorized |
+| `"enterprise"` | ✅ Pass | Analytics feature authorized |
+| `null` (field absent) | ❌ Fail | Analytics skipped; no camera bound |
+| Any other string | ❌ Fail | Analytics skipped; unrecognized license |
+
+> **Note**: Evaluation is case-sensitive. `"Facial"` or `"ENTERPRISE"` are treated as invalid.
+
+### Gate 2: Hardware Check (Front Camera)
+
+Even with a valid license, the device must have a usable front-facing camera. This is checked via the Android `CameraManager` API immediately before engine initialization.
+
+- **Detection method**: `CameraManager.getCameraIdList()` + `CameraCharacteristics.LENS_FACING == LENS_FACING_FRONT`
+- **Outcome if absent**: engine is skipped silently; no exception propagated; content playback continues normally.
+
+### Combined Decision Table
+
+| License Valid? | Front Camera Present? | Outcome |
+|---|---|---|
+| ✅ (`facial` / `analytics` / `enterprise`) | ✅ Yes | Analytics ON — camera bound, ML engines loaded, metrics collected |
+| ✅ Valid | ❌ No | Analytics OFF — hardware gate failed; camera never opened |
+| ❌ Invalid or null | ✅ Yes | Analytics OFF — license gate failed; camera never opened |
+| ❌ Invalid or null | ❌ No | Analytics OFF — both gates failed |
+
+> **Key principle**: If **either** gate fails, **no camera is ever bound** and **no ML engine is loaded**. The device returns to normal content playback mode.
+
+### License Refresh Cycle
+
+The license is not a one-time check at install. It is re-evaluated on **every background device validation sync** (scheduled periodic work via WorkManager). This means:
+
+- A license downgrade (e.g., changing `tipo_da_licenca` to `null` in Supabase) will disable the analytics engine on the next sync cycle — without requiring an app update or reboot.
+- A license upgrade (e.g., adding `"facial"`) will enable the engine on the next sync cycle.
+
+### Future: `REEVALUATE_AUDIENCE_FEATURE` Command
+
+> ⚠️ **Not yet implemented** — planned for a future release.
+
+A remote command `REEVALUATE_AUDIENCE_FEATURE` (via Argos or Firebase) will allow the platform to force an immediate re-evaluation of both gates at runtime, without waiting for the next scheduled sync cycle. This is useful for instant license upgrades/downgrades in field deployments.
+
+Planned payload:
+
+```json
+{
+  "id_device": "SEU_DEVICE_ID",
+  "updated_at": 1760000005000,
+  "commands": {
+    "command_id": "cmd-1760000005000-reevaluate",
+    "command": "REEVALUATE_AUDIENCE_FEATURE",
+    "executed": false,
+    "retry": 0,
+    "params": {}
+  }
+}
+```
+
+Expected behavior (when implemented):
+- Triggers a Supabase sync immediately.
+- Re-checks `tipo_da_licenca` and front camera availability.
+- Starts or stops the analytics engine accordingly.
+- ACKs with `status: "success"` or `status: "failed"` plus a message describing the outcome.
+
+---
+
+## Changelog
+
+| Version | Date | Description |
+|---|---|---|
+| 1.0.0 | 2024-03-01 | Initial Argos platform protocol document (sections 1–9) |
+| 1.0.1 | 2024-04-15 | Added Section 10: ready-to-use reboot example |
+| 1.1.0 | 2026-06-11 | Added Section 11: Audience Analytics Activation (License + Hardware Gate) |
+
+

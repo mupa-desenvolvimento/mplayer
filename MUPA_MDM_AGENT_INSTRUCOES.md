@@ -273,3 +273,150 @@ O app expõe uma API local (localhost) para automação interna:
   - `POST /reload` (equivale a `reset_app`)
   - `POST /kiosk` (equivale a `fullscreen` se body vazio)
 
+---
+
+## Supabase Device Validation & License System
+
+### Overview
+
+During each background device validation sync, the MPlayer calls the Supabase RPC `get_dispositivo_por_serial` to validate the device and retrieve its current configuration. As of this version, the RPC returns a new field: **`tipo_da_licenca`**.
+
+### `tipo_da_licenca` field
+
+| Field | Type | Source |
+|---|---|---|
+| `tipo_da_licenca` | `text` (nullable) | Supabase `dispositivos` table |
+
+#### Effect table
+
+| `tipo_da_licenca` value | Audience Analytics Engine | Notes |
+|---|---|---|
+| `"facial"` | ✅ Initializes | Full facial recognition + audience measurement |
+| `"analytics"` | ✅ Initializes | Audience analytics (same engine) |
+| `"enterprise"` | ✅ Initializes | Enterprise tier — all features enabled |
+| `null` | ❌ Skipped | No camera bound, no ML models loaded |
+| Invalid / unknown string | ❌ Skipped | Engine skipped silently; content playback unaffected |
+
+> **Important**: The license check is case-sensitive. `"Facial"` or `"ANALYTICS"` are treated as invalid and will skip the engine.
+
+### Persistence via `DeviceCacheManager`
+
+After each successful Supabase sync, the `DeviceCacheManager` persists `tipoDaLicenca` in **two layers**:
+
+1. **DataStore (Preferences)** — used as primary source of truth at app startup.
+2. **SharedPreferences** — kept as a legacy fallback for backward compatibility with older code paths.
+
+This dual-write ensures that even if one storage layer becomes corrupted, the license value survives.
+
+```kotlin
+// Pseudo-code — DeviceCacheManager.saveLicense(...)
+dataStore.edit { prefs ->
+    prefs[KEY_TIPO_DA_LICENCA] = tipoDaLicenca ?: ""
+}
+sharedPrefs.edit()
+    .putString("tipo_da_licenca", tipoDaLicenca)
+    .apply()
+```
+
+---
+
+## AudienceAnalyticsNativeEngine (ML Kit + TFLite)
+
+### Background
+
+The native `AudienceAnalyticsNativeEngine` **replaces** the previous WebView-based engine that used `face-api.min.js` running inside the player WebView. The motivation for the replacement:
+
+- WebView-based ML is slow, power-hungry, and unsuitable for continuous background analysis.
+- The native engine uses hardware-accelerated TFLite delegates and CameraX for efficient, low-latency inference.
+- No images or frames are ever stored — only anonymous aggregated metrics leave the device.
+
+### Pipeline
+
+```
+CameraX ImageAnalysis (front camera, continuous stream)
+       │
+       ▼
+ML Kit Face Detection API
+  → detects face bounding boxes per frame
+       │
+       ▼
+Face Crop (bitmap region per face)
+       │
+       ├──► mobilefacenet.tflite  [112 × 112 input]
+       │       → 128-float embedding → faceHash
+       │         (used for anonymous de-duplication within session)
+       │
+       └──► age_gender_model.tflite  [224 × 224 input]
+               → outputs: age (float, years) + [male_prob, female_prob]
+       │
+       ▼
+Anonymous in-RAM metrics accumulator
+  - keyed by faceHash (no image retained)
+  - rolling time-window buckets (e.g., 5-minute windows)
+  - age bucketed into ranges: <18, 18–24, 25–34, 35–44, 45–54, 55+
+       │
+       ▼
+Aggregated metrics → Supabase (no PII, no images)
+```
+
+### TFLite Model Specifications
+
+#### `age_gender_model.tflite`
+
+| Property | Value |
+|---|---|
+| Input tensor | 224 × 224 × 3 (RGB float) |
+| Output | `[age_float, male_prob, female_prob]` |
+| Age output | Floating-point years (e.g., `28.4`) |
+| Gender output | Softmax probabilities (male + female = 1.0) |
+| Purpose | Predicts age bracket and gender for audience segmentation |
+
+#### `mobilefacenet.tflite`
+
+| Property | Value |
+|---|---|
+| Input tensor | 112 × 112 × 3 (RGB float) |
+| Output | 128-float embedding vector |
+| Purpose | Generates anonymous face hash for within-session de-duplication |
+| Privacy | Hash is never transmitted; discarded at session end |
+
+### Model Provisioning
+
+Models are **not bundled in the APK**. They are downloaded by `ModelProvisioningManager`:
+
+1. At startup (or after a license validation confirms `tipo_da_licenca` is valid).
+2. From `BuildConfig.TFLITE_MODELS_BASE_URL` (configured at build time per flavor).
+3. Saved to `context.filesDir/models/` (internal app storage, not accessible to other apps).
+4. SHA-256 integrity check before the engine is allowed to start.
+
+If models are missing or corrupted, the engine aborts initialization; an error is logged but **the app continues to play content normally**.
+
+```kotlin
+// Pseudo-code — ModelProvisioningManager.ensureModels(...)
+val modelsDir = File(context.filesDir, "models")
+listOf("age_gender_model.tflite", "mobilefacenet.tflite").forEach { name ->
+    val dest = File(modelsDir, name)
+    if (!dest.exists() || !dest.verifySha256()) {
+        downloadFromUrl("${BuildConfig.TFLITE_MODELS_BASE_URL}/$name", dest)
+    }
+}
+```
+
+### Initialization Guard
+
+The engine initialization sequence applies **two gates** in order:
+
+1. **License gate** — `tipoDaLicenca` must be `"facial"`, `"analytics"`, or `"enterprise"`.
+2. **Hardware gate** — `CameraManager` must detect at least one `LENS_FACING_FRONT` camera.
+
+If either gate fails, the engine does not start, no camera is bound, and no model files are loaded into memory.
+
+---
+
+## Changelog
+
+| Version | Date | Description |
+|---|---|---|
+| 1.0.0 | 2024-03-01 | Initial MDM agent instructions document |
+| 1.1.0 | 2026-06-11 | Added Supabase Device Validation & License System section |
+| 1.1.0 | 2026-06-11 | Added AudienceAnalyticsNativeEngine (ML Kit + TFLite) section |

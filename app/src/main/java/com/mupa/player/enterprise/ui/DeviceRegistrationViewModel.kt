@@ -148,6 +148,7 @@ class DeviceRegistrationViewModel(app: Application) : AndroidViewModel(app) {
             setLoading("Validando cadastro...")
             when (val validation = validationService.validateDevice(deviceId)) {
                 is DeviceValidationResult.Found -> {
+                    com.mupa.player.enterprise.managers.DeviceIdentityManager(getApplication()).save(deviceId)
                     val cache = validation.cache.copy(
                         company = resolvedCompany.id,
                         companyCode = companyCode,

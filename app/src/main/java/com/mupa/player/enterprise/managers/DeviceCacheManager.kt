@@ -20,6 +20,7 @@ data class DeviceCache(
     val tenant: String,
     val lastSyncEpochMs: Long,
     val deviceRegistered: Boolean,
+    val tipoDaLicenca: String?,
 )
 
 class DeviceCacheManager(private val context: Context) {
@@ -37,6 +38,7 @@ class DeviceCacheManager(private val context: Context) {
         val lastSync = longPreferencesKey("ultimo_sync")
         val rawJson = stringPreferencesKey("device_cache_json")
         val deviceRegistered = booleanPreferencesKey("device_registered")
+        val tipoDaLicenca = stringPreferencesKey("tipo_da_licenca")
     }
 
     suspend fun save(cache: DeviceCache) {
@@ -51,6 +53,7 @@ class DeviceCacheManager(private val context: Context) {
             .putString("tenant", cache.tenant)
             .putLong("ultimo_sync", cache.lastSyncEpochMs)
             .putBoolean("device_registered", cache.deviceRegistered)
+            .putString("tipo_da_licenca", cache.tipoDaLicenca)
             .apply()
 
         val json = JSONObject()
@@ -64,6 +67,7 @@ class DeviceCacheManager(private val context: Context) {
             .put("tenant", cache.tenant)
             .put("ultimo_sync", cache.lastSyncEpochMs)
             .put("device_registered", cache.deviceRegistered)
+            .put("tipo_da_licenca", cache.tipoDaLicenca)
             .toString()
 
         context.settingsDataStore.edit { prefs ->
@@ -78,6 +82,7 @@ class DeviceCacheManager(private val context: Context) {
             prefs[Keys.lastSync] = cache.lastSyncEpochMs
             prefs[Keys.rawJson] = json
             prefs[Keys.deviceRegistered] = cache.deviceRegistered
+            prefs[Keys.tipoDaLicenca] = cache.tipoDaLicenca ?: ""
         }
     }
 
@@ -97,6 +102,7 @@ class DeviceCacheManager(private val context: Context) {
             tenant = prefs[Keys.tenant] ?: legacyPrefs.getString("tenant", "") ?: "",
             lastSyncEpochMs = prefs[Keys.lastSync] ?: legacyPrefs.getLong("ultimo_sync", 0L),
             deviceRegistered = prefs[Keys.deviceRegistered] ?: legacyPrefs.getBoolean("device_registered", false),
+            tipoDaLicenca = prefs[Keys.tipoDaLicenca]?.takeIf { it.isNotBlank() } ?: legacyPrefs.getString("tipo_da_licenca", null),
         )
     }
 

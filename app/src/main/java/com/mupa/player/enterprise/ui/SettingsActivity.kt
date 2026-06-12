@@ -84,6 +84,7 @@ class SettingsActivity : ComponentActivity() {
 
             binding.switchDevMode.isChecked = settings?.devMode ?: false
             binding.switchDemoMode.isChecked = settings?.demoMode ?: false
+            binding.btnTestFaceRecognition.visibility = if (settings?.devMode == true) View.VISIBLE else View.GONE
             
             // Read Maintenance Mode setting
             val prefs = applicationContext.settingsDataStore.data.first()
@@ -118,7 +119,8 @@ class SettingsActivity : ComponentActivity() {
                         companyName = current.companyName,
                         tenant = current.tenant,
                         lastSyncEpochMs = current.lastSyncEpochMs,
-                        deviceRegistered = current.deviceRegistered
+                        deviceRegistered = current.deviceRegistered,
+                        tipoDaLicenca = current.tipoDaLicenca
                     )
                     mgr.save(updated)
                     Toast.makeText(this@SettingsActivity, "Filial atualizada para $filialVal", Toast.LENGTH_SHORT).show()
@@ -132,8 +134,13 @@ class SettingsActivity : ComponentActivity() {
         binding.switchDevMode.setOnCheckedChangeListener { _, isChecked ->
             lifecycleScope.launch {
                 SettingsManager(applicationContext).setDevMode(isChecked)
+                binding.btnTestFaceRecognition.visibility = if (isChecked) View.VISIBLE else View.GONE
                 Toast.makeText(this@SettingsActivity, if (isChecked) "Modo Dev Ativado" else "Modo Dev Desativado", Toast.LENGTH_SHORT).show()
             }
+        }
+
+        binding.btnTestFaceRecognition.setOnClickListener {
+            startActivity(Intent(this, FaceRecognitionTestActivity::class.java))
         }
 
         binding.switchDemoMode.setOnCheckedChangeListener { _, isChecked ->

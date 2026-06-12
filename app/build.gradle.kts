@@ -26,8 +26,8 @@ android {
         applicationId = "com.mupa.player.enterprise"
         minSdk = 21
         targetSdk = 34
-        versionCode = 3
-        versionName = "1.0.2"
+        versionCode = 5
+        versionName = "1.0.4"
 
         fun String.escapeForBuildConfig(): String = replace("\\", "\\\\").replace("\"", "\\\"")
 
@@ -52,6 +52,11 @@ android {
             "String",
             "SUPABASE_COMPANIES_URL",
             "\"https://iurqddkuihjsmxubibao.supabase.co/rest/v1/companies\"",
+        )
+        buildConfigField(
+            "String",
+            "TFLITE_MODELS_BASE_URL",
+            "\"https://models.mupa.app/tflite/\"",
         )
     }
 
@@ -121,6 +126,18 @@ android {
         viewBinding = true
         buildConfig = true
     }
+
+    testOptions {
+        unitTests {
+            isReturnDefaultValues = true
+            isIncludeAndroidResources = true
+        }
+    }
+
+    @Suppress("UnstableApiUsage")
+    aaptOptions {
+        noCompress("tflite")
+    }
 }
 
 dependencies {
@@ -163,8 +180,23 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:$cameraXVersion")
     implementation("androidx.camera:camera-view:$cameraXVersion")
 
+    // Google ML Kit Face Detection
+    implementation("com.google.mlkit:face-detection:16.1.7")
+
+    // TensorFlow Lite
+    implementation("org.tensorflow:tensorflow-lite:2.14.0")
+    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+
     add("modernImplementation", files("libs/EasyLayerUnificadaVarejo_1_0_3.aar"))
 
+    // Unit testing dependencies
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("io.mockk:mockk:1.13.10")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
+    testImplementation("org.robolectric:robolectric:4.12.1")
+    testImplementation("androidx.test:core:1.5.0")
+    testImplementation("androidx.test.ext:junit:1.1.5")
+    testImplementation("org.json:json:20231013")
 }
 
 tasks.register("assembleBothDebug") {

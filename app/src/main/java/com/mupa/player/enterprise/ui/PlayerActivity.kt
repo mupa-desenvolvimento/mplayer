@@ -417,7 +417,15 @@ class PlayerActivity : ComponentActivity() {
 
     private fun updateDeviceWatermark() {
         val base = "ID: $deviceId"
-        binding.deviceIdWatermark.text = if (devMode) "$base • DEV" else if (demoMode) "$base • DEMO" else base
+        if (devMode) {
+            binding.deviceIdWatermark.text = "$base • DEV"
+            binding.deviceIdWatermark.visibility = View.VISIBLE
+        } else if (demoMode) {
+            binding.deviceIdWatermark.text = "$base • DEMO"
+            binding.deviceIdWatermark.visibility = View.VISIBLE
+        } else {
+            binding.deviceIdWatermark.visibility = View.GONE
+        }
     }
 
     private fun updateDevModeUI() {
@@ -626,6 +634,11 @@ class PlayerActivity : ComponentActivity() {
 
     private suspend fun refreshInBackground() {
         if (!isOnline()) return
+        runCatching {
+            com.mupa.player.enterprise.services.DeviceValidationService(applicationContext).validateDevice(deviceId)
+        }
+        ensureAudienceStarted()
+
         val remote = runCatching { manifestManager.fetchManifest(deviceId) }.getOrDefault("").trim()
         if (remote.isBlank()) return
         val changed = !manifestManager.compareManifest(deviceId, remote)
@@ -792,8 +805,26 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private suspend fun ensureAudienceStarted() {
-        if (audienceStarted) return
-        if (!AudienceAnalyticsManager.canRunOnDevice(this)) return
+        val cache = runCatching { DeviceCacheManager(applicationContext).load() }.getOrNull()
+        val licenseType = cache?.tipoDaLicenca?.trim()?.lowercase(Locale.US)
+        val licenseValid = licenseType == "facial" || licenseType == "analytics" || licenseType == "enterprise"
+        val canRun = AudienceAnalyticsManager.canRunOnDevice(this)
+
+        if (!licenseValid || !canRun) {
+            if (audienceStarted) {
+                audienceManager?.stop()
+                audienceManager = null
+                audienceStarted = false
+                Log.i("PlayerActivity", "Audience analytics stopped due to license or hardware changes. License: $licenseType, CanRun: $canRun")
+            }
+            return
+        }
+
+        if (audienceStarted) {
+            // Already running, and license/camera is still valid. Do not restart.
+            return
+        }
+
         if (!AudienceAnalyticsManager.hasCameraPermission(this)) {
             cameraPermissionLauncher.launch(android.Manifest.permission.CAMERA)
             return
@@ -815,6 +846,7 @@ class PlayerActivity : ComponentActivity() {
         if (started) {
             audienceManager = manager
             audienceStarted = true
+            Log.i("PlayerActivity", "Audience analytics started successfully. License: $licenseType")
         } else {
             runCatching { manager.stop() }
         }
@@ -1170,9 +1202,9 @@ class PlayerActivity : ComponentActivity() {
     private fun setupDevModeToggle() {
         binding.deviceIdWatermark.setOnLongClickListener {
             lifecycleScope.launch {
-                val enabled = !devMode
-                runCatching { SettingsManager(applicationContext).setDevMode(enabled) }
-                devMode = enabled
+                val enabled = !demoMode
+                runCatching { SettingsManager(applicationContext).setDemoMode(enabled) }
+                demoMode = enabled
                 updateDeviceWatermark()
                 Toast.makeText(this@PlayerActivity, if (enabled) "DEMO ativado" else "DEMO desativado", Toast.LENGTH_SHORT).show()
             }

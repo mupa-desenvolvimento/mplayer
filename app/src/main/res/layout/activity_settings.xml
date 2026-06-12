@@ -232,6 +232,16 @@
                         app:thumbTint="@color/mupa_cyan"
                         app:trackTint="@color/mupa_cyan_dark"/>
 
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnTestFaceRecognition"
+                        style="@style/Widget.Material3.Button.TonalButton"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:text="Testar Reconhecimento Facial"
+                        android:textColor="@color/enterprise_on"
+                        android:visibility="gone"/>
+
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 

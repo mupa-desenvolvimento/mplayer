@@ -1,0 +1,36 @@
+Starting a Gradle Daemon, 3 busy and 1 incompatible and 16 stopped Daemons could not be reused, use --status for details
+Warning: SDK processing. This version only understands SDK XML versions up to 3 but an SDK XML file of version 4 was encountered. This can happen if you use versions of Android Studio and the command-line tools that were released at different times.
+> Task :app:checkKotlinGradlePluginConfigurationErrors
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preLegacyDebugBuild UP-TO-DATE
+> Task :app:dataBindingMergeDependencyArtifactsLegacyDebug UP-TO-DATE
+> Task :app:generateLegacyDebugResValues UP-TO-DATE
+> Task :app:generateLegacyDebugResources UP-TO-DATE
+> Task :app:mergeLegacyDebugResources UP-TO-DATE
+> Task :app:packageLegacyDebugResources UP-TO-DATE
+> Task :app:parseLegacyDebugLocalResources UP-TO-DATE
+> Task :app:dataBindingGenBaseClassesLegacyDebug UP-TO-DATE
+> Task :app:generateLegacyDebugBuildConfig UP-TO-DATE
+> Task :app:checkLegacyDebugAarMetadata UP-TO-DATE
+> Task :app:mapLegacyDebugSourceSetPaths UP-TO-DATE
+> Task :app:createLegacyDebugCompatibleScreenManifests UP-TO-DATE
+> Task :app:extractDeepLinksLegacyDebug UP-TO-DATE
+> Task :app:processLegacyDebugMainManifest UP-TO-DATE
+> Task :app:processLegacyDebugManifest UP-TO-DATE
+> Task :app:processLegacyDebugManifestForPackage UP-TO-DATE
+> Task :app:processLegacyDebugResources UP-TO-DATE
+> Task :app:kaptGenerateStubsLegacyDebugKotlin UP-TO-DATE
+> Task :app:kaptLegacyDebugKotlin UP-TO-DATE
+> Task :app:compileLegacyDebugKotlin UP-TO-DATE
+> Task :app:javaPreCompileLegacyDebug UP-TO-DATE
+> Task :app:compileLegacyDebugJavaWithJavac UP-TO-DATE
+> Task :app:compileLegacyDebugSources UP-TO-DATE
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 9.0.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/8.7/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+
+BUILD SUCCESSFUL in 26s
+22 actionable tasks: 1 executed, 21 up-to-date

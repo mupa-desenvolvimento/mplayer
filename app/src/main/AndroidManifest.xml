@@ -64,6 +64,12 @@
             android:screenOrientation="sensor"
             android:theme="@style/Theme.MupaPlayerEnterprise" />
 
+        <activity
+            android:name=".ui.FaceRecognitionTestActivity"
+            android:exported="false"
+            android:screenOrientation="sensor"
+            android:theme="@style/Theme.MupaPlayerEnterprise" />
+
         <receiver
             android:name=".ui.DevModeReceiver"
             android:exported="true"

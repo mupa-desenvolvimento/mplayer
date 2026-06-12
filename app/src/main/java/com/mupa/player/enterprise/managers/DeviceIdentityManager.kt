@@ -75,7 +75,7 @@ class DeviceIdentityManager(private val context: Context) {
         val androidId =
             Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)?.trim()
         if (!androidId.isNullOrBlank() && androidId.lowercase() != ANDROID_ID_BUG) return androidId
-        return UUID.randomUUID().toString()
+        return ""
     }
 
     private fun resolveStableHardwareId(): String? {

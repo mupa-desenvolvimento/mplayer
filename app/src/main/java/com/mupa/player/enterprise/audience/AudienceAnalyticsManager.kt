@@ -5,13 +5,13 @@ import android.content.pm.PackageManager
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.os.Build
-import android.util.Base64
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
+import com.mupa.player.enterprise.managers.DeviceCacheManager
 import com.mupa.player.enterprise.storage.db.AppDatabase
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -19,6 +19,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -30,7 +31,7 @@ class AudienceAnalyticsManager(
     private val playlistProvider: () -> String?,
 ) {
     private val modelsDir = File(context.filesDir, "models")
-    private val web = AudienceAnalyticsWebViewEngine(context, modelsDir)
+    private val nativeEngine = AudienceAnalyticsNativeEngine(context, modelsDir)
     private val tracker = ViewingSessionTracker(deviceId)
     private val db = AppDatabase.get(context)
 
@@ -42,9 +43,17 @@ class AudienceAnalyticsManager(
 
     suspend fun startIfPossible(): Boolean {
         if (!canRunOnDevice(context)) return false
+        val cache = runCatching { DeviceCacheManager(context).load() }.getOrNull()
+        val licenseType = cache?.tipoDaLicenca?.trim()?.lowercase(Locale.US)
+        val licenseValid = licenseType == "facial" || licenseType == "analytics" || licenseType == "enterprise"
+        if (!licenseValid) return false
+
         if (!modelsDir.exists()) modelsDir.mkdirs()
 
-        val ok = web.init()
+        // Provision TFLite models before engine initialization
+        ModelProvisioningManager.ensureModelsProvisioned(context, cache?.tipoDaLicenca)
+
+        val ok = nativeEngine.init()
         if (!ok) return false
 
         val provider =
@@ -92,7 +101,7 @@ class AudienceAnalyticsManager(
         val ended = tracker.flushAll()
         ended.forEach { db.audienceSessionDao().upsert(it) }
 
-        web.release()
+        nativeEngine.release()
     }
 
     private fun onImage(image: ImageProxy) {
@@ -107,10 +116,10 @@ class AudienceAnalyticsManager(
         image.close()
         if (jpeg == null || jpeg.isEmpty()) return
 
-        val base64 = Base64.encodeToString(jpeg, Base64.NO_WRAP)
+        val base64 = android.util.Base64.encodeToString(jpeg, android.util.Base64.NO_WRAP)
 
         scope.launch {
-            val result = runCatching { web.processFrameJpegBase64(base64) }.getOrNull()
+            val result = runCatching { nativeEngine.processFrameJpegBase64(base64) }.getOrNull()
                 ?: AudienceFrameResult(emptyList())
 
             val ended = tracker.onFrame(
@@ -125,6 +134,13 @@ class AudienceAnalyticsManager(
     }
 
     companion object {
+        // Valid license types that enable facial recognition
+        private val VALID_LICENSE_TYPES = setOf("facial", "analytics", "enterprise")
+
+        fun isLicenseValid(tipoDaLicenca: String?): Boolean {
+            return tipoDaLicenca?.trim()?.lowercase(Locale.US) in VALID_LICENSE_TYPES
+        }
+
         fun canRunOnDevice(context: Context): Boolean {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false
             return hasUsableFrontCamera(context)

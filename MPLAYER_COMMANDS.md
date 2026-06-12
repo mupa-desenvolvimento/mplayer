@@ -370,3 +370,121 @@ curl -X POST http://127.0.0.1:8989/command ^
   -H "Content-Type: application/json" ^
   -d "{\"comando\":\"consulta_ean\",\"codbar\":\"7891035000140\",\"timestamp\":1710000000400}"
 ```
+
+---
+
+## 5) Audience Analytics & Facial Recognition
+
+This section documents the native ML engine that performs anonymous audience measurement using the device front camera.
+
+### 5.1 Overview
+
+The **Audience Analytics engine** is a native Android pipeline (CameraX → ML Kit Face Detection → TFLite inference) that replaces the former WebView-based `face-api.min.js` engine. All data collected is **anonymous** — no images are stored or transmitted; only aggregated age-bracket and gender-probability metrics are sent to Supabase.
+
+### 5.2 Activation Gate: `tipo_da_licenca`
+
+The field `tipo_da_licenca` (returned by Supabase RPC `get_dispositivo_por_serial`) controls whether the native ML engine initializes.
+
+#### Valid values table
+
+| `tipo_da_licenca` value | ML Engine Activated? | Notes |
+|---|---|---|
+| `"facial"` | ✅ Yes | Full facial recognition + audience analytics |
+| `"analytics"` | ✅ Yes | Audience analytics (same engine, same features) |
+| `"enterprise"` | ✅ Yes | Enterprise tier — all features enabled |
+| `null` | ❌ No | Field absent or device not found in Supabase |
+| Any other string | ❌ No | Unrecognized license value; engine is skipped silently |
+
+> **Rule**: The engine only binds when `tipo_da_licenca` is **exactly** one of the three valid strings (case-sensitive). Any other value, including `null` or an empty string `""`, causes the engine to be skipped entirely. No camera is opened. No model is loaded.
+
+### 5.3 Hardware Prerequisite: Front Camera
+
+Even with a valid license, the engine requires a **usable front-facing camera**.
+
+- Detected via Android `CameraManager` API at engine init time.
+- A camera is considered "usable" if `CameraManager.getCameraIdList()` returns at least one camera with `LENS_FACING_FRONT`.
+- If no front camera is found, the engine logs a warning and skips initialization; no exception is thrown to the calling code.
+
+### 5.4 Required Model Files
+
+Two TFLite model files must be provisioned to `files/models/` (internal app files directory) **before** engine initialization:
+
+| File | Input Size | Output | Purpose |
+|---|---|---|---|
+| `age_gender_model.tflite` | 224 × 224 px | `[age_float, male_prob, female_prob]` | Predicts age (float years) and gender probability |
+| `mobilefacenet.tflite` | 112 × 112 px | 128-float embedding | Produces face hash (anonymous de-duplication) |
+
+These files are **not bundled in the APK**. They are downloaded at runtime by `ModelProvisioningManager` from `BuildConfig.TFLITE_MODELS_BASE_URL` before the engine is allowed to start.
+
+If either model file is missing or corrupted (SHA-256 mismatch), the engine aborts initialization and logs an error. The app continues to function normally (content playback is unaffected).
+
+### 5.5 Decision Table: License × Camera → Outcome
+
+| License Valid? | Front Camera Present? | Outcome |
+|---|---|---|
+| ✅ Yes (`facial` / `analytics` / `enterprise`) | ✅ Yes | Engine starts, camera bound, metrics collected |
+| ✅ Yes | ❌ No | Engine skipped — hardware gate failed; no camera bound |
+| ❌ No (null / other value) | ✅ Yes | Engine skipped — license gate failed; camera never opened |
+| ❌ No | ❌ No | Engine skipped — both gates failed |
+
+### 5.6 Pipeline Summary
+
+```
+Front Camera (CameraX ImageAnalysis)
+       │
+       ▼
+ML Kit Face Detection
+  - detects bounding boxes for each face in frame
+       │
+       ▼
+Face Crop (per detected face)
+       │
+       ├──► mobilefacenet.tflite (112×112)
+       │       → 128-float embedding → faceHash (SHA-256 truncated)
+       │
+       └──► age_gender_model.tflite (224×224)
+               → age (float) + [male_prob, female_prob]
+       │
+       ▼
+Anonymous in-RAM metrics accumulator
+  - keyed by faceHash (no image retained)
+  - rolling time-window aggregation
+       │
+       ▼
+Supabase metrics table (aggregated, no PII)
+```
+
+### 5.7 Example: Supabase License Response
+
+When `get_dispositivo_por_serial` returns a device with a valid license:
+
+```json
+{
+  "serial": "SN123456789",
+  "device_id": "abc123",
+  "tipo_da_licenca": "facial",
+  "ativo": true
+}
+```
+
+When the device has no analytics license:
+
+```json
+{
+  "serial": "SN000000000",
+  "device_id": "def456",
+  "tipo_da_licenca": null,
+  "ativo": true
+}
+```
+
+In the second case, `DeviceCacheManager` persists `tipoDaLicenca = null` and the engine is not initialized.
+
+---
+
+## Changelog
+
+| Version | Date | Description |
+|---|---|---|
+| 1.0.0 | 2024-03-10 | Initial document — Argos commands (sections 1–4) |
+| 1.1.0 | 2026-06-11 | Added Section 5: Audience Analytics & Facial Recognition |

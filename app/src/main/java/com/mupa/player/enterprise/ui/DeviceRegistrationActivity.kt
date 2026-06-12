@@ -55,7 +55,19 @@ class DeviceRegistrationActivity : ComponentActivity() {
 
         lifecycleScope.launch {
             val deviceId = DeviceIdentityManager(applicationContext).getPersistentId()
-            viewModel.setDeviceId(deviceId)
+            if (deviceId.isBlank()) {
+                binding.deviceIdValue.text = "Identificação automática falhou. Insira o ID manualmente abaixo."
+                binding.manualDeviceIdLayout.visibility = View.VISIBLE
+                disableSystemIme(binding.manualDeviceIdEdit)
+                binding.manualDeviceIdEdit.setOnFocusChangeListener { _, hasFocus ->
+                    if (hasFocus) setActiveField(binding.manualDeviceIdEdit, "ID do dispositivo (manual)")
+                }
+                binding.manualDeviceIdEdit.setOnClickListener { setActiveField(binding.manualDeviceIdEdit, "ID do dispositivo (manual)") }
+                binding.manualDeviceIdEdit.addTextChangedListener(SimpleTextWatcher { viewModel.setDeviceId(it) })
+                setActiveField(binding.manualDeviceIdEdit, "ID do dispositivo (manual)")
+            } else {
+                viewModel.setDeviceId(deviceId)
+            }
         }
 
         setupVirtualKeyboard()
