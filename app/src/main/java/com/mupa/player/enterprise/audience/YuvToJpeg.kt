@@ -20,39 +20,41 @@ object YuvToJpeg {
         val uPlane = image.planes[1]
         val vPlane = image.planes[2]
 
-        val ySize = yPlane.buffer.remaining()
-        val uSize = uPlane.buffer.remaining()
-        val vSize = vPlane.buffer.remaining()
-
-        val nv21 = ByteArray(ySize + uSize + vSize)
-        yPlane.buffer.get(nv21, 0, ySize)
-
-        val chromaRowStride = uPlane.rowStride
-        val chromaPixelStride = uPlane.pixelStride
-
-        val width = image.width
-        val height = image.height
-        var offset = ySize
-
+        val yBuffer = yPlane.buffer
         val uBuffer = uPlane.buffer
         val vBuffer = vPlane.buffer
 
-        val uRow = ByteArray(chromaRowStride)
-        val vRow = ByteArray(chromaRowStride)
+        // Rewind to ensure we read from the beginning
+        yBuffer.rewind()
+        uBuffer.rewind()
+        vBuffer.rewind()
 
-        var row = 0
-        while (row < height / 2) {
-            uBuffer.get(uRow, 0, chromaRowStride)
-            vBuffer.get(vRow, 0, chromaRowStride)
+        val ySize = yBuffer.remaining()
+        val uSize = uBuffer.remaining()
+        val vSize = vBuffer.remaining()
 
-            var col = 0
-            while (col < width / 2) {
-                val uvOffset = col * chromaPixelStride
-                nv21[offset++] = vRow[uvOffset]
-                nv21[offset++] = uRow[uvOffset]
-                col++
+        val nv21 = ByteArray(ySize + uSize + vSize)
+        yBuffer.get(nv21, 0, ySize)
+
+        val chromaRowStride = uPlane.rowStride
+        val chromaPixelStride = uPlane.pixelStride
+        val width = image.width
+        val height = image.height
+
+        var offset = ySize
+        for (row in 0 until height / 2) {
+            for (col in 0 until width / 2) {
+                val uIndex = row * chromaRowStride + col * chromaPixelStride
+                val vIndex = row * chromaRowStride + col * chromaPixelStride
+
+                if (vIndex < vSize) {
+                    nv21[offset] = vBuffer.get(vIndex)
+                }
+                if (uIndex < uSize) {
+                    nv21[offset + 1] = uBuffer.get(uIndex)
+                }
+                offset += 2
             }
-            row++
         }
 
         return nv21

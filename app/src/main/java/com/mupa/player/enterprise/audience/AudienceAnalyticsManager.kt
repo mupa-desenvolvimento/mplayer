@@ -104,32 +104,52 @@ class AudienceAnalyticsManager(
         nativeEngine.release()
     }
 
+    @Volatile private var isFaceActive = false
+    @Volatile private var isProcessing = false
+
     private fun onImage(image: ImageProxy) {
         val now = System.currentTimeMillis()
-        if (now - lastProcessedAtMs < 1000L) {
+        if (isProcessing) {
             image.close()
             return
         }
+
+        val delayMs = if (isFaceActive) 33L else 200L // 30 FPS vs 5 FPS
+        if (now - lastProcessedAtMs < delayMs) {
+            image.close()
+            return
+        }
+        isProcessing = true
         lastProcessedAtMs = now
 
+        val rotation = image.imageInfo.rotationDegrees
         val jpeg = runCatching { YuvToJpeg.imageProxyToJpegBytes(image, jpegQuality = 55) }.getOrNull()
         image.close()
-        if (jpeg == null || jpeg.isEmpty()) return
+        if (jpeg == null || jpeg.isEmpty()) {
+            isProcessing = false
+            return
+        }
 
         val base64 = android.util.Base64.encodeToString(jpeg, android.util.Base64.NO_WRAP)
 
         scope.launch {
-            val result = runCatching { nativeEngine.processFrameJpegBase64(base64) }.getOrNull()
-                ?: AudienceFrameResult(emptyList())
+            try {
+                val result = runCatching { nativeEngine.processFrameJpegBase64(base64, rotation) }.getOrNull()
+                    ?: AudienceFrameResult(emptyList())
 
-            val ended = tracker.onFrame(
-                frame = result,
-                contentPlaying = contentPlayingProvider(),
-                playlist = playlistProvider(),
-                expireAfterMs = 3000L,
-            )
+                isFaceActive = result.faces.isNotEmpty()
 
-            ended.forEach { db.audienceSessionDao().upsert(it) }
+                val ended = tracker.onFrame(
+                    frame = result,
+                    contentPlaying = contentPlayingProvider(),
+                    playlist = playlistProvider(),
+                    expireAfterMs = 3000L,
+                )
+
+                ended.forEach { db.audienceSessionDao().upsert(it) }
+            } finally {
+                isProcessing = false
+            }
         }
     }
 

@@ -52,7 +52,7 @@ class AudienceAnalyticsNativeEngine(
         }
     }
 
-    suspend fun processFrameJpegBase64(base64Jpeg: String): AudienceFrameResult = withContext(Dispatchers.Default) {
+    suspend fun processFrameJpegBase64(base64Jpeg: String, rotationDegrees: Int = 0): AudienceFrameResult = withContext(Dispatchers.Default) {
         val detector = faceDetector ?: return@withContext AudienceFrameResult(emptyList())
         val jpegBytes = try {
             Base64.decode(base64Jpeg, Base64.DEFAULT)
@@ -63,11 +63,30 @@ class AudienceAnalyticsNativeEngine(
         val bitmap = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
             ?: return@withContext AudienceFrameResult(emptyList())
 
-        val inputImage = InputImage.fromBitmap(bitmap, 0)
+        val rotatedBitmap = if (rotationDegrees != 0) {
+            try {
+                val matrix = android.graphics.Matrix().apply { postRotate(rotationDegrees.toFloat()) }
+                Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true).also {
+                    if (it != bitmap) {
+                        bitmap.recycle()
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                bitmap
+            }
+        } else {
+            bitmap
+        }
+
+        val inputImage = InputImage.fromBitmap(rotatedBitmap, 0)
         val faces = try {
             detector.process(inputImage).awaitTask()
         } catch (e: Exception) {
             e.printStackTrace()
+            if (!rotatedBitmap.isRecycled) {
+                rotatedBitmap.recycle()
+            }
             return@withContext AudienceFrameResult(emptyList())
         }
 
@@ -75,11 +94,11 @@ class AudienceAnalyticsNativeEngine(
             val bounds = face.boundingBox
             val x = bounds.left.coerceAtLeast(0)
             val y = bounds.top.coerceAtLeast(0)
-            val w = bounds.width().coerceAtMost(bitmap.width - x)
-            val h = bounds.height().coerceAtMost(bitmap.height - y)
+            val w = bounds.width().coerceAtMost(rotatedBitmap.width - x)
+            val h = bounds.height().coerceAtMost(rotatedBitmap.height - y)
 
             val faceBitmap = if (w > 0 && h > 0) {
-                Bitmap.createBitmap(bitmap, x, y, w, h)
+                Bitmap.createBitmap(rotatedBitmap, x, y, w, h)
             } else {
                 null
             }
@@ -112,14 +131,13 @@ class AudienceAnalyticsNativeEngine(
 
             if (faceBitmap != null && ageGenderInterpreter != null) {
                 try {
-                    val resized = Bitmap.createScaledBitmap(faceBitmap, 224, 224, true)
-                    val inputBuffer = prepareByteBuffer(resized, 224, 224)
-                    val ageOut = Array(1) { FloatArray(1) }
+                    val resized = Bitmap.createScaledBitmap(faceBitmap, 80, 80, true)
+                    val inputBuffer = prepareByteBuffer(resized, 80, 80)
                     val genderOut = Array(1) { FloatArray(2) }
-                    val outputs = mapOf(0 to ageOut, 1 to genderOut)
+                    val ageOut = Array(1) { FloatArray(4) }
+                    val outputs = mapOf(0 to genderOut, 1 to ageOut)
                     ageGenderInterpreter?.runForMultipleInputsOutputs(arrayOf(inputBuffer), outputs)
                     
-                    estimatedAge = ageOut[0][0].toInt()
                     val maleProb = genderOut[0][0]
                     val femaleProb = genderOut[0][1]
                     if (maleProb > femaleProb) {
@@ -128,6 +146,21 @@ class AudienceAnalyticsNativeEngine(
                     } else {
                         gender = "Female"
                         confidence = femaleProb
+                    }
+
+                    var maxAgeIdx = 0
+                    var maxAgeVal = ageOut[0][0]
+                    for (i in 1..3) {
+                        if (ageOut[0][i] > maxAgeVal) {
+                            maxAgeVal = ageOut[0][i]
+                            maxAgeIdx = i
+                        }
+                    }
+                    estimatedAge = when (maxAgeIdx) {
+                        0 -> 10
+                        1 -> 26
+                        2 -> 42
+                        else -> 65
                     }
                 } catch (e: Exception) {
                     e.printStackTrace()
@@ -182,6 +215,9 @@ class AudienceAnalyticsNativeEngine(
                 faceHash = fnv1a(featuresString)
             }
 
+            // Recycle faceBitmap since it was cropped and processed
+            faceBitmap?.recycle()
+
             DetectedFace(
                 faceHash = faceHash,
                 estimatedAge = estimatedAge,
@@ -190,6 +226,10 @@ class AudienceAnalyticsNativeEngine(
                 confidence = confidence,
                 isLooking = isLooking
             )
+        }
+
+        if (!rotatedBitmap.isRecycled) {
+            rotatedBitmap.recycle()
         }
 
         AudienceFrameResult(faces = detectedFaces)

@@ -85,6 +85,16 @@
                 android:layout_marginBottom="8dp"/>
 
             <com.google.android.material.textview.MaterialTextView
+                android:id="@+id/txtModelStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Modelos:\n- Verificando..."
+                android:textColor="@color/enterprise_on"
+                android:textSize="13sp"
+                android:typeface="monospace"
+                android:layout_marginBottom="8dp"/>
+
+            <com.google.android.material.textview.MaterialTextView
                 android:id="@+id/txtDetectionDetails"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"

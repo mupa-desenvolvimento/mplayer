@@ -34,6 +34,8 @@ class FaceRecognitionTestActivity : ComponentActivity() {
     private var cameraProvider: ProcessCameraProvider? = null
     private var executor: ExecutorService? = null
     private var lastProcessedAtMs = 0L
+    @Volatile private var isFaceActive = false
+    @Volatile private var isProcessing = false
 
     private val cameraPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -64,6 +66,7 @@ class FaceRecognitionTestActivity : ComponentActivity() {
 
     private fun startCameraAndEngine() {
         binding.txtCameraStatus.text = "Status: Provisionando modelos..."
+        binding.txtModelStatus.text = "Modelos:\n- Verificando..."
         lifecycleScope.launch {
             val cache = runCatching { DeviceCacheManager(applicationContext).load() }.getOrNull()
             
@@ -73,11 +76,32 @@ class FaceRecognitionTestActivity : ComponentActivity() {
 
             // Run provisioning
             binding.txtCameraStatus.text = "Status: Verificando/Provisionando modelos TFLite..."
-            val provisioned = ModelProvisioningManager.ensureModelsProvisioned(applicationContext, cache?.tipoDaLicenca)
+            ModelProvisioningManager.ensureModelsProvisioned(applicationContext, cache?.tipoDaLicenca)
             
+            // Verify models existence and size
+            val ageGenderFile = File(modelsDir, "age_gender_model.tflite")
+            val faceRecFile = File(modelsDir, "mobilefacenet.tflite")
+            val ageGenderOk = ageGenderFile.exists() && ageGenderFile.length() > 0L
+            val faceRecOk = faceRecFile.exists() && faceRecFile.length() > 0L
+
             // Instantiate engine
             val engine = AudienceAnalyticsNativeEngine(applicationContext, modelsDir)
             val initialized = engine.init()
+
+            val checklist = StringBuilder().apply {
+                append("Status dos Modelos:\n")
+                append("- Idade/Gênero (age_gender_model.tflite): ")
+                if (ageGenderOk) append("[SUCESSO]\n") else append("[FALHA]\n")
+                append("- Identificação (mobilefacenet.tflite): ")
+                if (faceRecOk) append("[SUCESSO]\n") else append("[FALHA]\n")
+                append("- Motor Nativo (ML Engine): ")
+                if (initialized) append("[SUCESSO]\n") else append("[FALHA]\n")
+                append("- Licença Local Cacheada: [${cache?.tipoDaLicenca ?: "NENHUMA"}]")
+            }.toString()
+
+            withContext(Dispatchers.Main) {
+                binding.txtModelStatus.text = checklist
+            }
 
             if (!initialized) {
                 binding.txtCameraStatus.text = "Status: Falha ao inicializar AudienceAnalyticsNativeEngine"
@@ -111,23 +135,36 @@ class FaceRecognitionTestActivity : ComponentActivity() {
 
                 analysisUseCase.setAnalyzer(executorLocal) { image ->
                     val now = System.currentTimeMillis()
-                    if (now - lastProcessedAtMs < 800L) {
+                    if (isProcessing) {
                         image.close()
                         return@setAnalyzer
                     }
+                    val delayMs = if (isFaceActive) 33L else 200L // 30 FPS vs 5 FPS
+                    if (now - lastProcessedAtMs < delayMs) {
+                        image.close()
+                        return@setAnalyzer
+                    }
+                    isProcessing = true
                     lastProcessedAtMs = now
 
+                    val rotation = image.imageInfo.rotationDegrees
                     val jpeg = runCatching { YuvToJpeg.imageProxyToJpegBytes(image, jpegQuality = 55) }.getOrNull()
                     image.close()
 
-                    if (jpeg != null && jpeg.isNotEmpty()) {
-                        val base64 = Base64.encodeToString(jpeg, Base64.NO_WRAP)
-                        lifecycleScope.launch {
+                    if (jpeg == null || jpeg.isEmpty()) {
+                        isProcessing = false
+                        return@setAnalyzer
+                    }
+
+                    val base64 = Base64.encodeToString(jpeg, Base64.NO_WRAP)
+                    lifecycleScope.launch {
+                        try {
                             val engine = nativeEngine
                             if (engine != null) {
-                                val result = runCatching { engine.processFrameJpegBase64(base64) }.getOrNull()
+                                val result = runCatching { engine.processFrameJpegBase64(base64, rotation) }.getOrNull()
                                 withContext(Dispatchers.Main) {
                                     if (result != null && result.faces.isNotEmpty()) {
+                                        isFaceActive = true
                                         val builder = StringBuilder()
                                         result.faces.forEachIndexed { index, face ->
                                             builder.append("Rosto #${index + 1}:\n")
@@ -139,11 +176,14 @@ class FaceRecognitionTestActivity : ComponentActivity() {
                                         binding.txtDetectionDetails.text = builder.toString()
                                         binding.txtCameraStatus.text = "Status: Rostos detectados (${result.faces.size})"
                                     } else {
+                                        isFaceActive = false
                                         binding.txtDetectionDetails.text = "Nenhum rosto detectado no frame."
                                         binding.txtCameraStatus.text = "Status: Nenhum rosto"
                                     }
                                 }
                             }
+                        } finally {
+                            isProcessing = false
                         }
                     }
                 }

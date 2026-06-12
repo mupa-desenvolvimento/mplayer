@@ -57,7 +57,14 @@ object ModelProvisioningManager {
         val url = "${BuildConfig.TFLITE_MODELS_BASE_URL}$modelName"
         Log.i(TAG, "Downloading model: $url")
         return try {
-            URL(url).openStream().use { input ->
+            val connection = URL(url).openConnection() as java.net.HttpURLConnection
+            connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android; Zebra)")
+            connection.connect()
+            if (connection.responseCode != java.net.HttpURLConnection.HTTP_OK) {
+                Log.e(TAG, "Server returned HTTP ${connection.responseCode} for $modelName")
+                return false
+            }
+            connection.inputStream.use { input ->
                 targetFile.outputStream().use { output ->
                     input.copyTo(output)
                 }

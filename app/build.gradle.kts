@@ -26,8 +26,8 @@ android {
         applicationId = "com.mupa.player.enterprise"
         minSdk = 21
         targetSdk = 34
-        versionCode = 5
-        versionName = "1.0.4"
+        versionCode = 11
+        versionName = "1.1.0"
 
         fun String.escapeForBuildConfig(): String = replace("\\", "\\\\").replace("\"", "\\\"")
 
@@ -56,7 +56,7 @@ android {
         buildConfigField(
             "String",
             "TFLITE_MODELS_BASE_URL",
-            "\"https://models.mupa.app/tflite/\"",
+            "\"https://pub-0e15cc358ba84ff2a24226b12278433b.r2.dev/tflite/\"",
         )
     }
 
