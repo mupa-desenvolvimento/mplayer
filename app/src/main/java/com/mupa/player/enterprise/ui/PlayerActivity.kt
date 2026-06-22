@@ -252,6 +252,10 @@ class PlayerActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        runCatching {
+            val serviceIntent = Intent(this, com.mupa.player.enterprise.services.InactivityTimerService::class.java)
+            stopService(serviceIntent)
+        }
         binding.hiddenBarcodeInput.post { ensureBarcodeFocus() }
         lifecycleScope.launch {
             val settings = runCatching { SettingsManager(applicationContext).getSettings() }.getOrNull()
@@ -368,14 +372,34 @@ class PlayerActivity : ComponentActivity() {
             }
         }
 
-        var syncTick = 0
-        while (true) {
-            delay(5 * 60 * 1000L)
-            refreshInBackground()
-            syncTick++
-            if (syncTick % 12 == 0 && isOnline()) {
-                runCatching { AudienceSyncManager(applicationContext).uploadPending() }
-                runCatching { PriceAnalyticsSyncManager(applicationContext).uploadPending() }
+        lifecycleScope.launch(Dispatchers.IO) {
+            while (true) {
+                delay(60 * 60 * 1000L) // every 1 hour
+                if (isOnline()) {
+                    runCatching { AudienceSyncManager(applicationContext).uploadPending() }
+                    runCatching { PriceAnalyticsSyncManager(applicationContext).uploadPending() }
+                }
+            }
+        }
+
+        lifecycleScope.launch {
+            while (true) {
+                delay(60 * 60 * 1000L) // Wait 1 hour between checks
+                var success = false
+                try {
+                    success = refreshInBackground()
+                } catch (e: Exception) {
+                    Log.e("PlayerActivity", "Error in background refresh", e)
+                }
+                
+                while (!success) {
+                    delay(10 * 60 * 1000L) // retry in 10 minutes
+                    try {
+                        success = refreshInBackground()
+                    } catch (e: Exception) {
+                        Log.e("PlayerActivity", "Error in background refresh retry", e)
+                    }
+                }
             }
         }
     }
@@ -632,17 +656,17 @@ class PlayerActivity : ComponentActivity() {
         setSyncOverlayVisible(false)
     }
 
-    private suspend fun refreshInBackground() {
-        if (!isOnline()) return
+    private suspend fun refreshInBackground(): Boolean {
+        if (!isOnline()) return false
         runCatching {
             com.mupa.player.enterprise.services.DeviceValidationService(applicationContext).validateDevice(deviceId)
         }
         ensureAudienceStarted()
 
-        val remote = runCatching { manifestManager.fetchManifest(deviceId) }.getOrDefault("").trim()
-        if (remote.isBlank()) return
+        val remote = runCatching { manifestManager.fetchManifest(deviceId) }.getOrNull()?.trim()
+        if (remote.isNullOrBlank()) return false
         val changed = !manifestManager.compareManifest(deviceId, remote)
-        if (!changed) return
+        if (!changed) return true
 
         manifestManager.saveManifest(deviceId, remote)
         playlistName = manifestManager.parsePlaylistName(remote) ?: playlistName
@@ -663,17 +687,15 @@ class PlayerActivity : ComponentActivity() {
         if (playlist.size == items.size) {
             playerEngine.setPlaylist(playlist)
             setSyncOverlayVisible(false)
-            lifecycleScope.launch {
-                runCatching {
-                    manifestManager.syncMedia(
-                        deviceId = deviceId,
-                        manifestJson = remote,
-                        onProgress = null,
-                        maxConcurrentDownloads = 1,
-                    )
-                }
+            val bgSync = runCatching {
+                manifestManager.syncMedia(
+                    deviceId = deviceId,
+                    manifestJson = remote,
+                    onProgress = null,
+                    maxConcurrentDownloads = 1,
+                )
             }
-            return
+            return bgSync.isSuccess
         }
 
         runCatching {
@@ -686,7 +708,9 @@ class PlayerActivity : ComponentActivity() {
         }
 
         playlist = buildLocalPlaylist(items)
-        while (playlist.size < items.size) {
+        var attempts = 0
+        while (playlist.size < items.size && attempts < 3) {
+            attempts++
             val missing = (items.size - playlist.size).coerceAtLeast(0)
             updateSyncTexts(
                 status = "Baixando conteúdos...",
@@ -708,6 +732,7 @@ class PlayerActivity : ComponentActivity() {
         }
         playerEngine.setPlaylist(playlist)
         setSyncOverlayVisible(false)
+        return playlist.size == items.size
     }
 
     private fun isItemCurrentlyActive(item: com.mupa.player.enterprise.managers.ManifestItem): Boolean {
@@ -815,6 +840,9 @@ class PlayerActivity : ComponentActivity() {
                 audienceManager?.stop()
                 audienceManager = null
                 audienceStarted = false
+                withContext(Dispatchers.Main) {
+                    binding.txtTransparencyWarning.visibility = View.GONE
+                }
                 Log.i("PlayerActivity", "Audience analytics stopped due to license or hardware changes. License: $licenseType, CanRun: $canRun")
             }
             return
@@ -846,10 +874,21 @@ class PlayerActivity : ComponentActivity() {
         if (started) {
             audienceManager = manager
             audienceStarted = true
+            withContext(Dispatchers.Main) {
+                binding.txtTransparencyWarning.visibility = View.VISIBLE
+            }
             Log.i("PlayerActivity", "Audience analytics started successfully. License: $licenseType")
         } else {
             runCatching { manager.stop() }
+            withContext(Dispatchers.Main) {
+                binding.txtTransparencyWarning.visibility = View.GONE
+            }
         }
+    }
+
+    private fun dpToPx(dp: Int): Int {
+        val density = resources.displayMetrics.density
+        return (dp * density).toInt()
     }
 
     private fun setSyncOverlayVisible(visible: Boolean) {
@@ -857,6 +896,43 @@ class PlayerActivity : ComponentActivity() {
         binding.syncOverlay.animate().cancel()
 
         if (visible) {
+            val isMediaPlaying = playerEngine.getCurrentItemId() != null
+            if (isMediaPlaying) {
+                // Sincronizando com mídias rodando ao fundo -> Pequeno card na parte inferior
+                val overlayParams = binding.syncOverlay.layoutParams as android.widget.FrameLayout.LayoutParams
+                overlayParams.height = android.widget.FrameLayout.LayoutParams.WRAP_CONTENT
+                overlayParams.gravity = android.view.Gravity.BOTTOM
+                binding.syncOverlay.layoutParams = overlayParams
+
+                binding.syncOverlay.setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                binding.syncContent.setBackgroundResource(com.mupa.player.enterprise.R.drawable.bg_sync_card)
+                
+                val params = binding.syncContent.layoutParams as androidx.constraintlayout.widget.ConstraintLayout.LayoutParams
+                params.topToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET
+                params.bottomToBottom = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
+                params.bottomMargin = dpToPx(24)
+                binding.syncContent.layoutParams = params
+                
+                binding.syncLogo.visibility = View.GONE
+            } else {
+                // Tela cheia
+                val overlayParams = binding.syncOverlay.layoutParams as android.widget.FrameLayout.LayoutParams
+                overlayParams.height = android.widget.FrameLayout.LayoutParams.MATCH_PARENT
+                overlayParams.gravity = android.view.Gravity.NO_GRAVITY
+                binding.syncOverlay.layoutParams = overlayParams
+
+                binding.syncOverlay.setBackgroundResource(com.mupa.player.enterprise.R.color.enterprise_bg)
+                binding.syncContent.background = null
+                
+                val params = binding.syncContent.layoutParams as androidx.constraintlayout.widget.ConstraintLayout.LayoutParams
+                params.topToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
+                params.bottomToBottom = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
+                params.bottomMargin = 0
+                binding.syncContent.layoutParams = params
+                
+                binding.syncLogo.visibility = View.VISIBLE
+            }
+
             if (binding.syncOverlay.visibility != View.VISIBLE) {
                 binding.syncOverlay.visibility = View.VISIBLE
                 binding.syncOverlay.alpha = 0f
@@ -971,45 +1047,41 @@ class PlayerActivity : ComponentActivity() {
         lastScanAtMs = now
 
         lifecycleScope.launch {
-            if (ean == "190524") {
-                val cache = DeviceCacheManager(applicationContext).load()
-                val targetCode = cache?.companyCode?.trim().orEmpty()
-                withContext(Dispatchers.Main) {
-                    val container = android.widget.FrameLayout(this@PlayerActivity)
-                    val params = android.widget.FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.WRAP_CONTENT
-                    ).apply {
-                        leftMargin = 48
-                        rightMargin = 48
-                        topMargin = 24
-                        bottomMargin = 24
-                    }
-                    val input = EditText(this@PlayerActivity).apply {
-                        hint = "Código da Empresa"
-                        inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
-                        layoutParams = params
-                    }
-                    container.addView(input)
-                    android.app.AlertDialog.Builder(this@PlayerActivity)
-                        .setTitle("Acesso Restrito")
-                        .setMessage("Insira o Código de Usuário da Empresa:")
-                        .setView(container)
-                        .setNegativeButton("Cancelar", null)
-                        .setPositiveButton("Confirmar") { _, _ ->
-                            val entered = input.text.toString().trim()
-                            val isCorrect = (targetCode.isNotBlank() && entered.equals(targetCode, ignoreCase = true)) ||
-                                            entered.equals("DEBUG", ignoreCase = true) ||
-                                            entered.equals("123ABC", ignoreCase = true) ||
-                                            targetCode.isBlank()
-                            if (isCorrect) {
-                                startActivity(Intent(this@PlayerActivity, SettingsActivity::class.java))
-                            } else {
-                                Toast.makeText(this@PlayerActivity, "Código inválido!", Toast.LENGTH_SHORT).show()
-                            }
-                        }
-                        .show()
+            if (ean == "040816" || ean == "230205") {
+                if (!android.provider.Settings.canDrawOverlays(this@PlayerActivity)) {
+                    val intent = Intent(
+                        android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        android.net.Uri.parse("package:$packageName")
+                    )
+                    startActivity(intent)
+                    Toast.makeText(
+                        this@PlayerActivity,
+                        "Por favor, ative a permissão de sobreposição para reabrir o app após 60s.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    return@launch
                 }
+
+                val serviceIntent = Intent(this@PlayerActivity, com.mupa.player.enterprise.services.InactivityTimerService::class.java)
+                startService(serviceIntent)
+
+                if (ean == "040816") {
+                    finishAffinity()
+                } else {
+                    try {
+                        val settingsIntent = Intent(android.provider.Settings.ACTION_SETTINGS).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        startActivity(settingsIntent)
+                    } catch (e: Exception) {
+                        Toast.makeText(this@PlayerActivity, "Erro ao abrir configurações", Toast.LENGTH_SHORT).show()
+                    }
+                }
+                return@launch
+            }
+
+            if (ean == "190524") {
+                showAdminAccessDialog()
                 return@launch
             }
 
@@ -1201,18 +1273,55 @@ class PlayerActivity : ComponentActivity() {
 
     private fun setupDevModeToggle() {
         binding.deviceIdWatermark.setOnLongClickListener {
-            lifecycleScope.launch {
-                val enabled = !demoMode
-                runCatching { SettingsManager(applicationContext).setDemoMode(enabled) }
-                demoMode = enabled
-                updateDeviceWatermark()
-                Toast.makeText(this@PlayerActivity, if (enabled) "DEMO ativado" else "DEMO desativado", Toast.LENGTH_SHORT).show()
-            }
+            showAdminAccessDialog()
             true
         }
         binding.apkVersionWatermark.setOnLongClickListener {
             binding.deviceIdWatermark.performLongClick()
             true
+        }
+    }
+
+    private fun showAdminAccessDialog() {
+        lifecycleScope.launch {
+            val cache = DeviceCacheManager(applicationContext).load()
+            val targetCode = cache?.companyCode?.trim().orEmpty()
+            withContext(Dispatchers.Main) {
+                val container = android.widget.FrameLayout(this@PlayerActivity)
+                val params = android.widget.FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    leftMargin = 48
+                    rightMargin = 48
+                    topMargin = 24
+                    bottomMargin = 24
+                }
+                val input = EditText(this@PlayerActivity).apply {
+                    hint = "Código da Empresa"
+                    inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
+                    layoutParams = params
+                }
+                container.addView(input)
+                android.app.AlertDialog.Builder(this@PlayerActivity)
+                    .setTitle("Acesso Restrito")
+                    .setMessage("Insira o Código de Usuário da Empresa:")
+                    .setView(container)
+                    .setNegativeButton("Cancelar", null)
+                    .setPositiveButton("Confirmar") { _, _ ->
+                        val entered = input.text.toString().trim()
+                        val isCorrect = (targetCode.isNotBlank() && entered.equals(targetCode, ignoreCase = true)) ||
+                                        entered.equals("DEBUG", ignoreCase = true) ||
+                                        entered.equals("123ABC", ignoreCase = true) ||
+                                        targetCode.isBlank()
+                        if (isCorrect) {
+                            startActivity(Intent(this@PlayerActivity, SettingsActivity::class.java))
+                        } else {
+                            Toast.makeText(this@PlayerActivity, "Código inválido!", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                    .show()
+            }
         }
     }
 
@@ -1346,7 +1455,7 @@ class PlayerActivity : ComponentActivity() {
         binding.priceSecondUnitContainer.visibility = View.GONE
 
         renderPrice(value = null, animate = false)
-        binding.priceProductImage.setImageResource(com.mupa.player.enterprise.R.drawable.ic_mplayer)
+        binding.priceProductImage.setImageDrawable(null)
         binding.pricePacksContainer.removeAllViews()
         binding.pricePacksContainer.visibility = View.GONE
     }
@@ -2114,10 +2223,11 @@ class PlayerActivity : ComponentActivity() {
         val cents = (value * 100.0).roundToInt().coerceAtLeast(0)
         val reais = cents / 100
         val cent = cents % 100
+        val reaisStr = if (reais == 1) "real" else "reais"
         return if (cent == 0) {
-            "$reais reais"
+            "$reais $reaisStr"
         } else {
-            "$reais reais e $cent centavos"
+            "$reais $reaisStr e $cent centavos"
         }
     }
 

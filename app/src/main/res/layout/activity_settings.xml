@@ -361,6 +361,15 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:text="Executar Teste de Sincronização"
+                        android:textColor="@color/enterprise_on"
+                        android:layout_marginBottom="8dp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnUploadDetections"
+                        style="@style/Widget.Material3.Button.TonalButton"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Enviar Detecções para o Supabase"
                         android:textColor="@color/enterprise_on" />
 
                     <com.google.android.material.textview.MaterialTextView
@@ -408,6 +417,15 @@
                         android:textColor="@color/enterprise_on_muted"
                         android:textSize="13sp"
                         android:layout_marginBottom="12dp"/>
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnCloseApp"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginBottom="8dp"
+                        android:text="Fechar Aplicativo"
+                        android:backgroundTint="#374151"
+                        android:textColor="@color/enterprise_on" />
 
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/btnResetApp"

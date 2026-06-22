@@ -4,7 +4,8 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-<uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
@@ -59,14 +60,15 @@
 
         <activity
             android:name=".ui.SettingsActivity"
-            android:exported="false"
+            android:exported="true"
             android:launchMode="singleTop"
             android:screenOrientation="sensor"
             android:theme="@style/Theme.MupaPlayerEnterprise" />
 
         <activity
             android:name=".ui.FaceRecognitionTestActivity"
-            android:exported="false"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize"
             android:screenOrientation="sensor"
             android:theme="@style/Theme.MupaPlayerEnterprise" />
 
@@ -78,6 +80,11 @@
                 <action android:name="com.mupa.player.enterprise.ACTION_SET_DEV_MODE" />
             </intent-filter>
         </receiver>
+
+        <service
+            android:name=".services.InactivityTimerService"
+            android:enabled="true"
+            android:exported="false" />
 
     </application>
 

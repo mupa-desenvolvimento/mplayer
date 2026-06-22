@@ -15,4 +15,7 @@ interface AudienceSessionDao {
 
     @Query("UPDATE audience_sessions SET uploadedAtEpochMs = :uploadedAtEpochMs WHERE id IN (:ids)")
     suspend fun markUploaded(ids: List<String>, uploadedAtEpochMs: Long)
+
+    @Query("SELECT COUNT(*) FROM audience_sessions WHERE uploadedAtEpochMs IS NULL")
+    suspend fun getPendingCount(): Int
 }

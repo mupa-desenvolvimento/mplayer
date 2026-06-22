@@ -21,6 +21,7 @@ import com.mupa.player.enterprise.price.PriceConfigParser
 import com.mupa.player.enterprise.price.PriceQueryEngine
 import com.mupa.player.enterprise.storage.db.AppDatabase
 import com.mupa.player.enterprise.storage.settingsDataStore
+import com.mupa.player.enterprise.audience.AudienceSyncManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -241,6 +242,30 @@ class SettingsActivity : ComponentActivity() {
             }
         }
 
+        binding.btnUploadDetections.setOnClickListener {
+            binding.txtSyncProgress.visibility = View.VISIBLE
+            binding.txtSyncProgress.text = "Verificando dados de detecção..."
+            lifecycleScope.launch {
+                val db = AppDatabase.get(applicationContext)
+                val count = db.audienceSessionDao().getPendingCount()
+                if (count == 0) {
+                    binding.txtSyncProgress.text = "Nenhum dado de detecção pendente para envio."
+                    Toast.makeText(this@SettingsActivity, "Nenhum dado pendente.", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+                
+                binding.txtSyncProgress.text = "Enviando $count detecção(ões) para o Supabase..."
+                val success = AudienceSyncManager(applicationContext).uploadPending()
+                if (success) {
+                    binding.txtSyncProgress.text = "Detecções enviadas com sucesso!"
+                    Toast.makeText(this@SettingsActivity, "Detecções enviadas com sucesso!", Toast.LENGTH_SHORT).show()
+                } else {
+                    binding.txtSyncProgress.text = "Falha ao enviar detecções para o Supabase."
+                    Toast.makeText(this@SettingsActivity, "Falha no envio.", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+
         binding.btnSimulateQuery.setOnClickListener {
             val barcode = binding.editSimulateBarcode.text.toString().trim()
             if (barcode.isBlank()) {
@@ -299,6 +324,18 @@ class SettingsActivity : ComponentActivity() {
                     }
                 }
             }
+        }
+
+        binding.btnCloseApp.setOnClickListener {
+            AlertDialog.Builder(this)
+                .setTitle("Fechar o aplicativo?")
+                .setMessage("Tem certeza que deseja encerrar o MPlayer?")
+                .setNegativeButton("Cancelar", null)
+                .setPositiveButton("Sim, Fechar") { _, _ ->
+                    finishAffinity()
+                    System.exit(0)
+                }
+                .show()
         }
 
         binding.btnResetApp.setOnClickListener {

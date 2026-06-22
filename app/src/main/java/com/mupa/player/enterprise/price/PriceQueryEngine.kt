@@ -1003,12 +1003,31 @@ class PriceQueryEngine(
 
     private fun interpolate(template: String, state: JSONObject): String {
         var out = template
-        val regex = "\\$\\{([^}]+)\\}".toRegex()
-        regex.findAll(template).forEach { m ->
+
+        // 1. Suporte a ${key}
+        val regexStandard = "\\$\\{([^}]+)\\}".toRegex()
+        regexStandard.findAll(out).forEach { m ->
             val key = m.groupValues[1]
             val value = state.optString(key, "")
             out = out.replace(m.value, value)
         }
+
+        // 2. Suporte a {{key}}
+        val regexDoubleCurly = "\\{\\{([^}]+)\\}\\}".toRegex()
+        regexDoubleCurly.findAll(out).forEach { m ->
+            val key = m.groupValues[1]
+            val value = state.optString(key, "")
+            out = out.replace(m.value, value)
+        }
+
+        // 3. Suporte a %7B%7Bkey%7D%7D (URL-encoded {{key}})
+        val regexEncodedDoubleCurly = "%7B%7B([^%]+)%7D%7D".toRegex()
+        regexEncodedDoubleCurly.findAll(out).forEach { m ->
+            val key = m.groupValues[1]
+            val value = state.optString(key, "")
+            out = out.replace(m.value, value)
+        }
+
         return out
     }
 }

@@ -40,7 +40,6 @@ class DeviceRegistrationActivity : ComponentActivity() {
     private val viewModel: DeviceRegistrationViewModel by viewModels()
 
     private var lastOverlayState: Boolean = false
-    private var activeEdit: EditText? = null
     private var handledSuccess: Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -50,7 +49,6 @@ class DeviceRegistrationActivity : ComponentActivity() {
         val cachedId = DeviceIdentityManager(applicationContext).getCachedId().trim()
         binding.deviceIdWatermark.text = if (cachedId.isNotBlank()) "ID: $cachedId" else "ID: -"
 
-        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN)
         applyAlwaysOnScreen()
 
         lifecycleScope.launch {
@@ -58,42 +56,15 @@ class DeviceRegistrationActivity : ComponentActivity() {
             if (deviceId.isBlank()) {
                 binding.deviceIdValue.text = "Identificação automática falhou. Insira o ID manualmente abaixo."
                 binding.manualDeviceIdLayout.visibility = View.VISIBLE
-                disableSystemIme(binding.manualDeviceIdEdit)
-                binding.manualDeviceIdEdit.setOnFocusChangeListener { _, hasFocus ->
-                    if (hasFocus) setActiveField(binding.manualDeviceIdEdit, "ID do dispositivo (manual)")
-                }
-                binding.manualDeviceIdEdit.setOnClickListener { setActiveField(binding.manualDeviceIdEdit, "ID do dispositivo (manual)") }
                 binding.manualDeviceIdEdit.addTextChangedListener(SimpleTextWatcher { viewModel.setDeviceId(it) })
-                setActiveField(binding.manualDeviceIdEdit, "ID do dispositivo (manual)")
             } else {
                 viewModel.setDeviceId(deviceId)
             }
         }
 
-        setupVirtualKeyboard()
-
         binding.companyCodeEdit.addTextChangedListener(SimpleTextWatcher { viewModel.setCompanyCode(it) })
         binding.nicknameEdit.addTextChangedListener(SimpleTextWatcher { viewModel.setNickname(it) })
         binding.filialEdit.addTextChangedListener(SimpleTextWatcher { viewModel.setFilial(it) })
-
-        disableSystemIme(binding.companyCodeEdit)
-        disableSystemIme(binding.nicknameEdit)
-        disableSystemIme(binding.filialEdit)
-
-        setActiveField(binding.companyCodeEdit, "Código empresa")
-        binding.companyCodeEdit.setOnFocusChangeListener { _, hasFocus ->
-            if (hasFocus) setActiveField(binding.companyCodeEdit, "Código empresa")
-        }
-        binding.nicknameEdit.setOnFocusChangeListener { _, hasFocus ->
-            if (hasFocus) setActiveField(binding.nicknameEdit, "Apelido do dispositivo")
-        }
-        binding.filialEdit.setOnFocusChangeListener { _, hasFocus ->
-            if (hasFocus) setActiveField(binding.filialEdit, "Número loja/filial")
-        }
-
-        binding.companyCodeEdit.setOnClickListener { setActiveField(binding.companyCodeEdit, "Código empresa") }
-        binding.nicknameEdit.setOnClickListener { setActiveField(binding.nicknameEdit, "Apelido do dispositivo") }
-        binding.filialEdit.setOnClickListener { setActiveField(binding.filialEdit, "Número loja/filial") }
 
         binding.registerButton.setOnClickListener {
             viewModel.register()
@@ -168,97 +139,6 @@ class DeviceRegistrationActivity : ComponentActivity() {
                 overlay.visibility = View.GONE
             }.start()
         }
-    }
-
-    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-        if (shouldBlockHardwareKeyboard(event)) return true
-        return super.onKeyDown(keyCode, event)
-    }
-
-    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
-        if (shouldBlockHardwareKeyboard(event)) return true
-        return super.onKeyUp(keyCode, event)
-    }
-
-    private fun shouldBlockHardwareKeyboard(event: KeyEvent): Boolean {
-        if ((event.source and InputDevice.SOURCE_KEYBOARD) != InputDevice.SOURCE_KEYBOARD) return false
-        val device = event.device ?: return false
-        if (device.isVirtual) return false
-        return true
-    }
-
-    private fun disableSystemIme(editText: EditText) {
-        editText.showSoftInputOnFocus = false
-    }
-
-    private fun hideSoftKeyboard(view: View) {
-        val imm = ContextCompat.getSystemService(this, InputMethodManager::class.java)
-        imm?.hideSoftInputFromWindow(view.windowToken, 0)
-    }
-
-    private fun setActiveField(editText: EditText, label: String) {
-        activeEdit = editText
-        binding.activeFieldLabel.text = label
-        editText.requestFocus()
-        editText.setSelection(editText.text?.length ?: 0)
-        hideSoftKeyboard(editText)
-    }
-
-    private fun setupVirtualKeyboard() {
-        val container = binding.virtualKeyboardContainer
-        container.removeAllViews()
-        container.addView(createKeyRow(listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0")))
-        container.addView(createKeyRow(listOf("Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P")))
-        container.addView(createKeyRow(listOf("A", "S", "D", "F", "G", "H", "J", "K", "L")))
-        container.addView(createKeyRow(listOf("Z", "X", "C", "V", "B", "N", "M")))
-        container.addView(createKeyRow(listOf("ESP", "DEL", "LIMPAR")))
-    }
-
-    private fun createKeyRow(keys: List<String>): LinearLayout {
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
-        keys.forEach { label ->
-            val btn = MaterialButton(this).apply {
-                text = label
-                isAllCaps = false
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                    marginEnd = 6
-                }
-                setOnClickListener { onVirtualKey(label) }
-            }
-            row.addView(btn)
-        }
-        return row
-    }
-
-    private fun onVirtualKey(label: String) {
-        val target = activeEdit ?: return
-        when (label) {
-            "DEL" -> {
-                val text = target.text?.toString().orEmpty()
-                if (text.isNotEmpty()) {
-                    target.setText(text.dropLast(1))
-                    target.setSelection(target.text?.length ?: 0)
-                }
-            }
-            "LIMPAR" -> {
-                target.setText("")
-            }
-            "ESP" -> appendToField(target, " ")
-            else -> appendToField(target, label)
-        }
-    }
-
-    private fun appendToField(target: EditText, value: String) {
-        val raw = target.text?.toString().orEmpty()
-        val next = (raw + value)
-        val filtered = when (target.id) {
-            binding.filialEdit.id -> next.filter { it.isDigit() }
-            else -> next
-        }
-        target.setText(filtered)
-        target.setSelection(target.text?.length ?: 0)
     }
 
     private fun applyAlwaysOnScreen() {

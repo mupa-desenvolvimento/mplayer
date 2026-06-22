@@ -35,3 +35,6 @@ PACOTE_ARGOS/
 icon_argos.png
 bg_argos_*.png
 logo_argos_*.png
+
+# Keras models
+*.h5

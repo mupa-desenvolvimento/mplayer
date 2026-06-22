@@ -76,7 +76,7 @@ class FaceRecognitionTestActivity : ComponentActivity() {
 
             // Run provisioning
             binding.txtCameraStatus.text = "Status: Verificando/Provisionando modelos TFLite..."
-            ModelProvisioningManager.ensureModelsProvisioned(applicationContext, cache?.tipoDaLicenca)
+            ModelProvisioningManager.ensureModelsProvisioned(applicationContext, cache?.tipoDaLicenca ?: "facial")
             
             // Verify models existence and size
             val ageGenderFile = File(modelsDir, "age_gender_model.tflite")
@@ -148,7 +148,11 @@ class FaceRecognitionTestActivity : ComponentActivity() {
                     lastProcessedAtMs = now
 
                     val rotation = image.imageInfo.rotationDegrees
-                    val jpeg = runCatching { YuvToJpeg.imageProxyToJpegBytes(image, jpegQuality = 55) }.getOrNull()
+                    val jpegResult = runCatching { YuvToJpeg.imageProxyToJpegBytes(image, jpegQuality = 55) }
+                    val jpeg = jpegResult.getOrNull()
+                    if (jpegResult.isFailure) {
+                        Log.e("FaceRecognitionTest", "YuvToJpeg conversion failed", jpegResult.exceptionOrNull())
+                    }
                     image.close()
 
                     if (jpeg == null || jpeg.isEmpty()) {
@@ -161,22 +165,39 @@ class FaceRecognitionTestActivity : ComponentActivity() {
                         try {
                             val engine = nativeEngine
                             if (engine != null) {
-                                val result = runCatching { engine.processFrameJpegBase64(base64, rotation) }.getOrNull()
+                                val resultResult = runCatching { engine.processFrameJpegBase64(base64, rotation) }
+                                val result = resultResult.getOrNull()
+                                if (resultResult.isFailure) {
+                                    Log.e("FaceRecognitionTest", "processFrameJpegBase64 failed", resultResult.exceptionOrNull())
+                                }
                                 withContext(Dispatchers.Main) {
                                     if (result != null && result.faces.isNotEmpty()) {
                                         isFaceActive = true
                                         val builder = StringBuilder()
+                                        val drawFaces = ArrayList<FaceOverlayView.DrawFace>()
                                         result.faces.forEachIndexed { index, face ->
                                             builder.append("Rosto #${index + 1}:\n")
                                             builder.append("  Hash: ${face.faceHash}\n")
                                             builder.append("  Idade (estimada): ${face.estimatedAge} (Faixa: ${face.ageRange})\n")
                                             builder.append("  Gênero: ${face.gender} (${String.format("%.2f", (face.confidence ?: 0.0f) * 100)}%)\n")
-                                            builder.append("  Olhando p/ tela: ${if (face.isLooking) "SIM" else "NÃO"}\n\n")
+                                            builder.append("  Olhando p/ tela: ${if (face.isLooking) "SIM" else "NÃO"}\n")
+                                            builder.append("  Tempo de atenção: ${face.attentionDurationSeconds}s\n\n")
+
+                                            face.boundingBox?.let { rect ->
+                                                drawFaces.add(
+                                                    FaceOverlayView.DrawFace(
+                                                        rect = rect,
+                                                        label = "Face ID: ${face.faceHash.take(6)}"
+                                                    )
+                                                )
+                                            }
                                         }
+                                        binding.faceOverlayView.updateFaces(drawFaces, result.width, result.height)
                                         binding.txtDetectionDetails.text = builder.toString()
                                         binding.txtCameraStatus.text = "Status: Rostos detectados (${result.faces.size})"
                                     } else {
                                         isFaceActive = false
+                                        binding.faceOverlayView.updateFaces(emptyList(), 0, 0)
                                         binding.txtDetectionDetails.text = "Nenhum rosto detectado no frame."
                                         binding.txtCameraStatus.text = "Status: Nenhum rosto"
                                     }

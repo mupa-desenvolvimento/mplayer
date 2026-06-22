@@ -44,7 +44,8 @@ object YuvToJpeg {
             val rowBuffer = ByteArray(yRowStride)
             for (row in 0 until height) {
                 yBuffer.position(row * yRowStride)
-                yBuffer.get(rowBuffer, 0, yRowStride)
+                val toRead = Math.min(yRowStride, yBuffer.remaining())
+                yBuffer.get(rowBuffer, 0, toRead)
                 for (col in 0 until width) {
                     nv21[idY++] = rowBuffer[col * yPixelStride]
                 }

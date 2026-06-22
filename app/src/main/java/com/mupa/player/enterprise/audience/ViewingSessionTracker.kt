@@ -21,9 +21,21 @@ class ViewingSessionTracker(
         var confidence: Float?,
         var contentPlaying: String?,
         var playlist: String?,
+        var embedding: FloatArray? = null,
+        var attentionDurationSeconds: Long = 0L,
     )
 
     private val sessionsByFace = HashMap<String, Live>()
+
+    private fun euclideanDistance(a: FloatArray, b: FloatArray): Float {
+        if (a.size != b.size) return Float.MAX_VALUE
+        var sum = 0.0f
+        for (i in a.indices) {
+            val diff = a[i] - b[i]
+            sum += diff * diff
+        }
+        return Math.sqrt(sum.toDouble()).toFloat()
+    }
 
     fun onFrame(
         frame: AudienceFrameResult,
@@ -35,24 +47,49 @@ class ViewingSessionTracker(
 
         val seen = HashSet<String>()
         for (face in frame.faces) {
-            val hash = face.faceHash
-            seen += hash
-            val live = sessionsByFace[hash]
+            var live: Live? = null
+            val faceEmbedding = face.embedding
+
+            if (faceEmbedding != null) {
+                var bestDistance = Float.MAX_VALUE
+                var bestLive: Live? = null
+                for (s in sessionsByFace.values) {
+                    val sEmbedding = s.embedding
+                    if (sEmbedding != null) {
+                        val dist = euclideanDistance(faceEmbedding, sEmbedding)
+                        if (dist < 1.25f && dist < bestDistance) {
+                            bestDistance = dist
+                            bestLive = s
+                        }
+                    }
+                }
+                live = bestLive
+            }
+
             if (live == null) {
-                sessionsByFace[hash] =
-                    Live(
-                        id = UUID.randomUUID().toString(),
-                        faceHash = hash,
-                        startedAtEpochMs = now,
-                        lastSeenEpochMs = now,
-                        lookCount = if (face.isLooking) 1 else 0,
-                        estimatedAge = face.estimatedAge,
-                        ageRange = face.ageRange,
-                        gender = face.gender,
-                        confidence = face.confidence,
-                        contentPlaying = contentPlaying,
-                        playlist = playlist,
-                    )
+                live = sessionsByFace[face.faceHash]
+            }
+
+            val hash = live?.faceHash ?: face.faceHash
+            seen += hash
+
+            if (live == null) {
+                val newLive = Live(
+                    id = UUID.randomUUID().toString(),
+                    faceHash = hash,
+                    startedAtEpochMs = now,
+                    lastSeenEpochMs = now,
+                    lookCount = if (face.isLooking) 1 else 0,
+                    estimatedAge = face.estimatedAge,
+                    ageRange = face.ageRange,
+                    gender = face.gender,
+                    confidence = face.confidence,
+                    contentPlaying = contentPlaying,
+                    playlist = playlist,
+                    embedding = faceEmbedding,
+                    attentionDurationSeconds = face.attentionDurationSeconds,
+                )
+                sessionsByFace[hash] = newLive
             } else {
                 live.lastSeenEpochMs = now
                 if (face.isLooking) live.lookCount += 1
@@ -62,6 +99,10 @@ class ViewingSessionTracker(
                 if (live.confidence == null && face.confidence != null) live.confidence = face.confidence
                 live.contentPlaying = contentPlaying ?: live.contentPlaying
                 live.playlist = playlist ?: live.playlist
+                if (faceEmbedding != null) {
+                    live.embedding = faceEmbedding
+                }
+                live.attentionDurationSeconds = face.attentionDurationSeconds
             }
         }
 
@@ -87,7 +128,7 @@ class ViewingSessionTracker(
     }
 
     private fun Live.toEntity(): AudienceSessionEntity {
-        val durationSeconds = ((lastSeenEpochMs - startedAtEpochMs) / 1000L).coerceAtLeast(0L)
+        val durationSeconds = attentionDurationSeconds.coerceAtLeast(0L)
         val cal = Calendar.getInstance().apply { timeInMillis = startedAtEpochMs }
         val hour = cal.get(Calendar.HOUR_OF_DAY)
         val weekday = cal.getDisplayName(Calendar.DAY_OF_WEEK, Calendar.LONG, Locale.US)?.lowercase(Locale.US) ?: "unknown"
@@ -99,7 +140,7 @@ class ViewingSessionTracker(
             lastSeenEpochMs = lastSeenEpochMs,
             viewDurationSeconds = durationSeconds,
             lookCount = lookCount,
-            estimatedAge = estimatedAge,
+            estimatedAge = null,
             ageRange = ageRange,
             gender = gender,
             confidence = confidence,
