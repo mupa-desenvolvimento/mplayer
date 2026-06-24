@@ -120,6 +120,15 @@
                 android:typeface="monospace"
                 android:layout_marginBottom="8dp"/>
 
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnDownloadModels"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Baixar Modelos Facial"
+                android:textColor="@color/enterprise_on"
+                android:layout_marginBottom="8dp" />
+
             <com.google.android.material.textview.MaterialTextView
                 android:id="@+id/txtDetectionDetails"
                 android:layout_width="match_parent"

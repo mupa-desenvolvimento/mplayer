@@ -80,6 +80,14 @@ import com.mupa.player.enterprise.price.PriceProduct
 import com.mupa.player.enterprise.price.PricePack
 import com.mupa.player.enterprise.price.PriceTheme
 import com.mupa.player.enterprise.price.PriceQueryEngine
+import com.mupa.player.enterprise.price.LayoutConfig
+import com.mupa.player.enterprise.price.PriceSlot
+import android.widget.TextView
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.graphics.Paint
+import android.view.LayoutInflater
+import com.mupa.player.enterprise.R
 import java.util.Locale
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -661,6 +669,29 @@ class PlayerActivity : ComponentActivity() {
         runCatching {
             com.mupa.player.enterprise.services.DeviceValidationService(applicationContext).validateDevice(deviceId)
         }
+        val cache = runCatching { DeviceCacheManager(applicationContext).load() }.getOrNull()
+        val licenseType = cache?.tipoDaLicenca?.trim()?.lowercase(Locale.US)
+        val isLicenseValid = licenseType == "facial" || licenseType == "analytics" || licenseType == "enterprise"
+        if (isLicenseValid) {
+            val modelsDir = File(filesDir, "models")
+            val ageGenderFile = File(modelsDir, "age_gender_model.tflite")
+            val faceRecFile = File(modelsDir, "mobilefacenet.tflite")
+            val needsDownload = !ageGenderFile.exists() || ageGenderFile.length() == 0L ||
+                                !faceRecFile.exists() || faceRecFile.length() == 0L
+            if (needsDownload) {
+                setSyncOverlayVisible(true)
+                updateSyncTexts(
+                    status = "Baixando modelos de reconhecimento facial...",
+                    countText = "",
+                    fileText = "",
+                    detailText = "",
+                    progressPercent = null,
+                )
+                com.mupa.player.enterprise.audience.ModelProvisioningManager.ensureModelsProvisioned(applicationContext, licenseType)
+                setSyncOverlayVisible(false)
+            }
+        }
+
         ensureAudienceStarted()
 
         val remote = runCatching { manifestManager.fetchManifest(deviceId) }.getOrNull()?.trim()
@@ -910,10 +941,17 @@ class PlayerActivity : ComponentActivity() {
                 val params = binding.syncContent.layoutParams as androidx.constraintlayout.widget.ConstraintLayout.LayoutParams
                 params.topToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET
                 params.bottomToBottom = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                params.bottomMargin = dpToPx(24)
+                params.bottomMargin = dpToPx(16)
                 binding.syncContent.layoutParams = params
                 
                 binding.syncLogo.visibility = View.GONE
+
+                // Compact padding and smaller font sizes
+                binding.syncContent.setPadding(dpToPx(16), dpToPx(8), dpToPx(16), dpToPx(8))
+                binding.syncStatusText.textSize = 13f
+                binding.syncCountText.textSize = 11f
+                binding.syncFileText.textSize = 11f
+                binding.syncDetailText.textSize = 10f
             } else {
                 // Tela cheia
                 val overlayParams = binding.syncOverlay.layoutParams as android.widget.FrameLayout.LayoutParams
@@ -931,6 +969,13 @@ class PlayerActivity : ComponentActivity() {
                 binding.syncContent.layoutParams = params
                 
                 binding.syncLogo.visibility = View.VISIBLE
+
+                // Standard padding and font sizes
+                binding.syncContent.setPadding(dpToPx(28), dpToPx(28), dpToPx(28), dpToPx(28))
+                binding.syncStatusText.textSize = 20f
+                binding.syncCountText.textSize = 14f
+                binding.syncFileText.textSize = 14f
+                binding.syncDetailText.textSize = 12f
             }
 
             if (binding.syncOverlay.visibility != View.VISIBLE) {
@@ -1468,18 +1513,32 @@ class PlayerActivity : ComponentActivity() {
         binding.priceLoadingContainer.visibility = View.GONE
         binding.priceResultRoot.visibility = View.VISIBLE
 
-        binding.priceNameText.text = buildModernName(product.description.orEmpty())
-        binding.priceCodeText.text = "Código: ${product.ean}"
+        // Inflar o layout dinamicamente com base na configuração
+        val layoutType = priceConfig?.layout?.xmlLayoutType ?: "split"
+        inflateLayoutForProduct(layoutType)
+
+        // Bind das views recém-infladas
+        val nameText = binding.priceResultRoot.findViewById<TextView>(R.id.priceNameText)
+        val codeText = binding.priceResultRoot.findViewById<TextView>(R.id.priceCodeText)
+        val subtitleText = binding.priceResultRoot.findViewById<TextView>(R.id.priceSubtitleText)
+        val offlineBadge = binding.priceResultRoot.findViewById<TextView>(R.id.priceOfflineBadge)
+        val offerText = binding.priceResultRoot.findViewById<TextView>(R.id.priceOfferText)
+        val offerContainer = binding.priceResultRoot.findViewById<View>(R.id.priceOfferContainer)
+        val packsContainer = binding.priceResultRoot.findViewById<ViewGroup>(R.id.pricePacksContainer)
+        val priceContainer = binding.priceResultRoot.findViewById<LinearLayout>(R.id.price_container)
+
+        nameText?.text = buildModernName(product.description.orEmpty())
+        codeText?.text = "Código: ${product.ean}"
 
         if (product.offline) {
-            binding.priceOfflineBadge.visibility = View.VISIBLE
-            binding.priceOfflineBadge.text = "OFFLINE"
+            offlineBadge?.visibility = View.VISIBLE
+            offlineBadge?.text = "OFFLINE"
         } else {
-            binding.priceOfflineBadge.visibility = View.GONE
+            offlineBadge?.visibility = View.GONE
         }
 
         val hasOriginal = product.originalPrice != null && product.price != null && product.originalPrice > product.price
-        if (hasOriginal) {
+        if (hasOriginal && subtitleText != null) {
             val formattedOriginal = formatCurrency(product.originalPrice!!)
             val originalText = "De: $formattedOriginal"
             val spannable = SpannableStringBuilder(originalText)
@@ -1489,23 +1548,25 @@ class PlayerActivity : ComponentActivity() {
                 originalText.length,
                 Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
             )
-            binding.priceSubtitleText.text = spannable
-            binding.priceSubtitleText.visibility = View.VISIBLE
+            subtitleText.text = spannable
+            subtitleText.visibility = View.VISIBLE
         } else {
-            binding.priceSubtitleText.visibility = View.GONE
+            subtitleText?.visibility = View.GONE
         }
 
-        if (product.clubPrice != null && product.clubPrice > 0.0) {
-            binding.priceSecondUnitLabel.text = "CLIENTE CLUBE"
-            binding.priceSecondUnitValue.text = formatCurrency(product.clubPrice)
-            binding.priceSecondUnitContainer.visibility = View.VISIBLE
-        } else {
-            binding.priceSecondUnitContainer.visibility = View.GONE
-        }
+        renderOffer(product.offer, offerContainer, offerText)
+        renderPacks(product.packs, packsContainer)
 
-        renderOffer(product.offer)
-        renderPacks(product.packs)
-        renderPrice(value = product.price, animate = true)
+        val accentHex = if (priceConfig?.layout?.colorMode == "solid" && !priceConfig?.layout?.solidColor.isNullOrEmpty()) {
+            priceConfig?.layout?.solidColor
+        } else {
+            product.theme?.signature ?: "#06b6d4"
+        }
+        val parsedColor = runCatching { Color.parseColor(accentHex) }.getOrDefault(Color.parseColor("#06b6d4"))
+
+        if (priceContainer != null) {
+            populatePriceSlots(priceContainer, priceConfig?.layout, product, parsedColor)
+        }
         playBeep()
 
         speakPriceIfPossible(
@@ -1539,12 +1600,14 @@ class PlayerActivity : ComponentActivity() {
                     withContext(Dispatchers.Main) {
                         if (overlayEan != expectedEan || binding.priceOverlay.visibility != View.VISIBLE) return@withContext
                         applyPriceOverlayLayout()
+                        val imgView = binding.priceResultRoot.findViewById<ImageView>(R.id.priceProductImage)
                         val drawable = defaultPrepared?.drawable
                         if (drawable != null) {
-                            binding.priceProductImage.setImageDrawable(drawable)
+                            imgView?.setImageDrawable(drawable)
                         } else {
-                            binding.priceProductImage.setImageResource(com.mupa.player.enterprise.R.drawable.ic_mplayer)
+                            imgView?.setImageResource(com.mupa.player.enterprise.R.drawable.ic_mplayer)
                         }
+                        applyThemeColors(binding.priceResultRoot, product, priceConfig?.layout)
                     }
 
                     if (engine != null && cfg != null) {
@@ -1568,7 +1631,9 @@ class PlayerActivity : ComponentActivity() {
                                     vibrant = prepared.secondary,
                                     text = prepared.text,
                                 )
-                                prepared.drawable?.let { binding.priceProductImage.setImageDrawable(it) }
+                                val imgView = binding.priceResultRoot.findViewById<ImageView>(R.id.priceProductImage)
+                                prepared.drawable?.let { imgView?.setImageDrawable(it) }
+                                applyThemeColors(binding.priceResultRoot, product, priceConfig?.layout)
                             }
                         }
                     }
@@ -1584,7 +1649,9 @@ class PlayerActivity : ComponentActivity() {
                             vibrant = prepared.secondary,
                             text = prepared.text,
                         )
-                        prepared.drawable?.let { binding.priceProductImage.setImageDrawable(it) }
+                        val imgView = binding.priceResultRoot.findViewById<ImageView>(R.id.priceProductImage)
+                        prepared.drawable?.let { imgView?.setImageDrawable(it) }
+                        applyThemeColors(binding.priceResultRoot, product, priceConfig?.layout)
                     }
                 }
             }
@@ -1646,6 +1713,20 @@ class PlayerActivity : ComponentActivity() {
                 withContext(Dispatchers.Main) {
                     if (overlayEan != expectedEan || binding.priceOverlay.visibility != View.VISIBLE) return@withContext
 
+                    val layoutType = priceConfig?.layout?.xmlLayoutType ?: "split"
+                    inflateLayoutForProduct(layoutType)
+
+                    // Find views from the dynamically inflated layout
+                    val nameText = binding.priceResultRoot.findViewById<TextView>(R.id.priceNameText)
+                    val codeText = binding.priceResultRoot.findViewById<TextView>(R.id.priceCodeText)
+                    val subtitleText = binding.priceResultRoot.findViewById<TextView>(R.id.priceSubtitleText)
+                    val offlineBadge = binding.priceResultRoot.findViewById<TextView>(R.id.priceOfflineBadge)
+                    val offerText = binding.priceResultRoot.findViewById<TextView>(R.id.priceOfferText)
+                    val offerContainer = binding.priceResultRoot.findViewById<View>(R.id.priceOfferContainer)
+                    val packsContainer = binding.priceResultRoot.findViewById<ViewGroup>(R.id.pricePacksContainer)
+                    val priceContainer = binding.priceResultRoot.findViewById<LinearLayout>(R.id.price_container)
+                    val imgView = binding.priceResultRoot.findViewById<ImageView>(R.id.priceProductImage)
+
                     applyOverlayColors(prepared.dominant, prepared.dark, prepared.light, prepared.secondary, prepared.text)
                     applyPriceOverlayLayout()
                     binding.priceResultRoot.visibility = View.VISIBLE
@@ -1653,25 +1734,52 @@ class PlayerActivity : ComponentActivity() {
                         binding.priceLoadingContainer.visibility = View.GONE
                     }.start()
 
-                    binding.priceNameText.text = buildModernName(product.nome)
-                    binding.priceSubtitleText.visibility = View.GONE
-                    binding.priceCodeText.text = "Código: ${product.ean}"
+                    nameText?.text = buildModernName(product.nome)
+                    subtitleText?.visibility = View.GONE
+                    codeText?.text = "Código: ${product.ean}"
 
-                    binding.priceOfflineBadge.visibility = View.GONE
-                    renderOffer(null)
-                    renderPrice(value = product.preco, animate = true)
+                    offlineBadge?.visibility = View.GONE
+                    renderOffer(null, offerContainer, offerText)
+
+                    val demoPriceProduct = PriceProduct(
+                        id = null,
+                        ean = product.ean,
+                        description = product.nome,
+                        price = product.preco,
+                        originalPrice = product.precoAntigo,
+                        clubPrice = null,
+                        stock = null,
+                        image = null,
+                        offer = null,
+                        packs = emptyList(),
+                        theme = null,
+                        offline = false
+                    )
+
+                    val accentHex = if (priceConfig?.layout?.colorMode == "solid" && !priceConfig?.layout?.solidColor.isNullOrEmpty()) {
+                        priceConfig?.layout?.solidColor
+                    } else {
+                        null
+                    }
+                    val parsedColor = accentHex?.let { runCatching { Color.parseColor(it) }.getOrNull() } ?: prepared.dominant
+
+                    if (priceContainer != null) {
+                        populatePriceSlots(priceContainer, priceConfig?.layout, demoPriceProduct, parsedColor)
+                    }
+
                     playBeep()
                     speakPriceIfPossible(ean = product.ean, price = product.preco, oldPrice = product.precoAntigo, offer = null)
 
-                    binding.pricePacksContainer.removeAllViews()
-                    binding.pricePacksContainer.visibility = View.GONE
+                    packsContainer?.removeAllViews()
+                    packsContainer?.visibility = View.GONE
 
                     val drawable = prepared.drawable
                     if (drawable != null) {
-                        binding.priceProductImage.setImageDrawable(drawable)
+                        imgView?.setImageDrawable(drawable)
                     } else {
-                        binding.priceProductImage.setImageResource(com.mupa.player.enterprise.R.drawable.ic_mplayer)
+                        imgView?.setImageResource(com.mupa.player.enterprise.R.drawable.ic_mplayer)
                     }
+                    applyThemeColors(binding.priceResultRoot, demoPriceProduct, priceConfig?.layout)
 
                     animateOverlayWidgets()
                 }
@@ -2351,6 +2459,185 @@ class PlayerActivity : ComponentActivity() {
             b >= mb -> String.format("%.1f MB", b / mb)
             b >= kb -> String.format("%.0f KB", b / kb)
             else -> String.format("%.0f B", b)
+        }
+    }
+
+    private fun inflateLayoutForProduct(xmlLayoutType: String) {
+        val container = binding.priceResultRoot
+        container.removeAllViews()
+        val layoutResId = when (xmlLayoutType) {
+            "split_inverted" -> R.layout.price_check_split_inverted
+            "vertical_image_bottom" -> R.layout.price_check_vertical_image_bottom
+            "vertical_image_top" -> R.layout.price_check_vertical_image_top
+            "backdrop" -> R.layout.price_check_backdrop
+            "centered" -> R.layout.price_check_centered
+            "multi_price" -> R.layout.price_check_multi_price
+            "split" -> R.layout.price_check_split
+            else -> R.layout.price_check_split
+        }
+        val inflater = LayoutInflater.from(container.context)
+        inflater.inflate(layoutResId, container, true)
+    }
+
+    private fun populatePriceSlots(
+        container: LinearLayout,
+        layoutConfig: LayoutConfig?,
+        product: PriceProduct,
+        accentColor: Int
+    ) {
+        container.removeAllViews()
+        val inflater = LayoutInflater.from(container.context)
+
+        val slots = layoutConfig?.priceSlots?.takeIf { it.isNotEmpty() }
+            ?: listOf(PriceSlot(field = "price", label = "Preço", showFromPrice = true))
+
+        for (slot in slots) {
+            val priceValue: Double? = when (slot.field) {
+                "price" -> product.price
+                "price_promotional", "pricePromotional" -> product.pricePromotional
+                "price_club", "priceClub" -> product.priceClub
+                "price_wholesale", "priceWholesale" -> product.priceWholesale
+                "price_weighable", "priceWeighable" -> product.priceWeighable
+                else -> null
+            }
+
+            if (priceValue == null || priceValue <= 0.0) continue
+
+            val itemView = inflater.inflate(R.layout.item_price_slot, container, false)
+
+            val labelTextView = itemView.findViewById<TextView>(R.id.slotLabel)
+            val integerTextView = itemView.findViewById<TextView>(R.id.slotIntegerPrice)
+            val decimalTextView = itemView.findViewById<TextView>(R.id.slotDecimalPrice)
+            val fromPriceTextView = itemView.findViewById<TextView>(R.id.slotFromPrice)
+
+            labelTextView.text = slot.label
+
+            val slotColor = when (slot.field) {
+                "price_promotional", "pricePromotional" -> Color.parseColor("#ef4444")
+                "price_club", "priceClub" -> Color.parseColor("#10b981")
+                else -> accentColor
+            }
+            integerTextView.setTextColor(slotColor)
+            decimalTextView.setTextColor(slotColor)
+
+            val formatted = String.format(Locale.US, "%.2f", priceValue)
+            val parts = formatted.split(".")
+            integerTextView.text = parts[0]
+            decimalTextView.text = ",${parts[1]}"
+
+            val compareFromPrice = product.priceFrom ?: product.originalPrice
+            if (slot.showFromPrice && compareFromPrice != null && compareFromPrice > priceValue) {
+                fromPriceTextView.visibility = View.VISIBLE
+                fromPriceTextView.text = String.format("De: R$ %.2f", compareFromPrice)
+                fromPriceTextView.paintFlags = fromPriceTextView.paintFlags or Paint.STRIKE_THRU_TEXT_FLAG
+            } else {
+                fromPriceTextView.visibility = View.GONE
+            }
+
+            container.addView(itemView)
+        }
+    }
+
+    private fun applyThemeColors(view: View, product: PriceProduct, layoutConfig: LayoutConfig?) {
+        val themeColorHex = if (layoutConfig?.colorMode == "solid" && !layoutConfig.solidColor.isNullOrEmpty()) {
+            layoutConfig.solidColor
+        } else {
+            product.theme?.signature ?: "#06b6d4"
+        }
+        val parsedColor = runCatching { Color.parseColor(themeColorHex) }.getOrDefault(Color.parseColor("#06b6d4"))
+
+        val borderView = view.findViewById<View>(R.id.priceOverlayRoot) ?: binding.priceOverlayRoot
+        val drawable = borderView.background as? GradientDrawable ?: GradientDrawable()
+        drawable.setStroke(dpToPx(4), parsedColor)
+        borderView.background = drawable
+
+        val currencyText = view.findViewById<TextView>(R.id.priceCurrencyText)
+        val integerText = view.findViewById<TextView>(R.id.priceIntegerText)
+        val decimalText = view.findViewById<TextView>(R.id.priceDecimalText)
+
+        currencyText?.setTextColor(parsedColor)
+        integerText?.setTextColor(parsedColor)
+        decimalText?.setTextColor(parsedColor)
+
+        val glowBackground = view.findViewById<ImageView>(R.id.priceProductGlowEffect)
+        if (layoutConfig?.style == "modern" && glowBackground != null) {
+            glowBackground.visibility = View.VISIBLE
+            val glowDrawable = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                colors = intArrayOf(
+                    adjustAlpha(parsedColor, 0.25f),
+                    Color.TRANSPARENT
+                )
+                gradientType = GradientDrawable.RADIAL_GRADIENT
+                gradientRadius = dpToPx(120).toFloat()
+            }
+            glowBackground.background = glowDrawable
+        } else {
+            glowBackground?.visibility = View.GONE
+        }
+    }
+
+
+
+    private fun renderOffer(offer: PriceOffer?, offerContainer: View?, offerText: TextView?) {
+        val badgesRow = binding.priceResultRoot.findViewById<View>(R.id.priceBadgesRow)
+        val leftBadge = binding.priceResultRoot.findViewById<TextView>(R.id.priceLeftBadgeText)
+        val rightBadge = binding.priceResultRoot.findViewById<TextView>(R.id.priceRightBadgeText)
+        val secondUnitContainer = binding.priceResultRoot.findViewById<View>(R.id.priceSecondUnitContainer)
+        val secondUnitValue = binding.priceResultRoot.findViewById<TextView>(R.id.priceSecondUnitValue)
+
+        if (offer == null || !offer.enabled) {
+            badgesRow?.visibility = View.GONE
+            leftBadge?.visibility = View.GONE
+            rightBadge?.visibility = View.GONE
+            offerContainer?.visibility = View.GONE
+            secondUnitContainer?.visibility = View.GONE
+            return
+        }
+
+        val (badgeA, badgeB) = splitOfferBadges(offer.title?.trim().orEmpty())
+        badgesRow?.visibility = View.VISIBLE
+        if (badgeA.isNotBlank()) {
+            leftBadge?.text = badgeA
+            leftBadge?.visibility = View.VISIBLE
+        } else {
+            leftBadge?.visibility = View.GONE
+        }
+        if (!badgeB.isNullOrBlank()) {
+            rightBadge?.text = badgeB
+            rightBadge?.visibility = View.VISIBLE
+        } else {
+            rightBadge?.visibility = View.GONE
+        }
+
+        val desc = offer.description?.trim().orEmpty()
+        if (desc.isNotBlank() && offerText != null) {
+            offerText.text = desc
+            offerContainer?.visibility = View.VISIBLE
+        } else {
+            offerContainer?.visibility = View.GONE
+        }
+
+        val second = offer.secondUnit
+        if (second != null && second > 0.0 && secondUnitValue != null) {
+            secondUnitValue.text = formatCurrency(second)
+            secondUnitContainer?.visibility = View.VISIBLE
+        } else {
+            secondUnitContainer?.visibility = View.GONE
+        }
+    }
+
+    private fun renderPacks(packs: List<PricePack>, container: ViewGroup?) {
+        if (container == null) return
+        container.removeAllViews()
+        if (packs.isEmpty()) {
+            container.visibility = View.GONE
+            return
+        }
+        container.visibility = View.VISIBLE
+        packs.forEach { p ->
+            val card = createPackCard(p.label, p.price, p.unitPrice)
+            container.addView(card)
         }
     }
 

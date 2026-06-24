@@ -792,6 +792,11 @@ class PriceQueryEngine(
                 price = o.optDouble("price", Double.NaN).takeIf { !it.isNaN() },
                 originalPrice = o.optDouble("originalPrice", Double.NaN).takeIf { !it.isNaN() },
                 clubPrice = o.optDouble("clubPrice", Double.NaN).takeIf { !it.isNaN() },
+                pricePromotional = o.optDouble("pricePromotional", Double.NaN).takeIf { !it.isNaN() },
+                priceClub = o.optDouble("priceClub", Double.NaN).takeIf { !it.isNaN() },
+                priceWholesale = o.optDouble("priceWholesale", Double.NaN).takeIf { !it.isNaN() },
+                priceWeighable = o.optDouble("priceWeighable", Double.NaN).takeIf { !it.isNaN() },
+                priceFrom = o.optDouble("priceFrom", Double.NaN).takeIf { !it.isNaN() },
                 stock = o.optInt("stock", Int.MIN_VALUE).takeIf { it != Int.MIN_VALUE },
                 image = o.optString("image", "").ifBlank { null },
                 offer = offer,
@@ -891,6 +896,20 @@ class PriceQueryEngine(
         val price = state.optDouble("price", Double.NaN).takeIf { !it.isNaN() }
         val originalPrice = state.optDouble("originalPrice", Double.NaN).takeIf { !it.isNaN() }
         val clubPrice = state.optDouble("clubPrice", Double.NaN).takeIf { !it.isNaN() }
+
+        val pricePromotional = state.optDouble("price_promotional", Double.NaN).takeIf { !it.isNaN() }
+            ?: state.optDouble("pricePromotional", Double.NaN).takeIf { !it.isNaN() }
+        val priceClub = state.optDouble("price_club", Double.NaN).takeIf { !it.isNaN() }
+            ?: state.optDouble("priceClub", Double.NaN).takeIf { !it.isNaN() }
+            ?: clubPrice
+        val priceWholesale = state.optDouble("price_wholesale", Double.NaN).takeIf { !it.isNaN() }
+            ?: state.optDouble("priceWholesale", Double.NaN).takeIf { !it.isNaN() }
+        val priceWeighable = state.optDouble("price_weighable", Double.NaN).takeIf { !it.isNaN() }
+            ?: state.optDouble("priceWeighable", Double.NaN).takeIf { !it.isNaN() }
+        val priceFrom = state.optDouble("price_from", Double.NaN).takeIf { !it.isNaN() }
+            ?: state.optDouble("priceFrom", Double.NaN).takeIf { !it.isNaN() }
+            ?: originalPrice
+
         val stock = state.optInt("stock", Int.MIN_VALUE).takeIf { it != Int.MIN_VALUE }
         val image = state.optString("image", "").ifBlank { null }
 
@@ -933,6 +952,11 @@ class PriceQueryEngine(
             price = price,
             originalPrice = originalPrice,
             clubPrice = clubPrice,
+            pricePromotional = pricePromotional,
+            priceClub = priceClub,
+            priceWholesale = priceWholesale,
+            priceWeighable = priceWeighable,
+            priceFrom = priceFrom,
             stock = stock,
             image = image,
             offer = offer,
@@ -978,6 +1002,11 @@ class PriceQueryEngine(
             .put("price", product.price)
             .put("originalPrice", product.originalPrice)
             .put("clubPrice", product.clubPrice)
+            .put("pricePromotional", product.pricePromotional)
+            .put("priceClub", product.priceClub)
+            .put("priceWholesale", product.priceWholesale)
+            .put("priceWeighable", product.priceWeighable)
+            .put("priceFrom", product.priceFrom)
             .put("stock", product.stock)
             .put("image", product.image)
             .put("offer", offer)

@@ -16,6 +16,9 @@ interface PriceQueryEventDao {
     @Query("SELECT * FROM price_query_events WHERE uploadedAtEpochMs IS NULL ORDER BY createdAtEpochMs ASC LIMIT :limit")
     suspend fun getPending(limit: Int): List<PriceQueryEventEntity>
 
+    @Query("SELECT COUNT(*) FROM price_query_events WHERE uploadedAtEpochMs IS NULL")
+    suspend fun getPendingCount(): Int
+
     @Query("UPDATE price_query_events SET uploadedAtEpochMs = :uploadedAtEpochMs WHERE id IN (:ids)")
     suspend fun markUploaded(ids: List<String>, uploadedAtEpochMs: Long)
 }

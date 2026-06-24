@@ -372,6 +372,15 @@
                         android:text="Enviar Detecções para o Supabase"
                         android:textColor="@color/enterprise_on" />
 
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnUploadPriceQueries"
+                        style="@style/Widget.Material3.Button.TonalButton"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Enviar Consultas de Preços para o Supabase"
+                        android:textColor="@color/enterprise_on"
+                        android:layout_marginTop="8dp" />
+
                     <com.google.android.material.textview.MaterialTextView
                         android:id="@+id/txtSyncProgress"
                         android:layout_width="match_parent"

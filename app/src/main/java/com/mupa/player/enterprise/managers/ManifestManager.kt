@@ -249,55 +249,96 @@ class ManifestManager(private val context: Context) {
     }
 
     private fun parseItems(json: String): List<ManifestItem> {
-        val root = JSONObject(json)
-        val manifestObj = root.optJSONObject("manifest") ?: root
-        val playlistObj = manifestObj.optJSONObject("playlist") ?: manifestObj
-        val items = playlistObj.optJSONArray("items") ?: manifestObj.optJSONArray("items") ?: JSONArray()
-        val appearance = manifestObj.optJSONObject("appearance_config")
-            ?: playlistObj.optJSONObject("appearance_config")
-            ?: JSONObject()
-        val volumesArr = appearance.optJSONArray("item_volumes")
-        val offsetsArr = appearance.optJSONArray("item_video_offsets")
+        return try {
+            val root = JSONObject(json)
+            val manifestObj = root.optJSONObject("manifest") ?: root
+            val playlistObj = manifestObj.optJSONObject("playlist") ?: manifestObj
+            val items = playlistObj.optJSONArray("items") ?: manifestObj.optJSONArray("items") ?: JSONArray()
+            val appearance = manifestObj.optJSONObject("appearance_config")
+                ?: playlistObj.optJSONObject("appearance_config")
+                ?: JSONObject()
+            val volumesArr = appearance.optJSONArray("item_volumes")
+            val offsetsArr = appearance.optJSONArray("item_video_offsets")
 
-        val out = ArrayList<ManifestItem>()
-        var mediaIndex = 0
-        for (i in 0 until items.length()) {
-            val obj = items.optJSONObject(i) ?: continue
+            val out = ArrayList<ManifestItem>()
+            var mediaIndex = 0
+            for (i in 0 until items.length()) {
+                val obj = items.optJSONObject(i) ?: continue
 
-            if (obj.has("midias")) {
-                val campanha = obj.optString("campanha", "")
-                val dtInicio = obj.optNullableString("dt_inicio")
-                val dtFim = obj.optNullableString("dt_fim")
-                val midiasArr = obj.optJSONArray("midias") ?: JSONArray()
+                if (obj.has("midias")) {
+                    val campanha = obj.optString("campanha", "")
+                    val dtInicio = obj.optNullableString("dt_inicio")
+                    val dtFim = obj.optNullableString("dt_fim")
+                    val midiasArr = obj.optJSONArray("midias") ?: JSONArray()
 
-                for (j in 0 until midiasArr.length()) {
-                    val mediaObj = midiasArr.optJSONObject(j) ?: continue
-                    val id = mediaObj.optString("id", "").ifBlank { mediaObj.optString("media_id", "") }
-                    val rawUrl = mediaObj.optString("url", "").ifBlank { mediaObj.optString("src", "") }
+                    for (j in 0 until midiasArr.length()) {
+                        val mediaObj = midiasArr.optJSONObject(j) ?: continue
+                        val id = mediaObj.optString("id", "").ifBlank { mediaObj.optString("media_id", "") }
+                        val rawUrl = mediaObj.optString("url", "").ifBlank { mediaObj.optString("src", "") }
+                        val url = normalizeUrl(rawUrl)
+                        val type = mediaObj.optString("type", "").lowercase().ifBlank { inferTypeFromUrl(url) }
+                        if (id.isBlank() || url.isBlank()) continue
+
+                        val durationMs = mediaObj.optLong("duration_ms").takeIf { it > 0 }
+                            ?: (mediaObj.optLong("duration").takeIf { it > 0 }?.let { it * 1000 })
+                        val volume = resolveVolume(mediaObj, volumesArr, mediaIndex)
+                        val offsetStartMs = mediaObj.optLong("offset_start_ms").takeIf { it > 0 }
+                            ?: (mediaObj.optLong("offset_start").takeIf { it > 0 }?.let { it * 1000 })
+                            ?: (mediaObj.optLong("videoStartOffset").takeIf { it > 0 }?.let { it * 1000 })
+                            ?: offsetsArr?.optJSONObject(mediaIndex)?.optLong("start")?.takeIf { it > 0 }?.let { it * 1000 }
+                        val offsetEndMs = mediaObj.optLong("offset_end_ms").takeIf { it > 0 }
+                            ?: (mediaObj.optLong("offset_end").takeIf { it > 0 }?.let { it * 1000 })
+                            ?: (mediaObj.optLong("videoEndOffset").takeIf { it > 0 }?.let { it * 1000 })
+                            ?: offsetsArr?.optJSONObject(mediaIndex)?.optLong("end")?.takeIf { it > 0 }?.let { it * 1000 }
+
+                        val inicioFaixa = mediaObj.optNullableString("inicio_faixa")
+                        val fimFaixa = mediaObj.optNullableString("fim_faixa")
+
+                        out += ManifestItem(
+                            id = id,
+                            type = type,
+                            url = url,
+                            name = mediaObj.optString("name", "").takeIf { it.isNotBlank() } ?: campanha.takeIf { it.isNotBlank() },
+                            durationMs = durationMs,
+                            volume = volume,
+                            offsetStartMs = offsetStartMs,
+                            offsetEndMs = offsetEndMs,
+                            startDate = dtInicio,
+                            endDate = dtFim,
+                            startTime = inicioFaixa,
+                            endTime = fimFaixa,
+                        )
+                        mediaIndex++
+                    }
+                } else {
+                    val id = obj.optString("id", "").ifBlank { obj.optString("media_id", "") }
+                    val rawUrl = obj.optString("url", "").ifBlank { obj.optString("src", "") }
                     val url = normalizeUrl(rawUrl)
-                    val type = mediaObj.optString("type", "").lowercase().ifBlank { inferTypeFromUrl(url) }
+                    val type = obj.optString("type", "").lowercase().ifBlank { inferTypeFromUrl(url) }
                     if (id.isBlank() || url.isBlank()) continue
 
-                    val durationMs = mediaObj.optLong("duration_ms").takeIf { it > 0 }
-                        ?: (mediaObj.optLong("duration").takeIf { it > 0 }?.let { it * 1000 })
-                    val volume = resolveVolume(mediaObj, volumesArr, mediaIndex)
-                    val offsetStartMs = mediaObj.optLong("offset_start_ms").takeIf { it > 0 }
-                        ?: (mediaObj.optLong("offset_start").takeIf { it > 0 }?.let { it * 1000 })
-                        ?: (mediaObj.optLong("videoStartOffset").takeIf { it > 0 }?.let { it * 1000 })
+                    val durationMs = obj.optLong("duration_ms").takeIf { it > 0 }
+                        ?: (obj.optLong("duration").takeIf { it > 0 }?.let { it * 1000 })
+                    val volume = resolveVolume(obj, volumesArr, mediaIndex)
+                    val offsetStartMs = obj.optLong("offset_start_ms").takeIf { it > 0 }
+                        ?: (obj.optLong("offset_start").takeIf { it > 0 }?.let { it * 1000 })
+                        ?: (obj.optLong("videoStartOffset").takeIf { it > 0 }?.let { it * 1000 })
                         ?: offsetsArr?.optJSONObject(mediaIndex)?.optLong("start")?.takeIf { it > 0 }?.let { it * 1000 }
-                    val offsetEndMs = mediaObj.optLong("offset_end_ms").takeIf { it > 0 }
-                        ?: (mediaObj.optLong("offset_end").takeIf { it > 0 }?.let { it * 1000 })
-                        ?: (mediaObj.optLong("videoEndOffset").takeIf { it > 0 }?.let { it * 1000 })
+                    val offsetEndMs = obj.optLong("offset_end_ms").takeIf { it > 0 }
+                        ?: (obj.optLong("offset_end").takeIf { it > 0 }?.let { it * 1000 })
+                        ?: (obj.optLong("videoEndOffset").takeIf { it > 0 }?.let { it * 1000 })
                         ?: offsetsArr?.optJSONObject(mediaIndex)?.optLong("end")?.takeIf { it > 0 }?.let { it * 1000 }
 
-                    val inicioFaixa = mediaObj.optNullableString("inicio_faixa")
-                    val fimFaixa = mediaObj.optNullableString("fim_faixa")
+                    val dtInicio = obj.optNullableString("dt_inicio")
+                    val dtFim = obj.optNullableString("dt_fim")
+                    val inicioFaixa = obj.optNullableString("inicio_faixa")
+                    val fimFaixa = obj.optNullableString("fim_faixa")
 
                     out += ManifestItem(
                         id = id,
                         type = type,
                         url = url,
-                        name = mediaObj.optString("name", "").takeIf { it.isNotBlank() } ?: campanha.takeIf { it.isNotBlank() },
+                        name = obj.optString("name", "").takeIf { it.isNotBlank() },
                         durationMs = durationMs,
                         volume = volume,
                         offsetStartMs = offsetStartMs,
@@ -309,48 +350,12 @@ class ManifestManager(private val context: Context) {
                     )
                     mediaIndex++
                 }
-            } else {
-                val id = obj.optString("id", "").ifBlank { obj.optString("media_id", "") }
-                val rawUrl = obj.optString("url", "").ifBlank { obj.optString("src", "") }
-                val url = normalizeUrl(rawUrl)
-                val type = obj.optString("type", "").lowercase().ifBlank { inferTypeFromUrl(url) }
-                if (id.isBlank() || url.isBlank()) continue
-
-                val durationMs = obj.optLong("duration_ms").takeIf { it > 0 }
-                    ?: (obj.optLong("duration").takeIf { it > 0 }?.let { it * 1000 })
-                val volume = resolveVolume(obj, volumesArr, mediaIndex)
-                val offsetStartMs = obj.optLong("offset_start_ms").takeIf { it > 0 }
-                    ?: (obj.optLong("offset_start").takeIf { it > 0 }?.let { it * 1000 })
-                    ?: (obj.optLong("videoStartOffset").takeIf { it > 0 }?.let { it * 1000 })
-                    ?: offsetsArr?.optJSONObject(mediaIndex)?.optLong("start")?.takeIf { it > 0 }?.let { it * 1000 }
-                val offsetEndMs = obj.optLong("offset_end_ms").takeIf { it > 0 }
-                    ?: (obj.optLong("offset_end").takeIf { it > 0 }?.let { it * 1000 })
-                    ?: (obj.optLong("videoEndOffset").takeIf { it > 0 }?.let { it * 1000 })
-                    ?: offsetsArr?.optJSONObject(mediaIndex)?.optLong("end")?.takeIf { it > 0 }?.let { it * 1000 }
-
-                val dtInicio = obj.optNullableString("dt_inicio")
-                val dtFim = obj.optNullableString("dt_fim")
-                val inicioFaixa = obj.optNullableString("inicio_faixa")
-                val fimFaixa = obj.optNullableString("fim_faixa")
-
-                out += ManifestItem(
-                    id = id,
-                    type = type,
-                    url = url,
-                    name = obj.optString("name", "").takeIf { it.isNotBlank() },
-                    durationMs = durationMs,
-                    volume = volume,
-                    offsetStartMs = offsetStartMs,
-                    offsetEndMs = offsetEndMs,
-                    startDate = dtInicio,
-                    endDate = dtFim,
-                    startTime = inicioFaixa,
-                    endTime = fimFaixa,
-                )
-                mediaIndex++
             }
+            out
+        } catch (e: Exception) {
+            android.util.Log.e("ManifestManager", "Failed to parse items", e)
+            emptyList()
         }
-        return out
     }
 
     fun parseItemsPublic(json: String): List<ManifestItem> = parseItems(json)

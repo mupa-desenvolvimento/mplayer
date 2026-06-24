@@ -57,6 +57,23 @@ class FaceRecognitionTestActivity : ComponentActivity() {
             finish()
         }
 
+        binding.btnDownloadModels.setOnClickListener {
+            binding.btnDownloadModels.isEnabled = false
+            lifecycleScope.launch {
+                binding.txtCameraStatus.text = "Status: Baixando modelos..."
+                val cache = runCatching { DeviceCacheManager(applicationContext).load() }.getOrNull()
+                val ok = ModelProvisioningManager.ensureModelsProvisioned(applicationContext, cache?.tipoDaLicenca ?: "facial")
+                if (ok) {
+                    Toast.makeText(this@FaceRecognitionTestActivity, "Modelos baixados com sucesso!", Toast.LENGTH_SHORT).show()
+                    startCameraAndEngine()
+                } else {
+                    Toast.makeText(this@FaceRecognitionTestActivity, "Falha ao baixar modelos.", Toast.LENGTH_SHORT).show()
+                    binding.txtCameraStatus.text = "Status: Falha no download"
+                }
+                binding.btnDownloadModels.isEnabled = true
+            }
+        }
+
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCameraAndEngine()
         } else {

@@ -36,7 +36,7 @@
         <activity
             android:name=".ui.SplashActivity"
             android:exported="true"
-            android:screenOrientation="sensor"
+            android:screenOrientation="fullUser"
             android:theme="@style/Theme.MupaPlayerEnterprise.Splash">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -48,28 +48,28 @@
             android:name=".ui.PlayerActivity"
             android:exported="false"
             android:launchMode="singleTask"
-            android:screenOrientation="sensor"
+            android:screenOrientation="fullUser"
             android:theme="@style/Theme.MupaPlayerEnterprise" />
 
         <activity
             android:name=".ui.DeviceRegistrationActivity"
             android:exported="false"
             android:launchMode="singleTask"
-            android:screenOrientation="sensor"
+            android:screenOrientation="fullUser"
             android:theme="@style/Theme.MupaPlayerEnterprise" />
 
         <activity
             android:name=".ui.SettingsActivity"
             android:exported="true"
             android:launchMode="singleTop"
-            android:screenOrientation="sensor"
+            android:screenOrientation="fullUser"
             android:theme="@style/Theme.MupaPlayerEnterprise" />
 
         <activity
             android:name=".ui.FaceRecognitionTestActivity"
             android:exported="true"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize"
-            android:screenOrientation="sensor"
+            android:screenOrientation="fullUser"
             android:theme="@style/Theme.MupaPlayerEnterprise" />
 
         <receiver

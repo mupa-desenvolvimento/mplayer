@@ -9,6 +9,7 @@ data class PriceConfig(
     val cacheMinutes: Int,
     val steps: List<PriceStep>,
     val analyticsUploadUrl: String?,
+    val layout: LayoutConfig? = null,
 )
 
 data class PriceStep(
@@ -70,12 +71,44 @@ object PriceConfigParser {
         }
 
         if (steps.isEmpty()) return null
+
+        val layoutObj = root.optJSONObject("layout")
+        val layout = if (layoutObj != null) {
+            val style = layoutObj.optString("style", "default")
+            val xmlLayoutType = layoutObj.optString("xml_layout_type", "split")
+            val colorMode = layoutObj.optString("color_mode", "auto")
+            val solidColor = layoutObj.optString("solid_color", "#06b6d4")
+            val slotsArr = layoutObj.optJSONArray("price_slots")
+            val slots = ArrayList<PriceSlot>()
+            if (slotsArr != null) {
+                for (j in 0 until slotsArr.length()) {
+                    val sObj = slotsArr.optJSONObject(j) ?: continue
+                    val field = sObj.optString("field", "")
+                    val label = sObj.optString("label", "")
+                    val showFromPrice = sObj.optBoolean("show_from_price", false)
+                    if (field.isNotBlank()) {
+                        slots += PriceSlot(field = field, label = label, showFromPrice = showFromPrice)
+                    }
+                }
+            }
+            LayoutConfig(
+                style = style,
+                xmlLayoutType = xmlLayoutType,
+                colorMode = colorMode,
+                solidColor = solidColor,
+                priceSlots = slots
+            )
+        } else {
+            null
+        }
+
         return PriceConfig(
             integration = integration,
             timeoutMs = timeout,
             cacheMinutes = cacheMin,
             steps = steps,
             analyticsUploadUrl = uploadUrl,
+            layout = layout,
         )
     }
 }

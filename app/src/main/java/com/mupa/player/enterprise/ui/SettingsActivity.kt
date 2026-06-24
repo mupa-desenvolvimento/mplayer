@@ -22,6 +22,7 @@ import com.mupa.player.enterprise.price.PriceQueryEngine
 import com.mupa.player.enterprise.storage.db.AppDatabase
 import com.mupa.player.enterprise.storage.settingsDataStore
 import com.mupa.player.enterprise.audience.AudienceSyncManager
+import com.mupa.player.enterprise.price.PriceAnalyticsSyncManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -261,6 +262,30 @@ class SettingsActivity : ComponentActivity() {
                     Toast.makeText(this@SettingsActivity, "Detecções enviadas com sucesso!", Toast.LENGTH_SHORT).show()
                 } else {
                     binding.txtSyncProgress.text = "Falha ao enviar detecções para o Supabase."
+                    Toast.makeText(this@SettingsActivity, "Falha no envio.", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+
+        binding.btnUploadPriceQueries.setOnClickListener {
+            binding.txtSyncProgress.visibility = View.VISIBLE
+            binding.txtSyncProgress.text = "Verificando consultas de preços..."
+            lifecycleScope.launch {
+                val db = AppDatabase.get(applicationContext)
+                val count = db.priceQueryEventDao().getPendingCount()
+                if (count == 0) {
+                    binding.txtSyncProgress.text = "Nenhuma consulta de preço pendente para envio."
+                    Toast.makeText(this@SettingsActivity, "Nenhuma consulta pendente.", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+                
+                binding.txtSyncProgress.text = "Enviando $count consulta(s) de preços para o Supabase..."
+                val success = PriceAnalyticsSyncManager(applicationContext).uploadPending()
+                if (success) {
+                    binding.txtSyncProgress.text = "Consultas de preços enviadas com sucesso!"
+                    Toast.makeText(this@SettingsActivity, "Consultas enviadas com sucesso!", Toast.LENGTH_SHORT).show()
+                } else {
+                    binding.txtSyncProgress.text = "Falha ao enviar consultas de preços para o Supabase."
                     Toast.makeText(this@SettingsActivity, "Falha no envio.", Toast.LENGTH_SHORT).show()
                 }
             }

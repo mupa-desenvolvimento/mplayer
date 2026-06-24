@@ -1,5 +1,19 @@
 package com.mupa.player.enterprise.price
 
+data class PriceSlot(
+    val field: String,           // ex: "price", "price_promotional", "price_club", "price_wholesale", "price_weighable"
+    val label: String,           // ex: "Preço Clube", "Oferta"
+    val showFromPrice: Boolean   // se true, deve buscar e renderizar o preço 'price_from' (ou originalPrice) riscado para comparação
+)
+
+data class LayoutConfig(
+    val style: String,           // "default" (XML), "minimalist", "modern"
+    val xmlLayoutType: String,   // "split", "split_inverted", "centered", "backdrop", "multi_price", "vertical_image_bottom", "vertical_image_top"
+    val colorMode: String,       // "auto", "solid"
+    val solidColor: String,      // "#06b6d4"
+    val priceSlots: List<PriceSlot>
+)
+
 data class PriceProduct(
     val id: String?,
     val ean: String,
@@ -7,6 +21,11 @@ data class PriceProduct(
     val price: Double?,
     val originalPrice: Double?,
     val clubPrice: Double?,
+    val pricePromotional: Double? = null,
+    val priceClub: Double? = null,
+    val priceWholesale: Double? = null,
+    val priceWeighable: Double? = null,
+    val priceFrom: Double? = null,
     val stock: Int?,
     val image: String?,
     val offer: PriceOffer?,
@@ -34,3 +53,4 @@ data class PriceTheme(
     val light: String?,
     val dark: String?,
 )
+
