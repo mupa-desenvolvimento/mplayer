@@ -2,7 +2,7 @@
 CREATE TABLE IF NOT EXISTS public.price_query_events (
     id UUID PRIMARY KEY,
     device_id TEXT NOT NULL,
-    tenant_id UUID,
+    tenant_id UUID REFERENCES public.tenants(id) ON DELETE SET NULL,
     filial TEXT,
     ean TEXT NOT NULL,
     created_at_epoch_ms BIGINT NOT NULL,
