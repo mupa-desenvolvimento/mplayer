@@ -6,6 +6,14 @@ data class PriceSlot(
     val showFromPrice: Boolean   // se true, deve buscar e renderizar o preço 'price_from' (ou originalPrice) riscado para comparação
 )
 
+data class ProductPriceSlot(
+    val label: String,
+    val value: Double,
+    val field: String,
+    val isPromo: Boolean,
+    val isClub: Boolean
+)
+
 data class LayoutConfig(
     val style: String,           // "default" (XML), "minimalist", "modern"
     val xmlLayoutType: String,   // "split", "split_inverted", "centered", "backdrop", "multi_price", "vertical_image_bottom", "vertical_image_top"
@@ -32,6 +40,7 @@ data class PriceProduct(
     val packs: List<PricePack>,
     val theme: PriceTheme?,
     val offline: Boolean,
+    val priceSlots: List<ProductPriceSlot>? = null,
 )
 
 data class PriceOffer(

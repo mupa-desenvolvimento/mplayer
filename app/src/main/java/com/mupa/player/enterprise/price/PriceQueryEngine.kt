@@ -785,6 +785,23 @@ class PriceQueryEngine(
                     )
                 }
 
+            val slotsArr = o.optJSONArray("price_slots")
+            val priceSlots = if (slotsArr != null) {
+                val list = ArrayList<ProductPriceSlot>(slotsArr.length())
+                for (i in 0 until slotsArr.length()) {
+                    val s = slotsArr.optJSONObject(i) ?: continue
+                    val label = s.optString("label", "")
+                    val value = s.optDouble("value", Double.NaN).takeIf { !it.isNaN() } ?: continue
+                    val field = s.optString("field", "")
+                    val isPromo = s.optBoolean("isPromo", false)
+                    val isClub = s.optBoolean("isClub", false)
+                    list += ProductPriceSlot(label = label, value = value, field = field, isPromo = isPromo, isClub = isClub)
+                }
+                list
+            } else {
+                null
+            }
+
             PriceProduct(
                 id = o.optString("id", "").ifBlank { null },
                 ean = ean,
@@ -803,6 +820,7 @@ class PriceQueryEngine(
                 packs = packs,
                 theme = theme,
                 offline = o.optBoolean("offline", false),
+                priceSlots = priceSlots,
             )
         }.getOrNull()
     }
@@ -861,6 +879,11 @@ class PriceQueryEngine(
             val value = extractValue(resp, source)
             if (value != null) state.put(targetKey, value)
         }
+        val autoSlots = resp.optJSONObject("product")?.optJSONArray("price_slots")
+            ?: resp.optJSONArray("price_slots")
+        if (autoSlots != null) {
+            state.put("price_slots", autoSlots)
+        }
     }
 
     private fun extractValue(resp: JSONObject, source: String): Any? {
@@ -910,10 +933,49 @@ class PriceQueryEngine(
             ?: state.optDouble("priceFrom", Double.NaN).takeIf { !it.isNaN() }
             ?: originalPrice
 
+        val slotsArr = state.optJSONArray("price_slots")
+        val priceSlots = if (slotsArr != null) {
+            val list = ArrayList<ProductPriceSlot>(slotsArr.length())
+            for (i in 0 until slotsArr.length()) {
+                val s = slotsArr.optJSONObject(i) ?: continue
+                val label = s.optString("label", "")
+                val value = s.optDouble("value", Double.NaN).takeIf { !it.isNaN() } ?: continue
+                val field = s.optString("field", "")
+                val isPromo = s.optBoolean("isPromo", false)
+                val isClub = s.optBoolean("isClub", false)
+                list += ProductPriceSlot(label = label, value = value, field = field, isPromo = isPromo, isClub = isClub)
+            }
+            list
+        } else {
+            null
+        }
+
+        var resolvedPrice = price
+        var resolvedOriginalPrice = originalPrice
+        var resolvedClubPrice = clubPrice
+
+        if (!priceSlots.isNullOrEmpty()) {
+            if (resolvedPrice == null || resolvedPrice.isNaN()) {
+                val promoSlot = priceSlots.firstOrNull { it.isPromo && !it.isClub }
+                val normalSlot = priceSlots.firstOrNull { !it.isPromo && !it.isClub }
+                resolvedPrice = promoSlot?.value ?: normalSlot?.value ?: priceSlots.first().value
+            }
+            if (resolvedOriginalPrice == null || resolvedOriginalPrice.isNaN()) {
+                val normalSlot = priceSlots.firstOrNull { !it.isPromo && !it.isClub }
+                if (normalSlot != null && normalSlot.value > (resolvedPrice ?: 0.0)) {
+                    resolvedOriginalPrice = normalSlot.value
+                }
+            }
+            if (resolvedClubPrice == null || resolvedClubPrice.isNaN()) {
+                val clubSlot = priceSlots.firstOrNull { it.isClub }
+                resolvedClubPrice = clubSlot?.value
+            }
+        }
+
         val stock = state.optInt("stock", Int.MIN_VALUE).takeIf { it != Int.MIN_VALUE }
         val image = state.optString("image", "").ifBlank { null }
 
-        if (desc == null && price == null && image == null) return null
+        if (desc == null && resolvedPrice == null && image == null) return null
 
         val offerObj = state.optJSONObject("offer")
         val offerEnabled =
@@ -949,20 +1011,21 @@ class PriceQueryEngine(
             id = state.optString("id", "").ifBlank { null },
             ean = ean,
             description = desc,
-            price = price,
-            originalPrice = originalPrice,
-            clubPrice = clubPrice,
-            pricePromotional = pricePromotional,
-            priceClub = priceClub,
+            price = resolvedPrice,
+            originalPrice = resolvedOriginalPrice,
+            clubPrice = resolvedClubPrice,
+            pricePromotional = pricePromotional ?: (if (resolvedPrice != resolvedOriginalPrice) resolvedPrice else null),
+            priceClub = priceClub ?: resolvedClubPrice,
             priceWholesale = priceWholesale,
             priceWeighable = priceWeighable,
-            priceFrom = priceFrom,
+            priceFrom = priceFrom ?: resolvedOriginalPrice,
             stock = stock,
             image = image,
             offer = offer,
             packs = emptyList(),
             theme = null,
             offline = false,
+            priceSlots = priceSlots,
         )
     }
 
@@ -995,6 +1058,18 @@ class PriceQueryEngine(
                     .put("type", it.type)
             }
 
+        val priceSlots = JSONArray()
+        product.priceSlots?.forEach { s ->
+            priceSlots.put(
+                JSONObject()
+                    .put("label", s.label)
+                    .put("value", s.value)
+                    .put("field", s.field)
+                    .put("isPromo", s.isPromo)
+                    .put("isClub", s.isClub)
+            )
+        }
+
         return JSONObject()
             .put("id", product.id)
             .put("ean", product.ean)
@@ -1013,6 +1088,7 @@ class PriceQueryEngine(
             .put("packs", packs)
             .put("theme", theme)
             .put("offline", product.offline)
+            .put("price_slots", priceSlots)
     }
 
     private fun parseBoolean(v: Any?): Boolean {

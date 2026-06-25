@@ -2488,8 +2488,43 @@ class PlayerActivity : ComponentActivity() {
         container.removeAllViews()
         val inflater = LayoutInflater.from(container.context)
 
+        val productSlots = product.priceSlots
+        if (!productSlots.isNullOrEmpty()) {
+            for (slot in productSlots) {
+                if (slot.value <= 0.0) continue
+
+                val itemView = inflater.inflate(R.layout.item_price_slot, container, false)
+
+                val labelTextView = itemView.findViewById<TextView>(R.id.slotLabel)
+                val integerTextView = itemView.findViewById<TextView>(R.id.slotIntegerPrice)
+                val decimalTextView = itemView.findViewById<TextView>(R.id.slotDecimalPrice)
+                val fromPriceTextView = itemView.findViewById<TextView>(R.id.slotFromPrice)
+
+                labelTextView.text = slot.label
+
+                val slotColor = when {
+                    slot.isClub -> Color.parseColor("#10b981")
+                    slot.isPromo -> Color.parseColor("#ef4444")
+                    else -> accentColor
+                }
+                integerTextView.setTextColor(slotColor)
+                decimalTextView.setTextColor(slotColor)
+
+                val formatted = String.format(Locale.US, "%.2f", slot.value)
+                val parts = formatted.split(".")
+                integerTextView.text = parts[0]
+                decimalTextView.text = ",${parts[1]}"
+
+                fromPriceTextView.visibility = View.GONE
+
+                container.addView(itemView)
+            }
+            return
+        }
+
+        // Fallback de Segurança tradicional
         val slots = layoutConfig?.priceSlots?.takeIf { it.isNotEmpty() }
-            ?: listOf(PriceSlot(field = "price", label = "Preço", showFromPrice = true))
+            ?: listOf(PriceSlot(field = "price", label = "PREÇO À VISTA", showFromPrice = true))
 
         for (slot in slots) {
             val priceValue: Double? = when (slot.field) {
