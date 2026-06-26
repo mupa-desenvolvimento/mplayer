@@ -793,8 +793,8 @@ class PriceQueryEngine(
                     val label = s.optString("label", "")
                     val value = s.optDouble("value", Double.NaN).takeIf { !it.isNaN() } ?: continue
                     val field = s.optString("field", "")
-                    val isPromo = s.optBoolean("isPromo", false)
-                    val isClub = s.optBoolean("isClub", false)
+                    val isPromo = s.optBoolean("isPromo", false) || s.optBoolean("is_promo", false) || parseBoolean(s.opt("isPromo")) || parseBoolean(s.opt("is_promo"))
+                    val isClub = s.optBoolean("isClub", false) || s.optBoolean("is_club", false) || parseBoolean(s.opt("isClub")) || parseBoolean(s.opt("is_club"))
                     list += ProductPriceSlot(label = label, value = value, field = field, isPromo = isPromo, isClub = isClub)
                 }
                 list
@@ -874,13 +874,33 @@ class PriceQueryEngine(
         return o
     }
 
+    private fun findJsonArrayRecursively(json: Any?, key: String): JSONArray? {
+        if (json is JSONArray) {
+            for (i in 0 until json.length()) {
+                val found = findJsonArrayRecursively(json.opt(i), key)
+                if (found != null) return found
+            }
+        } else if (json is JSONObject) {
+            if (json.has(key)) {
+                val arr = json.optJSONArray(key)
+                if (arr != null) return arr
+            }
+            val keys = json.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                val found = findJsonArrayRecursively(json.opt(k), key)
+                if (found != null) return found
+            }
+        }
+        return null
+    }
+
     private fun applyMapping(resp: JSONObject, mapping: Map<String, String>, state: JSONObject) {
         mapping.forEach { (targetKey, source) ->
             val value = extractValue(resp, source)
             if (value != null) state.put(targetKey, value)
         }
-        val autoSlots = resp.optJSONObject("product")?.optJSONArray("price_slots")
-            ?: resp.optJSONArray("price_slots")
+        val autoSlots = findJsonArrayRecursively(resp, "price_slots")
         if (autoSlots != null) {
             state.put("price_slots", autoSlots)
         }
@@ -941,8 +961,8 @@ class PriceQueryEngine(
                 val label = s.optString("label", "")
                 val value = s.optDouble("value", Double.NaN).takeIf { !it.isNaN() } ?: continue
                 val field = s.optString("field", "")
-                val isPromo = s.optBoolean("isPromo", false)
-                val isClub = s.optBoolean("isClub", false)
+                val isPromo = s.optBoolean("isPromo", false) || s.optBoolean("is_promo", false) || parseBoolean(s.opt("isPromo")) || parseBoolean(s.opt("is_promo"))
+                val isClub = s.optBoolean("isClub", false) || s.optBoolean("is_club", false) || parseBoolean(s.opt("isClub")) || parseBoolean(s.opt("is_club"))
                 list += ProductPriceSlot(label = label, value = value, field = field, isPromo = isPromo, isClub = isClub)
             }
             list
@@ -955,21 +975,18 @@ class PriceQueryEngine(
         var resolvedClubPrice = clubPrice
 
         if (!priceSlots.isNullOrEmpty()) {
-            if (resolvedPrice == null || resolvedPrice.isNaN()) {
-                val promoSlot = priceSlots.firstOrNull { it.isPromo && !it.isClub }
-                val normalSlot = priceSlots.firstOrNull { !it.isPromo && !it.isClub }
-                resolvedPrice = promoSlot?.value ?: normalSlot?.value ?: priceSlots.first().value
+            val promoSlot = priceSlots.firstOrNull { it.isPromo && !it.isClub }
+            val normalSlot = priceSlots.firstOrNull { !it.isPromo && !it.isClub }
+            val clubSlot = priceSlots.firstOrNull { it.isClub }
+
+            resolvedPrice = promoSlot?.value ?: normalSlot?.value ?: priceSlots.first().value
+
+            val normalVal = normalSlot?.value
+            if (normalVal != null && normalVal > resolvedPrice) {
+                resolvedOriginalPrice = normalVal
             }
-            if (resolvedOriginalPrice == null || resolvedOriginalPrice.isNaN()) {
-                val normalSlot = priceSlots.firstOrNull { !it.isPromo && !it.isClub }
-                if (normalSlot != null && normalSlot.value > (resolvedPrice ?: 0.0)) {
-                    resolvedOriginalPrice = normalSlot.value
-                }
-            }
-            if (resolvedClubPrice == null || resolvedClubPrice.isNaN()) {
-                val clubSlot = priceSlots.firstOrNull { it.isClub }
-                resolvedClubPrice = clubSlot?.value
-            }
+
+            resolvedClubPrice = clubSlot?.value ?: resolvedClubPrice
         }
 
         val stock = state.optInt("stock", Int.MIN_VALUE).takeIf { it != Int.MIN_VALUE }

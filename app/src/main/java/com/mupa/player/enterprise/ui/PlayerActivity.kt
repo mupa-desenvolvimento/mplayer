@@ -2499,6 +2499,7 @@ class PlayerActivity : ComponentActivity() {
                 val integerTextView = itemView.findViewById<TextView>(R.id.slotIntegerPrice)
                 val decimalTextView = itemView.findViewById<TextView>(R.id.slotDecimalPrice)
                 val fromPriceTextView = itemView.findViewById<TextView>(R.id.slotFromPrice)
+                val currencyTextView = itemView.findViewById<TextView>(R.id.slotCurrency)
 
                 labelTextView.text = slot.label
 
@@ -2509,6 +2510,7 @@ class PlayerActivity : ComponentActivity() {
                 }
                 integerTextView.setTextColor(slotColor)
                 decimalTextView.setTextColor(slotColor)
+                currencyTextView?.setTextColor(slotColor)
 
                 val formatted = String.format(Locale.US, "%.2f", slot.value)
                 val parts = formatted.split(".")
@@ -2544,6 +2546,7 @@ class PlayerActivity : ComponentActivity() {
             val integerTextView = itemView.findViewById<TextView>(R.id.slotIntegerPrice)
             val decimalTextView = itemView.findViewById<TextView>(R.id.slotDecimalPrice)
             val fromPriceTextView = itemView.findViewById<TextView>(R.id.slotFromPrice)
+            val currencyTextView = itemView.findViewById<TextView>(R.id.slotCurrency)
 
             labelTextView.text = slot.label
 
@@ -2554,6 +2557,7 @@ class PlayerActivity : ComponentActivity() {
             }
             integerTextView.setTextColor(slotColor)
             decimalTextView.setTextColor(slotColor)
+            currencyTextView?.setTextColor(slotColor)
 
             val formatted = String.format(Locale.US, "%.2f", priceValue)
             val parts = formatted.split(".")
