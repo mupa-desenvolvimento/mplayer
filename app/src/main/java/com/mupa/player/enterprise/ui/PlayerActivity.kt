@@ -3,6 +3,7 @@ package com.mupa.player.enterprise.ui
 import android.content.Context
 import android.content.BroadcastReceiver
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.res.Configuration
 import android.animation.ValueAnimator
 import android.net.ConnectivityManager
@@ -122,6 +123,13 @@ class PlayerActivity : ComponentActivity() {
     private lateinit var binding: ActivityPlayerBinding
     private lateinit var deviceId: String
     private lateinit var playerEngine: PlayerEngine
+    private val barcodeSimulationReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val ean = intent.getStringExtra("ean") ?: return
+            onBarcodeCaptured(ean)
+        }
+    }
+
     private lateinit var manifestManager: ManifestManager
     private var audienceManager: AudienceAnalyticsManager? = null
     private var audienceStarted = false
@@ -186,6 +194,11 @@ class PlayerActivity : ComponentActivity() {
         demoRepo = DemoProductRepository(applicationContext)
         demoImageCache = DemoImageCache(applicationContext)
         setupDevModeToggle()
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(barcodeSimulationReceiver, IntentFilter("com.mupa.player.enterprise.SIMULATE_BARCODE"), RECEIVER_EXPORTED)
+        } else {
+            registerReceiver(barcodeSimulationReceiver, IntentFilter("com.mupa.player.enterprise.SIMULATE_BARCODE"))
+        }
 
         manifestManager = ManifestManager(applicationContext)
         playerEngine = PlayerEngine(
@@ -329,6 +342,7 @@ class PlayerActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        runCatching { unregisterReceiver(barcodeSimulationReceiver) }
         priceAnimator?.cancel()
         tts?.stop()
         tts?.shutdown()
@@ -1064,6 +1078,11 @@ class PlayerActivity : ComponentActivity() {
     private suspend fun keepBarcodeFocus() {
         val imm = ContextCompat.getSystemService(this, InputMethodManager::class.java)
         while (true) {
+            val devInput = binding.editDevSimulateEan
+            if (devInput != null && devInput.hasFocus()) {
+                delay(1000)
+                continue
+            }
             ensureBarcodeFocus()
             imm?.hideSoftInputFromWindow(binding.hiddenBarcodeInput.windowToken, 0)
             delay(500)
@@ -1071,6 +1090,9 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private fun ensureBarcodeFocus() {
+        val devInput = binding.editDevSimulateEan
+        if (devInput != null && devInput.hasFocus()) return
+
         val input = binding.hiddenBarcodeInput
         if (!input.isFocusableInTouchMode) input.isFocusableInTouchMode = true
         if (!input.isFocusable) input.isFocusable = true
@@ -1204,6 +1226,57 @@ class PlayerActivity : ComponentActivity() {
             if (cfg == null) {
                 setPriceOverlayVisible(false)
                 speakNotFoundIfPossible(ean)
+                return@launch
+            }
+
+            var mockProduct: PriceProduct? = null
+            val isMock = when (cmd) {
+                "test_normal" -> {
+                    mockProduct = PriceProduct(
+                        id = "1", ean = "TEST_NORMAL", description = "PRODUTO TESTE NORMAL",
+                        price = 9.99, originalPrice = null, clubPrice = null,
+                        xmlLayoutType = "price_check_normal", packs = emptyList(), theme = null, offline = false
+                    )
+                    true
+                }
+                "test_depor" -> {
+                    mockProduct = PriceProduct(
+                        id = "2", ean = "TEST_DEPOR", description = "PRODUTO TESTE DE / POR",
+                        price = 7.99, originalPrice = 10.00, clubPrice = null, pricePromotional = 7.99, priceFrom = 10.00,
+                        xmlLayoutType = "price_check_de_por", packs = emptyList(), theme = null, offline = false
+                    )
+                    true
+                }
+                "test_atacado" -> {
+                    mockProduct = PriceProduct(
+                        id = "3", ean = "TEST_ATACADO", description = "PRODUTO TESTE ATACADO",
+                        price = 9.99, originalPrice = null, clubPrice = null, priceWholesale = 8.49,
+                        xmlLayoutType = "price_check_atacado", packs = emptyList(), theme = null, offline = false
+                    )
+                    true
+                }
+                "test_clube" -> {
+                    mockProduct = PriceProduct(
+                        id = "4", ean = "TEST_CLUBE", description = "PRODUTO TESTE CLUBE KOCH",
+                        price = 8.99, originalPrice = 10.00, clubPrice = 7.99, pricePromotional = 8.99, priceClub = 7.99, priceFrom = 10.00,
+                        xmlLayoutType = "price_check_clube_koch", packs = emptyList(), theme = null, offline = false
+                    )
+                    true
+                }
+                "test_cartao" -> {
+                    mockProduct = PriceProduct(
+                        id = "5", ean = "TEST_CARTAO", description = "PRODUTO TESTE CARTÃO KOCH",
+                        price = 9.99, originalPrice = null, clubPrice = null, cardPrice = 8.99,
+                        xmlLayoutType = "price_check_cartao_koch", packs = emptyList(), theme = null, offline = false
+                    )
+                    true
+                }
+                else -> false
+            }
+
+            if (isMock && mockProduct != null) {
+                showPriceOverlayProduct(mockProduct)
+                scheduleHidePriceOverlay(8000L)
                 return@launch
             }
 
@@ -1514,7 +1587,7 @@ class PlayerActivity : ComponentActivity() {
         binding.priceResultRoot.visibility = View.VISIBLE
 
         // Inflar o layout dinamicamente com base na configuração
-        val layoutType = priceConfig?.layout?.xmlLayoutType ?: "split"
+        val layoutType = product.xmlLayoutType ?: priceConfig?.layout?.xmlLayoutType ?: "split"
         inflateLayoutForProduct(layoutType)
 
         // Bind das views recém-infladas
@@ -1537,8 +1610,9 @@ class PlayerActivity : ComponentActivity() {
             offlineBadge?.visibility = View.GONE
         }
 
+        val specificLayouts = listOf("price_check_normal", "price_check_de_por", "price_check_atacado", "price_check_clube_koch", "price_check_cartao_koch")
         val hasOriginal = product.originalPrice != null && product.price != null && product.originalPrice > product.price
-        if (hasOriginal && subtitleText != null) {
+        if (hasOriginal && subtitleText != null && layoutType !in specificLayouts) {
             val formattedOriginal = formatCurrency(product.originalPrice!!)
             val originalText = "De: $formattedOriginal"
             val spannable = SpannableStringBuilder(originalText)
@@ -1564,7 +1638,9 @@ class PlayerActivity : ComponentActivity() {
         }
         val parsedColor = runCatching { Color.parseColor(accentHex) }.getOrDefault(Color.parseColor("#06b6d4"))
 
-        if (priceContainer != null) {
+        if (layoutType in specificLayouts) {
+            bindSpecificLayoutPrices(product, layoutType)
+        } else if (priceContainer != null) {
             populatePriceSlots(priceContainer, priceConfig?.layout, product, parsedColor)
         }
         playBeep()
@@ -2263,30 +2339,46 @@ class PlayerActivity : ComponentActivity() {
         clubPrice: Double? = null,
     ) {
         if (!ttsReady) return
-        if (price == null || price <= 0.0) return
+
+        var resolvedPrice = price
+        var resolvedOldPrice = oldPrice
+        var resolvedClubPrice = clubPrice
+
+        // Se preço promocional for maior ou igual ao preço normal de tabela, ignorar preço promocional
+        if (resolvedPrice != null && resolvedOldPrice != null && resolvedPrice >= resolvedOldPrice) {
+            resolvedPrice = resolvedOldPrice
+            resolvedOldPrice = null
+        }
+
+        // Se preço clube for maior ou igual ao preço de venda, ignorar o preço clube no TTS
+        if (resolvedClubPrice != null && resolvedPrice != null && resolvedClubPrice >= resolvedPrice) {
+            resolvedClubPrice = null
+        }
+
+        if (resolvedPrice == null || resolvedPrice <= 0.0) return
 
         val now = SystemClock.elapsedRealtime()
         if (ean == lastSpokenEan && now - lastSpokenAtMs < 3500L) return
         lastSpokenEan = ean
         lastSpokenAtMs = now
 
-        val spokenPrice = buildSpokenPrice(price)
-        val isOffer = (offer?.enabled == true) || (oldPrice != null && oldPrice > price)
+        val spokenPrice = buildSpokenPrice(resolvedPrice)
+        val isOffer = (offer?.enabled == true) || (resolvedOldPrice != null && resolvedOldPrice > resolvedPrice)
         val base =
             if (isOffer) {
-                val old = oldPrice
-                if (old != null && old > price) {
-                    "Produto em oferta. De ${buildSpokenPrice(old)} por $spokenPrice."
+                val old = resolvedOldPrice
+                if (old != null && old > resolvedPrice) {
+                     "Produto em oferta. De ${buildSpokenPrice(old)} por $spokenPrice."
                 } else {
-                    "Produto em oferta. $spokenPrice."
+                     "Produto em oferta. $spokenPrice."
                 }
             } else {
                 spokenPrice
             }
 
         val extra = StringBuilder()
-        if (clubPrice != null && clubPrice > 0.0) {
-            extra.append(" Preço exclusivo para cliente clube, ${buildSpokenPrice(clubPrice)}.")
+        if (resolvedClubPrice != null && resolvedClubPrice > 0.0) {
+            extra.append(" Preço exclusivo para cliente clube, ${buildSpokenPrice(resolvedClubPrice)}.")
         }
 
         if (offer != null && offer.enabled) {
@@ -2473,6 +2565,11 @@ class PlayerActivity : ComponentActivity() {
             "centered" -> R.layout.price_check_centered
             "multi_price" -> R.layout.price_check_multi_price
             "split" -> R.layout.price_check_split
+            "price_check_normal" -> R.layout.price_check_normal
+            "price_check_de_por" -> R.layout.price_check_de_por
+            "price_check_atacado" -> R.layout.price_check_atacado
+            "price_check_clube_koch" -> R.layout.price_check_clube_koch
+            "price_check_cartao_koch" -> R.layout.price_check_cartao_koch
             else -> R.layout.price_check_split
         }
         val inflater = LayoutInflater.from(container.context)
@@ -2677,6 +2774,152 @@ class PlayerActivity : ComponentActivity() {
         packs.forEach { p ->
             val card = createPackCard(p.label, p.price, p.unitPrice)
             container.addView(card)
+        }
+    }
+
+    private fun bindSpecificLayoutPrices(product: PriceProduct, layoutType: String) {
+        val root = binding.priceResultRoot
+        val decimalFormat = java.text.DecimalFormat("0.00", java.text.DecimalFormatSymbols(Locale.US))
+
+        // Helper function to set price to views (integer + decimal)
+        fun setPriceToViews(integerViewId: Int, decimalViewId: Int, value: Double?) {
+            val integerTv = root.findViewById<TextView>(integerViewId)
+            val decimalTv = root.findViewById<TextView>(decimalViewId)
+            if (value == null || value <= 0.0) {
+                integerTv?.text = "0"
+                decimalTv?.text = ",00"
+                return
+            }
+            val formatted = decimalFormat.format(value)
+            val parts = formatted.split(".")
+            integerTv?.text = parts[0]
+            decimalTv?.text = ",${parts[1]}"
+        }
+
+        // Helper to check if a value is valid (not null, > 0.0)
+        fun isValid(value: Double?): Boolean = value != null && value > 0.0
+
+        val normalVal = product.price
+        val promoVal = product.pricePromotional
+        val clubVal = product.priceClub ?: product.clubPrice
+        val cardVal = product.cardPrice
+        val wholesaleVal = product.priceWholesale
+        val fromVal = product.priceFrom ?: product.originalPrice
+
+        when (layoutType) {
+            "price_check_normal" -> {
+                val sec = root.findViewById<View>(R.id.priceNormalSection)
+                if (isValid(normalVal)) {
+                    sec?.visibility = View.VISIBLE
+                    setPriceToViews(R.id.normalPriceInteger, R.id.normalPriceDecimal, normalVal)
+                } else {
+                    sec?.visibility = View.GONE
+                }
+            }
+            "price_check_de_por" -> {
+                val deSec = root.findViewById<View>(R.id.deSection)
+                val porSec = root.findViewById<View>(R.id.porSection)
+
+                // Edge case: if promo price is greater than normal price, hide promo price
+                val showPromo = isValid(promoVal) && (normalVal == null || promoVal!! < normalVal)
+
+                if (isValid(normalVal)) {
+                    deSec?.visibility = View.VISIBLE
+                    val fromTv = root.findViewById<TextView>(R.id.priceFromInteger)
+                    val fromDecTv = root.findViewById<TextView>(R.id.priceFromDecimal)
+                    setPriceToViews(R.id.priceFromInteger, R.id.priceFromDecimal, normalVal)
+                    // Apply strike-through to both integer and decimal to look nice
+                    fromTv?.paintFlags = fromTv?.paintFlags?.or(Paint.STRIKE_THRU_TEXT_FLAG) ?: Paint.STRIKE_THRU_TEXT_FLAG
+                    fromDecTv?.paintFlags = fromDecTv?.paintFlags?.or(Paint.STRIKE_THRU_TEXT_FLAG) ?: Paint.STRIKE_THRU_TEXT_FLAG
+                } else {
+                    deSec?.visibility = View.GONE
+                }
+
+                if (showPromo) {
+                    porSec?.visibility = View.VISIBLE
+                    setPriceToViews(R.id.priceInteger, R.id.priceDecimal, promoVal)
+                } else {
+                    porSec?.visibility = View.GONE
+                }
+            }
+            "price_check_atacado" -> {
+                val varejoSec = root.findViewById<View>(R.id.varejoSection)
+                val atacadoSec = root.findViewById<View>(R.id.atacadoSection)
+
+                if (isValid(normalVal)) {
+                    varejoSec?.visibility = View.VISIBLE
+                    setPriceToViews(R.id.priceInteger, R.id.priceDecimal, normalVal)
+                } else {
+                    varejoSec?.visibility = View.GONE
+                }
+
+                if (isValid(wholesaleVal)) {
+                    atacadoSec?.visibility = View.VISIBLE
+                    setPriceToViews(R.id.priceWholesaleInteger, R.id.priceWholesaleDecimal, wholesaleVal)
+                } else {
+                    atacadoSec?.visibility = View.GONE
+                }
+            }
+            "price_check_clube_koch" -> {
+                val deSec = root.findViewById<View>(R.id.deSection)
+                val porSec = root.findViewById<View>(R.id.porSection)
+                val clubSec = root.findViewById<View>(R.id.clubeKochSection)
+
+                // Base normal price and promo price
+                val displayNormal = fromVal ?: normalVal
+                val displayPromo = if (fromVal != null) normalVal else promoVal
+
+                // Edge case: if promo price is greater than normal price, hide promo price
+                val showPromo = isValid(displayPromo) && (displayNormal == null || displayPromo!! < displayNormal)
+                // Edge case: if club price is greater than normal price, hide club price
+                val showClub = isValid(clubVal) && (displayNormal == null || clubVal!! < displayNormal)
+
+                if (isValid(displayNormal)) {
+                    deSec?.visibility = View.VISIBLE
+                    val fromTv = root.findViewById<TextView>(R.id.priceFromInteger)
+                    val fromDecTv = root.findViewById<TextView>(R.id.priceFromDecimal)
+                    setPriceToViews(R.id.priceFromInteger, R.id.priceFromDecimal, displayNormal)
+                    fromTv?.paintFlags = fromTv?.paintFlags?.or(Paint.STRIKE_THRU_TEXT_FLAG) ?: Paint.STRIKE_THRU_TEXT_FLAG
+                    fromDecTv?.paintFlags = fromDecTv?.paintFlags?.or(Paint.STRIKE_THRU_TEXT_FLAG) ?: Paint.STRIKE_THRU_TEXT_FLAG
+                } else {
+                    deSec?.visibility = View.GONE
+                }
+
+                if (showPromo) {
+                    porSec?.visibility = View.VISIBLE
+                    setPriceToViews(R.id.priceInteger, R.id.priceDecimal, displayPromo)
+                } else {
+                    porSec?.visibility = View.GONE
+                }
+
+                if (showClub) {
+                    clubSec?.visibility = View.VISIBLE
+                    setPriceToViews(R.id.priceClubInteger, R.id.priceClubDecimal, clubVal)
+                } else {
+                    clubSec?.visibility = View.GONE
+                }
+            }
+            "price_check_cartao_koch" -> {
+                val normalSec = root.findViewById<View>(R.id.normalSection)
+                val cartaoSec = root.findViewById<View>(R.id.cartaoKochSection)
+
+                // Edge case: if card price is greater than normal price, hide card price
+                val showCard = isValid(cardVal) && (normalVal == null || cardVal!! < normalVal)
+
+                if (isValid(normalVal)) {
+                    normalSec?.visibility = View.VISIBLE
+                    setPriceToViews(R.id.priceInteger, R.id.priceDecimal, normalVal)
+                } else {
+                    normalSec?.visibility = View.GONE
+                }
+
+                if (showCard) {
+                    cartaoSec?.visibility = View.VISIBLE
+                    setPriceToViews(R.id.priceCardInteger, R.id.priceCardDecimal, cardVal)
+                } else {
+                    cartaoSec?.visibility = View.GONE
+                }
+            }
         }
     }
 

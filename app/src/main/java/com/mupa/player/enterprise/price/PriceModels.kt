@@ -34,13 +34,15 @@ data class PriceProduct(
     val priceWholesale: Double? = null,
     val priceWeighable: Double? = null,
     val priceFrom: Double? = null,
-    val stock: Int?,
-    val image: String?,
-    val offer: PriceOffer?,
-    val packs: List<PricePack>,
-    val theme: PriceTheme?,
-    val offline: Boolean,
+    val cardPrice: Double? = null,
+    val stock: Int? = null,
+    val image: String? = null,
+    val offer: PriceOffer? = null,
+    val packs: List<PricePack> = emptyList(),
+    val theme: PriceTheme? = null,
+    val offline: Boolean = false,
     val priceSlots: List<ProductPriceSlot>? = null,
+    val xmlLayoutType: String? = null,
 )
 
 data class PriceOffer(

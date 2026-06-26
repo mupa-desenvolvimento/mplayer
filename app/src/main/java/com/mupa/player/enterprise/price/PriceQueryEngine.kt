@@ -814,6 +814,7 @@ class PriceQueryEngine(
                 priceWholesale = o.optDouble("priceWholesale", Double.NaN).takeIf { !it.isNaN() },
                 priceWeighable = o.optDouble("priceWeighable", Double.NaN).takeIf { !it.isNaN() },
                 priceFrom = o.optDouble("priceFrom", Double.NaN).takeIf { !it.isNaN() },
+                cardPrice = o.optDouble("cardPrice", Double.NaN).takeIf { !it.isNaN() },
                 stock = o.optInt("stock", Int.MIN_VALUE).takeIf { it != Int.MIN_VALUE },
                 image = o.optString("image", "").ifBlank { null },
                 offer = offer,
@@ -821,6 +822,7 @@ class PriceQueryEngine(
                 theme = theme,
                 offline = o.optBoolean("offline", false),
                 priceSlots = priceSlots,
+                xmlLayoutType = o.optString("xmlLayoutType", "").ifBlank { o.optString("xml_layout_type", "").ifBlank { null } },
             )
         }.getOrNull()
     }
@@ -1024,6 +1026,11 @@ class PriceQueryEngine(
                 null
             }
 
+        val cardPrice = state.optDouble("card_price", Double.NaN).takeIf { !it.isNaN() }
+            ?: state.optDouble("cardPrice", Double.NaN).takeIf { !it.isNaN() }
+            ?: state.optDouble("PRECO_CRM", Double.NaN).takeIf { !it.isNaN() }
+        val xmlLayoutType = state.optString("xml_layout_type", "").ifBlank { state.optString("xmlLayoutType", "").ifBlank { null } }
+
         return PriceProduct(
             id = state.optString("id", "").ifBlank { null },
             ean = ean,
@@ -1036,6 +1043,7 @@ class PriceQueryEngine(
             priceWholesale = priceWholesale,
             priceWeighable = priceWeighable,
             priceFrom = priceFrom ?: resolvedOriginalPrice,
+            cardPrice = cardPrice,
             stock = stock,
             image = image,
             offer = offer,
@@ -1043,6 +1051,7 @@ class PriceQueryEngine(
             theme = null,
             offline = false,
             priceSlots = priceSlots,
+            xmlLayoutType = xmlLayoutType,
         )
     }
 
@@ -1099,6 +1108,7 @@ class PriceQueryEngine(
             .put("priceWholesale", product.priceWholesale)
             .put("priceWeighable", product.priceWeighable)
             .put("priceFrom", product.priceFrom)
+            .put("cardPrice", product.cardPrice)
             .put("stock", product.stock)
             .put("image", product.image)
             .put("offer", offer)
@@ -1106,6 +1116,7 @@ class PriceQueryEngine(
             .put("theme", theme)
             .put("offline", product.offline)
             .put("price_slots", priceSlots)
+            .put("xmlLayoutType", product.xmlLayoutType)
     }
 
     private fun parseBoolean(v: Any?): Boolean {
