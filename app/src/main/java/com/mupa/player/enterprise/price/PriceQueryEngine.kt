@@ -433,11 +433,31 @@ class PriceQueryEngine(
             runCatching { parseProductFromCache(normalizedEan, cache) }.getOrNull()
         }
 
+        suspend fun saveToCacheAndReturn(path: String, t: PriceTheme?): Pair<String?, PriceTheme?> {
+            val cache = db.priceCacheDao().getByEan(normalizedEan)
+            if (cache != null) {
+                runCatching {
+                    val cachedProd = parseProductFromCache(normalizedEan, cache)
+                    if (cachedProd != null) {
+                        val updatedProd = cachedProd.copy(image = path, theme = t ?: cachedProd.theme)
+                        db.priceCacheDao().upsert(
+                            PriceCacheEntity(
+                                ean = normalizedEan,
+                                productJson = productToJson(updatedProd).toString(),
+                                updatedAtEpochMs = cache.updatedAtEpochMs,
+                            )
+                        )
+                    }
+                }
+            }
+            return path to t
+        }
+
         // 1. Prioritize client-provided remote image URL
         val clientImageUrl = cachedProduct?.clientImageUrl
         if (!clientImageUrl.isNullOrBlank() && clientImageUrl.startsWith("http")) {
             val clientLocal = runCatching { downloadProductImageIfNeeded(ean = normalizedEan, rawUrl = clientImageUrl) }.getOrNull()
-            if (clientLocal != null) return@withContext clientLocal to null
+            if (clientLocal != null) return@withContext saveToCacheAndReturn(clientLocal, null)
         }
 
         // 2. Alternative search for Komprão (OnWay SKU image API)
@@ -460,14 +480,14 @@ class PriceQueryEngine(
                 val kompraoLocal = runCatching {
                     downloadProductImageIfNeeded(ean = normalizedEan, rawUrl = kompraoUrl, headers = headers)
                 }.getOrNull()
-                if (kompraoLocal != null) return@withContext kompraoLocal to null
+                if (kompraoLocal != null) return@withContext saveToCacheAndReturn(kompraoLocal, null)
             }
         }
 
         // 3. Fallback to normal VTEX and Mupa image flow
         val vtexUrl = fetchVtexImageUrlFromApiProdutos(ean = normalizedEan)
         val vtexLocal = vtexUrl?.let { downloadProductImageIfNeeded(ean = normalizedEan, rawUrl = it) }
-        if (vtexLocal != null) return@withContext vtexLocal to null
+        if (vtexLocal != null) return@withContext saveToCacheAndReturn(vtexLocal, null)
 
         val step3 = config.steps.firstOrNull { it.type == "lookup_image" }
         val meta = fetchProductImageMeta(ean = normalizedEan, step = step3)
@@ -480,7 +500,7 @@ class PriceQueryEngine(
                     dark = it.dark,
                 )
             }?.takeIf { it.signature != null || it.dark != null || it.light != null }
-        return@withContext mupaLocal to theme
+        return@withContext if (mupaLocal != null) saveToCacheAndReturn(mupaLocal, theme) else null to null
     }
 
     private fun fetchProductImageMeta(ean: String, step: PriceStep?): ProductImageMeta? {
@@ -632,7 +652,10 @@ class PriceQueryEngine(
 
     private fun normalizeCachedProduct(product: PriceProduct?): PriceProduct? {
         if (product == null) return null
-        return product.copy(image = sanitizeLocalPathOrNull(product.image))
+        val sanitized = sanitizeLocalPathOrNull(product.image)
+        if (sanitized != null) return product.copy(image = sanitized)
+        val local = localProductImagePathIfExists(product.ean)
+        return product.copy(image = local)
     }
 
     private fun downloadProductImageIfNeeded(
