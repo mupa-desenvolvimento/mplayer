@@ -16,8 +16,12 @@ import com.mupa.player.enterprise.network.TlsCompat
 import com.mupa.player.enterprise.storage.db.AppDatabase
 import com.mupa.player.enterprise.storage.db.PriceCacheEntity
 import com.mupa.player.enterprise.storage.db.PriceQueryEventEntity
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.concurrent.TimeUnit
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -33,30 +37,54 @@ class PriceQueryEngine(
     private val deviceId: String,
 ) {
     private val db = AppDatabase.get(context)
-    private val http = TlsCompat.newClient()
+
+    // Timeouts agressivos: a prioridade nº1 do terminal é devolver o preço o mais rápido
+    // possível. Se a rede estiver ruim, é melhor falhar rápido (e cair pro cache/offline) do
+    // que deixar o cliente esperando 10s+ no padrão do OkHttp.
+    private val http = TlsCompat.apply(OkHttpClient.Builder())
+        .connectTimeout(4, TimeUnit.SECONDS)
+        .readTimeout(5, TimeUnit.SECONDS)
+        .writeTimeout(4, TimeUnit.SECONDS)
+        .callTimeout(7, TimeUnit.SECONDS)
+        .build()
     private val sessionState = JSONObject()
 
-    private suspend fun insertEvent(
+    // Escopo separado para gravações de analytics (insertEvent) que não devem atrasar o
+    // retorno do preço para a UI - são "fire and forget".
+    private val analyticsScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    @Volatile private var cachedFilial: String? = null
+
+    private suspend fun resolveFilial(): String {
+        cachedFilial?.let { return it }
+        val resolved = runCatching { DeviceCacheManager(context).load()?.filial }.getOrNull().orEmpty()
+        cachedFilial = resolved
+        return resolved
+    }
+
+    private fun insertEvent(
         ean: String,
         filial: String,
         responseTimeMs: Long,
         fromCache: Boolean,
         success: Boolean
-    ) = withContext(Dispatchers.IO) {
-        runCatching {
-            db.priceQueryEventDao().insert(
-                PriceQueryEventEntity(
-                    id = UUID.randomUUID().toString(),
-                    deviceId = deviceId,
-                    filial = filial,
-                    ean = ean,
-                    createdAtEpochMs = System.currentTimeMillis(),
-                    responseTimeMs = responseTimeMs,
-                    fromCache = fromCache,
-                    success = success,
-                    uploadedAtEpochMs = null,
+    ) {
+        analyticsScope.launch {
+            runCatching {
+                db.priceQueryEventDao().insert(
+                    PriceQueryEventEntity(
+                        id = UUID.randomUUID().toString(),
+                        deviceId = deviceId,
+                        filial = filial,
+                        ean = ean,
+                        createdAtEpochMs = System.currentTimeMillis(),
+                        responseTimeMs = responseTimeMs,
+                        fromCache = fromCache,
+                        success = success,
+                        uploadedAtEpochMs = null,
+                    )
                 )
-            )
+            }
         }
     }
 
@@ -77,7 +105,7 @@ class PriceQueryEngine(
         if (normalizedEan.isBlank()) return@withContext null
 
         val now = System.currentTimeMillis()
-        val filial = runCatching { DeviceCacheManager(context).load()?.filial }.getOrNull().orEmpty()
+        val filial = resolveFilial()
 
         val cache = db.priceCacheDao().getByEan(normalizedEan)
         val fromCache =
@@ -173,6 +201,10 @@ class PriceQueryEngine(
                     }
                 }
             }
+
+            // Alguns mappings (ex: Komprão) sobrescrevem "ean" com o valor bruto da resposta da API
+            // (que pode ser um array). Sempre usar o EAN normalizado da consulta original.
+            state.put("ean", normalizedEan)
 
             product =
                 buildFinalProduct(state)
@@ -930,7 +962,8 @@ class PriceQueryEngine(
             val first = arr.optJSONObject(0)
             if (first != null && first.has(s)) return first.opt(s)
         }
-        return null
+        // Não é um path de resposta (ex: "multi_price", "true") - tratar como valor literal do mapping.
+        return s
     }
 
     private fun buildFinalProduct(state: JSONObject): PriceProduct? {

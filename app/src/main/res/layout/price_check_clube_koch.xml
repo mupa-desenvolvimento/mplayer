@@ -42,7 +42,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:includeFontPadding="false"
-                    android:maxLines="2"
+                    android:maxLines="3"
                     android:text="PRODUTO"
                     android:textAllCaps="false"
                     android:textColor="#FFFFFF"
@@ -144,8 +144,7 @@
                     android:id="@+id/deSection"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:orientation="horizontal"
-                    android:gravity="bottom">
+                    android:orientation="vertical">
 
                     <com.google.android.material.textview.MaterialTextView
                         android:id="@+id/priceFromLabel"
@@ -153,36 +152,55 @@
                         android:layout_height="wrap_content"
                         android:text="De:"
                         android:textColor="#9CA3AF"
-                        android:textSize="16sp"
-                        android:layout_marginEnd="6dp" />
+                        android:textSize="13sp"
+                        android:layout_marginStart="2dp"
+                        android:layout_marginBottom="4dp" />
 
-                    <com.google.android.material.textview.MaterialTextView
-                        android:id="@+id/priceFromInteger"
+                    <FrameLayout
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="0"
-                        android:textSize="24sp"
-                        android:textColor="#9CA3AF"
-                        android:includeFontPadding="false" />
+                        android:background="@drawable/bg_price_slot_box"
+                        android:paddingStart="12dp"
+                        android:paddingEnd="12dp"
+                        android:paddingTop="5dp"
+                        android:paddingBottom="5dp">
 
-                    <com.google.android.material.textview.MaterialTextView
-                        android:id="@+id/priceFromDecimal"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text=",00"
-                        android:textSize="14sp"
-                        android:textColor="#9CA3AF"
-                        android:layout_marginBottom="6dp"
-                        android:includeFontPadding="false" />
+                        <LinearLayout
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:orientation="horizontal"
+                            android:gravity="bottom">
+
+                            <com.google.android.material.textview.MaterialTextView
+                                android:id="@+id/priceFromInteger"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="0"
+                                android:textSize="22sp"
+                                android:textStyle="bold"
+                                android:textColor="#6B7280"
+                                android:includeFontPadding="false" />
+
+                            <com.google.android.material.textview.MaterialTextView
+                                android:id="@+id/priceFromDecimal"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text=",00"
+                                android:textSize="14sp"
+                                android:textStyle="bold"
+                                android:textColor="#6B7280"
+                                android:layout_marginBottom="4dp"
+                                android:includeFontPadding="false" />
+                        </LinearLayout>
+                    </FrameLayout>
                 </LinearLayout>
 
                 <LinearLayout
                     android:id="@+id/porSection"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:orientation="horizontal"
-                    android:gravity="bottom"
-                    android:layout_marginTop="4dp">
+                    android:orientation="vertical"
+                    android:layout_marginTop="10dp">
 
                     <com.google.android.material.textview.MaterialTextView
                         android:id="@+id/priceLabel"
@@ -190,27 +208,47 @@
                         android:layout_height="wrap_content"
                         android:text="Por:"
                         android:textColor="#FFFFFF"
-                        android:textSize="18sp"
-                        android:layout_marginEnd="6dp" />
+                        android:textSize="15sp"
+                        android:layout_marginStart="2dp"
+                        android:layout_marginBottom="4dp" />
 
-                    <com.google.android.material.textview.MaterialTextView
-                        android:id="@+id/priceInteger"
+                    <FrameLayout
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="0"
-                        android:textSize="36sp"
-                        android:textColor="#FFFFFF"
-                        android:includeFontPadding="false" />
+                        android:background="@drawable/bg_price_slot_box"
+                        android:paddingStart="14dp"
+                        android:paddingEnd="14dp"
+                        android:paddingTop="7dp"
+                        android:paddingBottom="7dp">
 
-                    <com.google.android.material.textview.MaterialTextView
-                        android:id="@+id/priceDecimal"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text=",00"
-                        android:textSize="18sp"
-                        android:textColor="#FFFFFF"
-                        android:layout_marginBottom="10dp"
-                        android:includeFontPadding="false" />
+                        <LinearLayout
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:orientation="horizontal"
+                            android:gravity="bottom">
+
+                            <com.google.android.material.textview.MaterialTextView
+                                android:id="@+id/priceInteger"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="0"
+                                android:textSize="36sp"
+                                android:textStyle="bold"
+                                android:textColor="#111827"
+                                android:includeFontPadding="false" />
+
+                            <com.google.android.material.textview.MaterialTextView
+                                android:id="@+id/priceDecimal"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text=",00"
+                                android:textSize="18sp"
+                                android:textStyle="bold"
+                                android:textColor="#111827"
+                                android:layout_marginBottom="5dp"
+                                android:includeFontPadding="false" />
+                        </LinearLayout>
+                    </FrameLayout>
                 </LinearLayout>
             </LinearLayout>
 
@@ -219,8 +257,7 @@
                 android:id="@+id/clubeKochSection"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="bottom"
+                android:orientation="vertical"
                 android:layout_marginTop="16dp">
 
                 <com.google.android.material.textview.MaterialTextView
@@ -229,42 +266,59 @@
                     android:layout_height="wrap_content"
                     android:text="Clube Koch:"
                     android:textColor="#10b981"
-                    android:textSize="22sp"
+                    android:textSize="16sp"
                     android:textStyle="bold"
-                    android:layout_marginEnd="8dp"
+                    android:layout_marginStart="2dp"
                     android:layout_marginBottom="6dp" />
 
-                <com.google.android.material.textview.MaterialTextView
-                    android:id="@+id/priceClubCurrency"
+                <FrameLayout
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="R$"
-                    android:textSize="24sp"
-                    android:textStyle="bold"
-                    android:textColor="#10b981"
-                    android:layout_marginBottom="6dp"
-                    android:layout_marginEnd="4dp" />
+                    android:background="@drawable/bg_price_slot_box"
+                    android:paddingStart="18dp"
+                    android:paddingEnd="18dp"
+                    android:paddingTop="10dp"
+                    android:paddingBottom="10dp">
 
-                <com.google.android.material.textview.MaterialTextView
-                    android:id="@+id/priceClubInteger"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="0"
-                    android:textSize="64sp"
-                    android:textStyle="bold"
-                    android:textColor="#10b981"
-                    android:includeFontPadding="false" />
+                    <LinearLayout
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="bottom">
 
-                <com.google.android.material.textview.MaterialTextView
-                    android:id="@+id/priceClubDecimal"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text=",00"
-                    android:textSize="36sp"
-                    android:textStyle="bold"
-                    android:textColor="#10b981"
-                    android:layout_marginBottom="16dp"
-                    android:includeFontPadding="false" />
+                        <com.google.android.material.textview.MaterialTextView
+                            android:id="@+id/priceClubCurrency"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="R$"
+                            android:textSize="24sp"
+                            android:textStyle="bold"
+                            android:textColor="#10b981"
+                            android:layout_marginBottom="6dp"
+                            android:layout_marginEnd="4dp" />
+
+                        <com.google.android.material.textview.MaterialTextView
+                            android:id="@+id/priceClubInteger"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="0"
+                            android:textSize="64sp"
+                            android:textStyle="bold"
+                            android:textColor="#10b981"
+                            android:includeFontPadding="false" />
+
+                        <com.google.android.material.textview.MaterialTextView
+                            android:id="@+id/priceClubDecimal"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text=",00"
+                            android:textSize="36sp"
+                            android:textStyle="bold"
+                            android:textColor="#10b981"
+                            android:layout_marginBottom="16dp"
+                            android:includeFontPadding="false" />
+                    </LinearLayout>
+                </FrameLayout>
             </LinearLayout>
         </LinearLayout>
 

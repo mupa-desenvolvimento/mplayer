@@ -42,7 +42,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:includeFontPadding="false"
-                    android:maxLines="2"
+                    android:maxLines="3"
                     android:text="PRODUTO"
                     android:textAllCaps="false"
                     android:textColor="#FFFFFF"
@@ -138,8 +138,7 @@
                 android:id="@+id/normalSection"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="bottom">
+                android:orientation="vertical">
 
                 <com.google.android.material.textview.MaterialTextView
                     android:id="@+id/priceLabel"
@@ -147,38 +146,58 @@
                     android:layout_height="wrap_content"
                     android:text="Normal:"
                     android:textColor="#9CA3AF"
-                    android:textSize="18sp"
-                    android:layout_marginEnd="6dp"
-                    android:layout_marginBottom="4dp" />
+                    android:textSize="14sp"
+                    android:layout_marginStart="2dp"
+                    android:layout_marginBottom="6dp" />
 
-                <com.google.android.material.textview.MaterialTextView
-                    android:id="@+id/priceCurrency"
+                <FrameLayout
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="R$"
-                    android:textSize="16sp"
-                    android:textColor="#FFFFFF"
-                    android:layout_marginBottom="4dp"
-                    android:layout_marginEnd="2dp" />
+                    android:background="@drawable/bg_price_slot_box"
+                    android:paddingStart="14dp"
+                    android:paddingEnd="14dp"
+                    android:paddingTop="6dp"
+                    android:paddingBottom="6dp">
 
-                <com.google.android.material.textview.MaterialTextView
-                    android:id="@+id/priceInteger"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="0"
-                    android:textSize="32sp"
-                    android:textColor="#FFFFFF"
-                    android:includeFontPadding="false" />
+                    <LinearLayout
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="bottom">
 
-                <com.google.android.material.textview.MaterialTextView
-                    android:id="@+id/priceDecimal"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text=",00"
-                    android:textSize="18sp"
-                    android:textColor="#FFFFFF"
-                    android:layout_marginBottom="8dp"
-                    android:includeFontPadding="false" />
+                        <com.google.android.material.textview.MaterialTextView
+                            android:id="@+id/priceCurrency"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="R$"
+                            android:textSize="14sp"
+                            android:textStyle="bold"
+                            android:textColor="#6B7280"
+                            android:layout_marginBottom="3dp"
+                            android:layout_marginEnd="2dp" />
+
+                        <com.google.android.material.textview.MaterialTextView
+                            android:id="@+id/priceInteger"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="0"
+                            android:textSize="28sp"
+                            android:textStyle="bold"
+                            android:textColor="#6B7280"
+                            android:includeFontPadding="false" />
+
+                        <com.google.android.material.textview.MaterialTextView
+                            android:id="@+id/priceDecimal"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text=",00"
+                            android:textSize="16sp"
+                            android:textStyle="bold"
+                            android:textColor="#6B7280"
+                            android:layout_marginBottom="5dp"
+                            android:includeFontPadding="false" />
+                    </LinearLayout>
+                </FrameLayout>
             </LinearLayout>
 
             <!-- Seção Cartão Koch -->
@@ -186,9 +205,8 @@
                 android:id="@+id/cartaoKochSection"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="bottom"
-                android:layout_marginTop="12dp">
+                android:orientation="vertical"
+                android:layout_marginTop="14dp">
 
                 <com.google.android.material.textview.MaterialTextView
                     android:id="@+id/priceCardLabel"
@@ -196,42 +214,59 @@
                     android:layout_height="wrap_content"
                     android:text="Cartão Koch:"
                     android:textColor="#ef4444"
-                    android:textSize="22sp"
+                    android:textSize="16sp"
                     android:textStyle="bold"
-                    android:layout_marginEnd="8dp"
+                    android:layout_marginStart="2dp"
                     android:layout_marginBottom="6dp" />
 
-                <com.google.android.material.textview.MaterialTextView
-                    android:id="@+id/priceCardCurrency"
+                <FrameLayout
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="R$"
-                    android:textSize="24sp"
-                    android:textStyle="bold"
-                    android:textColor="#ef4444"
-                    android:layout_marginBottom="6dp"
-                    android:layout_marginEnd="4dp" />
+                    android:background="@drawable/bg_price_slot_box"
+                    android:paddingStart="18dp"
+                    android:paddingEnd="18dp"
+                    android:paddingTop="10dp"
+                    android:paddingBottom="10dp">
 
-                <com.google.android.material.textview.MaterialTextView
-                    android:id="@+id/priceCardInteger"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="0"
-                    android:textSize="64sp"
-                    android:textStyle="bold"
-                    android:textColor="#ef4444"
-                    android:includeFontPadding="false" />
+                    <LinearLayout
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="bottom">
 
-                <com.google.android.material.textview.MaterialTextView
-                    android:id="@+id/priceCardDecimal"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text=",00"
-                    android:textSize="36sp"
-                    android:textStyle="bold"
-                    android:textColor="#ef4444"
-                    android:layout_marginBottom="16dp"
-                    android:includeFontPadding="false" />
+                        <com.google.android.material.textview.MaterialTextView
+                            android:id="@+id/priceCardCurrency"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="R$"
+                            android:textSize="24sp"
+                            android:textStyle="bold"
+                            android:textColor="#ef4444"
+                            android:layout_marginBottom="6dp"
+                            android:layout_marginEnd="4dp" />
+
+                        <com.google.android.material.textview.MaterialTextView
+                            android:id="@+id/priceCardInteger"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="0"
+                            android:textSize="64sp"
+                            android:textStyle="bold"
+                            android:textColor="#ef4444"
+                            android:includeFontPadding="false" />
+
+                        <com.google.android.material.textview.MaterialTextView
+                            android:id="@+id/priceCardDecimal"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text=",00"
+                            android:textSize="36sp"
+                            android:textStyle="bold"
+                            android:textColor="#ef4444"
+                            android:layout_marginBottom="16dp"
+                            android:includeFontPadding="false" />
+                    </LinearLayout>
+                </FrameLayout>
             </LinearLayout>
         </LinearLayout>
 

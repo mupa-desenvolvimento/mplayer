@@ -42,7 +42,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:includeFontPadding="false"
-                    android:maxLines="2"
+                    android:maxLines="3"
                     android:text="PRODUTO"
                     android:textColor="#FFFFFF"
                     android:textSize="28sp"

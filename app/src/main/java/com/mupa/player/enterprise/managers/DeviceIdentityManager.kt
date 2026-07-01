@@ -1,6 +1,7 @@
 package com.mupa.player.enterprise.managers
 
 import android.content.Context
+import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import androidx.datastore.preferences.core.edit
@@ -79,6 +80,12 @@ class DeviceIdentityManager(private val context: Context) {
     }
 
     private fun resolveStableHardwareId(): String? {
+        // O Argos (agent MDM) é Device Owner e consegue ler o serial real de hardware mesmo em
+        // Android 10+, onde Build.getSerial() é bloqueado para apps comuns. Ele expõe esse valor
+        // via ContentProvider para o MPlayer usar o mesmo device_id/serial entre os dois apps.
+        val argosSerial = resolveSerialFromArgos()
+        if (!argosSerial.isNullOrBlank()) return argosSerial
+
         val zebraId = resolveZebraStableId()
         if (!zebraId.isNullOrBlank()) return zebraId
 
@@ -94,6 +101,18 @@ class DeviceIdentityManager(private val context: Context) {
         if (serial.equals("unknown", ignoreCase = true)) return null
         if (!validate(serial)) return null
         return serial
+    }
+
+    private fun resolveSerialFromArgos(): String? {
+        return runCatching {
+            val uri = Uri.parse("content://$ARGOS_DEVICE_PROVIDER_AUTHORITY/serial")
+            context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                if (!cursor.moveToFirst()) return@use null
+                val idx = cursor.getColumnIndex("serial")
+                if (idx < 0) return@use null
+                cursor.getString(idx)?.trim()?.takeIf { validate(it) }
+            }
+        }.getOrNull()
     }
 
     private fun resolveZebraStableId(): String? {
@@ -127,5 +146,6 @@ class DeviceIdentityManager(private val context: Context) {
 
         private const val LEGACY_PREFS_NAME = "mupa_device_identity_legacy"
         private const val ANDROID_ID_BUG = "9774d56d682e549c"
+        private const val ARGOS_DEVICE_PROVIDER_AUTHORITY = "com.mupa.agent.argos.provider.device"
     }
 }

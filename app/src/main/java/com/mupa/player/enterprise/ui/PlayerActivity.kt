@@ -154,6 +154,7 @@ class PlayerActivity : ComponentActivity() {
     private var devMode = false
     private var demoMode = false
     private var overlayEan: String? = null
+    private var lastRenderedPriceSlotCount: Int = 1
     private var priceAnimator: ValueAnimator? = null
     private var tts: TextToSpeech? = null
     private var ttsReady = false
@@ -1285,12 +1286,12 @@ class PlayerActivity : ComponentActivity() {
             val product = runCatching { engine.query(ean, cfg, isOnline()) }.getOrNull()
             if (product != null) {
                 showPriceOverlayProduct(product)
-                scheduleHidePriceOverlay(cfg.timeoutMs)
+                scheduleHidePriceOverlay(computePriceDisplayTimeoutMs(cfg.timeoutMs))
             } else {
                 val offlineProduct = runCatching { engine.query(ean, cfg, isOnline = false) }.getOrNull()
                 if (offlineProduct != null) {
                     showPriceOverlayProduct(offlineProduct.copy(offline = true))
-                    scheduleHidePriceOverlay(cfg.timeoutMs)
+                    scheduleHidePriceOverlay(computePriceDisplayTimeoutMs(cfg.timeoutMs))
                 } else {
                     setPriceOverlayVisible(false)
                     speakNotFoundIfPossible(ean)
@@ -1898,6 +1899,16 @@ class PlayerActivity : ComponentActivity() {
         runCatching { tone?.startTone(ToneGenerator.TONE_PROP_BEEP2, 80) }
     }
 
+    /**
+     * Quanto mais tipos de preço aparecem na tela (normal/atacado/clube/oferta), mais tempo o
+     * cliente precisa pra ler tudo antes do overlay fechar sozinho.
+     */
+    private fun computePriceDisplayTimeoutMs(baseTimeoutMs: Long): Long {
+        val base = baseTimeoutMs.coerceAtLeast(6000L)
+        val extraSlots = (lastRenderedPriceSlotCount - 1).coerceAtLeast(0)
+        return (base + extraSlots * 2000L).coerceAtMost(14000L)
+    }
+
     private fun scheduleHidePriceOverlay(timeoutMs: Long) {
         hideOverlayJob?.cancel()
         hideOverlayJob =
@@ -1990,50 +2001,73 @@ class PlayerActivity : ComponentActivity() {
         fallback.copy(dominant = dominant, secondary = secondary, dark = dark, light = light, text = text, drawable = drawable)
     }
 
+    /**
+     * Aplica as cores extraídas da imagem do produto (Palette) na overlay de preço atualmente
+     * inflada em [binding.priceResultRoot]. IMPORTANTE: [inflateLayoutForProduct] faz
+     * `removeAllViews()` + reinflate a cada consulta, então as referências antigas tipadas pelo
+     * ViewBinding (ex: `binding.priceLeftPanel`) ficam órfãs (fora da árvore) após a primeira
+     * troca de layout. Por isso aqui sempre buscamos as views de novo via findViewById no
+     * container atual, em vez de usar `binding.X` diretamente.
+     */
     private fun applyOverlayColors(dominant: Int, dark: Int, light: Int, vibrant: Int, text: Int) {
+        val root = binding.priceResultRoot
+
         val gradient =
             GradientDrawable(
                 GradientDrawable.Orientation.TL_BR,
                 intArrayOf(dark, dominant),
             )
-        binding.priceLeftPanel.background = gradient
-        binding.priceRightPanel.setBackgroundColor(Color.WHITE)
+        root.findViewById<View>(R.id.priceLeftPanel)?.background = gradient
+        root.findViewById<View>(R.id.priceRightPanel)?.setBackgroundColor(Color.WHITE)
 
-        binding.priceNameBar.setBackgroundColor(dominant)
         val nameTextColor = idealTextColor(dominant)
-        binding.priceNameText.setTextColor(nameTextColor)
-        binding.priceSubtitleText.setTextColor(adjustAlpha(nameTextColor, 0.90f))
+        root.findViewById<View>(R.id.priceNameBar)?.setBackgroundColor(dominant)
+        root.findViewById<TextView>(R.id.priceNameText)?.setTextColor(nameTextColor)
+        root.findViewById<TextView>(R.id.priceSubtitleText)?.setTextColor(adjustAlpha(nameTextColor, 0.90f))
 
         val badgeAColor = makeHueAccent(vibrant, 6f)
         val badgeBColor = makeHueAccent(vibrant, 210f)
         val badgeAText = idealTextColor(badgeAColor)
         val badgeBText = idealTextColor(badgeBColor)
-        binding.priceLeftBadgeText.background = rectBg(badgeAColor, alpha = 1f)
-        binding.priceRightBadgeText.background = rectBg(badgeBColor, alpha = 1f)
-        binding.priceLeftBadgeText.setTextColor(badgeAText)
-        binding.priceRightBadgeText.setTextColor(badgeBText)
+        root.findViewById<View>(R.id.priceLeftBadgeText)?.let {
+            it.background = rectBg(badgeAColor, alpha = 1f)
+            (it as? TextView)?.setTextColor(badgeAText)
+        }
+        root.findViewById<View>(R.id.priceRightBadgeText)?.let {
+            it.background = rectBg(badgeBColor, alpha = 1f)
+            (it as? TextView)?.setTextColor(badgeBText)
+        }
 
-        binding.priceOfflineBadge.background = rectBg(adjustAlpha(Color.BLACK, 0.18f), alpha = 1f)
-        binding.priceOfflineBadge.setTextColor(Color.WHITE)
+        root.findViewById<View>(R.id.priceOfflineBadge)?.let {
+            it.background = rectBg(adjustAlpha(Color.BLACK, 0.18f), alpha = 1f)
+            (it as? TextView)?.setTextColor(Color.WHITE)
+        }
 
-        binding.priceMainContainer.background = rectBg(vibrant, alpha = 1f)
+        // Caixa principal de preço (apenas layouts genéricos: split/centered/backdrop/etc).
+        // Os layouts específicos (de_por, atacado, clube_koch, cartao_koch) já têm cores fixas
+        // semânticas no XML (ex: verde para "melhor preço") e não usam esses ids.
+        root.findViewById<View>(R.id.priceMainContainer)?.background = rectBg(vibrant, alpha = 1f)
         val priceTextColor = idealTextColor(vibrant)
-        binding.priceCurrencyText.setTextColor(priceTextColor)
-        binding.priceIntegerText.setTextColor(priceTextColor)
-        binding.priceDecimalText.setTextColor(priceTextColor)
-        binding.priceIntegerText.setShadowLayer(0f, 0f, 0f, Color.TRANSPARENT)
+        root.findViewById<TextView>(R.id.priceCurrencyText)?.setTextColor(priceTextColor)
+        root.findViewById<TextView>(R.id.priceIntegerText)?.apply {
+            setTextColor(priceTextColor)
+            setShadowLayer(0f, 0f, 0f, Color.TRANSPARENT)
+        }
+        root.findViewById<TextView>(R.id.priceDecimalText)?.setTextColor(priceTextColor)
 
-        binding.priceOfferContainer.background = rectBg(adjustAlpha(light, 0.14f), alpha = 1f)
-        binding.priceOfferText.setTextColor(text)
+        root.findViewById<View>(R.id.priceOfferContainer)?.background = rectBg(adjustAlpha(light, 0.14f), alpha = 1f)
+        root.findViewById<TextView>(R.id.priceOfferText)?.setTextColor(text)
 
-        binding.priceSecondUnitContainer.background = rectBg(adjustAlpha(light, 0.12f), alpha = 1f)
-        binding.priceSecondUnitLabel.setTextColor(adjustAlpha(text, 0.92f))
+        root.findViewById<View>(R.id.priceSecondUnitContainer)?.background = rectBg(adjustAlpha(light, 0.12f), alpha = 1f)
+        root.findViewById<TextView>(R.id.priceSecondUnitLabel)?.setTextColor(adjustAlpha(text, 0.92f))
 
         val unitValueBg = makeHueAccent(vibrant, 140f)
-        binding.priceSecondUnitValue.background = rectBg(unitValueBg, alpha = 1f)
-        binding.priceSecondUnitValue.setTextColor(idealTextColor(unitValueBg))
+        root.findViewById<View>(R.id.priceSecondUnitValue)?.let {
+            it.background = rectBg(unitValueBg, alpha = 1f)
+            (it as? TextView)?.setTextColor(idealTextColor(unitValueBg))
+        }
 
-        binding.priceCodeText.setTextColor(adjustAlpha(text, 0.86f))
+        root.findViewById<TextView>(R.id.priceCodeText)?.setTextColor(adjustAlpha(text, 0.86f))
     }
 
     private fun idealTextColor(background: Int): Int {
@@ -2184,6 +2218,13 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
+    private fun roundedBg(color: Int, radiusDp: Float = 14f): GradientDrawable {
+        return GradientDrawable().apply {
+            setColor(color)
+            cornerRadius = radiusDp * resources.displayMetrics.density
+        }
+    }
+
     private fun blendColors(a: Int, b: Int, t: Float): Int {
         val clamped = t.coerceIn(0f, 1f)
         return Color.rgb(
@@ -2206,8 +2247,8 @@ class PlayerActivity : ComponentActivity() {
         val cleaned = raw.trim().replace("\\s+".toRegex(), " ")
         if (cleaned.isBlank()) return ""
         val words = cleaned.split(" ").filter { it.isNotBlank() }
-        val top = words.take(2).joinToString(" ").uppercase(Locale("pt", "BR"))
-        val rest = words.drop(2).joinToString(" ").uppercase(Locale("pt", "BR"))
+        val top = words.take(3).joinToString(" ").uppercase(Locale("pt", "BR"))
+        val rest = words.drop(3).joinToString(" ").uppercase(Locale("pt", "BR"))
 
         val b = SpannableStringBuilder()
         val topStart = 0
@@ -2218,7 +2259,8 @@ class PlayerActivity : ComponentActivity() {
             b.append("\n")
             val restStart = b.length
             b.append(rest)
-            b.setSpan(RelativeSizeSpan(0.88f), restStart, b.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            b.setSpan(StyleSpan(android.graphics.Typeface.NORMAL), restStart, b.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            b.setSpan(RelativeSizeSpan(0.74f), restStart, b.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
         }
 
         val totalChars = cleaned.length
@@ -2587,9 +2629,11 @@ class PlayerActivity : ComponentActivity() {
 
         val productSlots = product.priceSlots
         if (!productSlots.isNullOrEmpty()) {
-            for (slot in productSlots) {
-                if (slot.value <= 0.0) continue
-
+            val validSlots = productSlots.filter { it.value > 0.0 }
+            val bestValue = validSlots.minOfOrNull { it.value }
+            val compact = validSlots.size >= 3
+            lastRenderedPriceSlotCount = validSlots.size.coerceAtLeast(1)
+            for (slot in validSlots) {
                 val itemView = inflater.inflate(R.layout.item_price_slot, container, false)
 
                 val labelTextView = itemView.findViewById<TextView>(R.id.slotLabel)
@@ -2600,19 +2644,20 @@ class PlayerActivity : ComponentActivity() {
 
                 labelTextView.text = slot.label
 
-                val slotColor = when {
-                    slot.isClub -> Color.parseColor("#10b981")
-                    slot.isPromo -> Color.parseColor("#ef4444")
-                    else -> accentColor
-                }
-                integerTextView.setTextColor(slotColor)
-                decimalTextView.setTextColor(slotColor)
-                currencyTextView?.setTextColor(slotColor)
+                val isBest = bestValue != null && slot.value == bestValue
+                styleSlotBox(itemView, labelTextView, currencyTextView, integerTextView, decimalTextView, isBest = isBest, isClub = slot.isClub, isPromo = slot.isPromo, accentColor = accentColor)
 
                 val formatted = String.format(Locale.US, "%.2f", slot.value)
                 val parts = formatted.split(".")
                 integerTextView.text = parts[0]
                 decimalTextView.text = ",${parts[1]}"
+
+                emphasizePriceSlot(
+                    labelTextView, currencyTextView, integerTextView, decimalTextView,
+                    isBest = isBest,
+                    compact = compact,
+                )
+                applyCompactSpacing(itemView, compact)
 
                 fromPriceTextView.visibility = View.GONE
 
@@ -2621,21 +2666,40 @@ class PlayerActivity : ComponentActivity() {
             return
         }
 
-        // Fallback de Segurança tradicional
-        val slots = layoutConfig?.priceSlots?.takeIf { it.isNotEmpty() }
-            ?: listOf(PriceSlot(field = "price", label = "PREÇO À VISTA", showFromPrice = true))
-
-        for (slot in slots) {
-            val priceValue: Double? = when (slot.field) {
-                "price" -> product.price
-                "price_promotional", "pricePromotional" -> product.pricePromotional
-                "price_club", "priceClub" -> product.priceClub
-                "price_wholesale", "priceWholesale" -> product.priceWholesale
-                "price_weighable", "priceWeighable" -> product.priceWeighable
-                else -> null
+        // Fallback de Segurança tradicional: se não há price_slots configurados nem retornados pela
+        // API, monta dinamicamente um slot por campo de preço disponível (normal/atacado/clube/promo),
+        // sempre destacando a melhor opção em vez de exibir só o preço normal.
+        val dynamicSlots = buildList {
+            add(PriceSlot(field = "price", label = "PREÇO NORMAL", showFromPrice = true))
+            if (product.priceWholesale != null && product.priceWholesale > 0.0) {
+                add(PriceSlot(field = "price_wholesale", label = "ATACADO", showFromPrice = false))
             }
+            if (product.priceClub != null && product.priceClub > 0.0) {
+                add(PriceSlot(field = "price_club", label = "CLUBE", showFromPrice = false))
+            }
+            val promo = product.pricePromotional
+            if (promo != null && promo > 0.0 && promo != product.price && promo != product.priceClub) {
+                add(PriceSlot(field = "price_promotional", label = "OFERTA", showFromPrice = false))
+            }
+        }
+        val slots = layoutConfig?.priceSlots?.takeIf { it.isNotEmpty() } ?: dynamicSlots
 
-            if (priceValue == null || priceValue <= 0.0) continue
+        fun valueOf(field: String): Double? = when (field) {
+            "price" -> product.price
+            "price_promotional", "pricePromotional" -> product.pricePromotional
+            "price_club", "priceClub" -> product.priceClub
+            "price_wholesale", "priceWholesale" -> product.priceWholesale
+            "price_weighable", "priceWeighable" -> product.priceWeighable
+            else -> null
+        }
+
+        val resolvedSlots = slots.filter { val v = valueOf(it.field); v != null && v > 0.0 }
+        val bestValue = resolvedSlots.mapNotNull { valueOf(it.field) }.minOrNull()
+        val compact = resolvedSlots.size >= 3
+        lastRenderedPriceSlotCount = resolvedSlots.size.coerceAtLeast(1)
+
+        for (slot in resolvedSlots) {
+            val priceValue = valueOf(slot.field) ?: continue
 
             val itemView = inflater.inflate(R.layout.item_price_slot, container, false)
 
@@ -2647,19 +2711,22 @@ class PlayerActivity : ComponentActivity() {
 
             labelTextView.text = slot.label
 
-            val slotColor = when (slot.field) {
-                "price_promotional", "pricePromotional" -> Color.parseColor("#ef4444")
-                "price_club", "priceClub" -> Color.parseColor("#10b981")
-                else -> accentColor
-            }
-            integerTextView.setTextColor(slotColor)
-            decimalTextView.setTextColor(slotColor)
-            currencyTextView?.setTextColor(slotColor)
+            val isClub = slot.field == "price_club" || slot.field == "priceClub"
+            val isPromo = slot.field == "price_promotional" || slot.field == "pricePromotional"
+            val isBest = bestValue != null && priceValue == bestValue
+            styleSlotBox(itemView, labelTextView, currencyTextView, integerTextView, decimalTextView, isBest = isBest, isClub = isClub, isPromo = isPromo, accentColor = accentColor)
 
             val formatted = String.format(Locale.US, "%.2f", priceValue)
             val parts = formatted.split(".")
             integerTextView.text = parts[0]
             decimalTextView.text = ",${parts[1]}"
+
+            emphasizePriceSlot(
+                labelTextView, currencyTextView, integerTextView, decimalTextView,
+                isBest = bestValue != null && priceValue == bestValue,
+                compact = compact,
+            )
+            applyCompactSpacing(itemView, compact)
 
             val compareFromPrice = product.priceFrom ?: product.originalPrice
             if (slot.showFromPrice && compareFromPrice != null && compareFromPrice > priceValue) {
@@ -2672,6 +2739,83 @@ class PlayerActivity : ComponentActivity() {
 
             container.addView(itemView)
         }
+    }
+
+    /**
+     * Pinta a caixa do preço (fundo) e calcula a cor do texto sempre pelo contraste real do
+     * fundo: fundo claro -> texto escuro; fundo escuro/colorido -> texto claro. A cor do fundo
+     * não é fixa: clube=verde, oferta/promo=vermelho, melhor preço "normal"=cor de destaque
+     * extraída da imagem do produto, e os demais (secundários) ficam numa caixa branca.
+     */
+    private fun styleSlotBox(
+        itemView: View,
+        label: TextView,
+        currency: TextView?,
+        integer: TextView,
+        decimal: TextView,
+        isBest: Boolean,
+        isClub: Boolean,
+        isPromo: Boolean,
+        accentColor: Int,
+    ) {
+        val boxColor = when {
+            isClub -> Color.parseColor("#10b981")
+            isPromo -> Color.parseColor("#ef4444")
+            isBest -> accentColor
+            else -> Color.parseColor("#FFFFFF")
+        }
+        val textColor = idealTextColor(boxColor)
+
+        itemView.findViewById<View>(R.id.slotPriceBox)?.background = roundedBg(boxColor)
+        integer.setTextColor(textColor)
+        decimal.setTextColor(textColor)
+        currency?.setTextColor(textColor)
+        // O rótulo fica sobre o painel escuro (fora da caixa), não sobre a caixa de preço.
+        label.setTextColor(Color.WHITE)
+    }
+
+    /**
+     * Sempre destaca o melhor preço entre os slots: aumenta o valor (moeda/inteiro/decimal) e
+     * deixa o rótulo ainda mais discreto; os demais preços ficam visualmente menores/secundários.
+     */
+    private fun emphasizePriceSlot(
+        label: TextView,
+        currency: TextView?,
+        integer: TextView,
+        decimal: TextView,
+        isBest: Boolean,
+        compact: Boolean = false,
+    ) {
+        // Com 3+ tipos de preço na tela, reduz um pouco os tamanhos pra caber tudo sem cortar
+        // nem precisar rolar.
+        if (isBest) {
+            label.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 13f else 14f)
+            label.alpha = 1f
+            currency?.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 19f else 22f)
+            integer.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 44f else 54f)
+            decimal.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 24f else 30f)
+        } else {
+            label.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 11f else 12f)
+            label.alpha = 0.75f
+            currency?.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 13f else 15f)
+            integer.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 30f else 36f)
+            decimal.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 17f else 20f)
+        }
+    }
+
+    /** Aperta as margens/paddings do item e da caixa de preço quando há 3+ tipos na tela. */
+    private fun applyCompactSpacing(itemView: View, compact: Boolean) {
+        if (!compact) return
+        itemView.setPadding(
+            itemView.paddingLeft,
+            dpToPx(6),
+            itemView.paddingRight,
+            dpToPx(6),
+        )
+        val box = itemView.findViewById<View>(R.id.slotPriceBox)
+        box?.setPadding(dpToPx(14), dpToPx(7), dpToPx(14), dpToPx(7))
+        val label = itemView.findViewById<View>(R.id.slotLabel)
+        (label?.layoutParams as? ViewGroup.MarginLayoutParams)?.let { it.bottomMargin = dpToPx(3) }
     }
 
     private fun applyThemeColors(view: View, product: PriceProduct, layoutConfig: LayoutConfig?) {

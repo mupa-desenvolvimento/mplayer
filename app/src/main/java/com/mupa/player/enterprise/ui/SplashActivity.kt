@@ -1,14 +1,18 @@
 package com.mupa.player.enterprise.ui
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.lifecycleScope
@@ -17,10 +21,33 @@ import com.mupa.player.enterprise.managers.DeviceCacheManager
 import com.mupa.player.enterprise.managers.DeviceIdentityManager
 import com.mupa.player.enterprise.services.DeviceValidationResult
 import com.mupa.player.enterprise.services.DeviceValidationService
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 class SplashActivity : ComponentActivity() {
+    private var phoneStatePermissionDeferred: CompletableDeferred<Boolean>? = null
+    private val phoneStatePermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            phoneStatePermissionDeferred?.complete(granted)
+            phoneStatePermissionDeferred = null
+        }
+
+    private suspend fun ensurePhoneStatePermission() {
+        if (Build.VERSION.SDK_INT < 23) return
+        val hasPermission = ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) ==
+            PackageManager.PERMISSION_GRANTED
+        if (hasPermission) return
+
+        val deferred = CompletableDeferred<Boolean>()
+        phoneStatePermissionDeferred = deferred
+        phoneStatePermissionLauncher.launch(Manifest.permission.READ_PHONE_STATE)
+        withTimeoutOrNull(8_000L) { deferred.await() }
+        if (phoneStatePermissionDeferred === deferred) {
+            phoneStatePermissionDeferred = null
+        }
+    }
     override fun attachBaseContext(newBase: Context) {
         val override = Configuration(newBase.resources.configuration).apply {
             fontScale = 0.85f
@@ -42,6 +69,7 @@ class SplashActivity : ComponentActivity() {
 
         lifecycleScope.launch {
             binding.stepText.text = "1 Identificando dispositivo"
+            ensurePhoneStatePermission()
             val deviceId = DeviceIdentityManager(applicationContext).getPersistentId()
             binding.deviceIdWatermark.text = "ID: ${deviceId.trim()}"
             val cacheManager = DeviceCacheManager(applicationContext)

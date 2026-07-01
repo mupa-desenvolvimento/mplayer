@@ -14,6 +14,7 @@
         android:maxSdkVersion="28" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
 
     <permission
         android:name="com.mupa.player.enterprise.permission.SET_DEV_MODE"
@@ -22,6 +23,11 @@
     <uses-feature
         android:name="android.hardware.camera.front"
         android:required="false" />
+
+    <queries>
+        <package android:name="com.mupa.agent.argos" />
+        <provider android:authorities="com.mupa.agent.argos.provider.device" />
+    </queries>
 
     <application
         android:name=".MupaApplication"
