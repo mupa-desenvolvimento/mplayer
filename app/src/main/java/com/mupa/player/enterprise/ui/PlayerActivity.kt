@@ -2629,7 +2629,21 @@ class PlayerActivity : ComponentActivity() {
 
         val productSlots = product.priceSlots
         if (!productSlots.isNullOrEmpty()) {
-            val validSlots = productSlots.filter { it.value > 0.0 }
+            val normalPrice = product.price
+            val validSlots = productSlots.filter { slot ->
+                if (slot.value <= 0.0) return@filter false
+                if (normalPrice != null && slot.value == normalPrice) {
+                    val isSecondary = slot.isPromo || slot.isClub || 
+                                     slot.field == "price_wholesale" || 
+                                     slot.field == "priceWholesale" ||
+                                     slot.field == "price_club" ||
+                                     slot.field == "priceClub" ||
+                                     slot.field == "price_promotional" ||
+                                     slot.field == "pricePromotional"
+                    if (isSecondary) return@filter false
+                }
+                true
+            }
             val bestValue = validSlots.minOfOrNull { it.value }
             val compact = validSlots.size >= 3
             lastRenderedPriceSlotCount = validSlots.size.coerceAtLeast(1)
@@ -2693,7 +2707,15 @@ class PlayerActivity : ComponentActivity() {
             else -> null
         }
 
-        val resolvedSlots = slots.filter { val v = valueOf(it.field); v != null && v > 0.0 }
+        val normalPrice = valueOf("price") ?: product.price
+        val resolvedSlots = slots.filter { slot ->
+            val v = valueOf(slot.field)
+            if (v == null || v <= 0.0) return@filter false
+            if (slot.field != "price" && normalPrice != null && v == normalPrice) {
+                return@filter false
+            }
+            true
+        }
         val bestValue = resolvedSlots.mapNotNull { valueOf(it.field) }.minOrNull()
         val compact = resolvedSlots.size >= 3
         lastRenderedPriceSlotCount = resolvedSlots.size.coerceAtLeast(1)
@@ -2997,7 +3019,10 @@ class PlayerActivity : ComponentActivity() {
                     varejoSec?.visibility = View.GONE
                 }
 
-                if (isValid(wholesaleVal)) {
+                // Hide wholesale price if it's equal to or greater than normal price
+                val showWholesale = isValid(wholesaleVal) && (normalVal == null || wholesaleVal!! < normalVal)
+
+                if (showWholesale) {
                     atacadoSec?.visibility = View.VISIBLE
                     setPriceToViews(R.id.priceWholesaleInteger, R.id.priceWholesaleDecimal, wholesaleVal)
                 } else {

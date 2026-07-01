@@ -191,6 +191,16 @@ class PriceQueryEngine(
                     "lookup_price" -> {
                         val resp = executeStep(step, state)
                         applyMapping(resp, step.mapping, state)
+                        val sku = resp.optJSONObject("data")?.optString("sku")
+                            ?: resp.optString("sku")
+                            ?: resp.optJSONObject("data")?.optString("id_produto")
+                            ?: resp.optString("id_produto")
+                        if (!sku.isNullOrBlank()) {
+                            state.put("sku", sku)
+                            if (state.optString("id", "").isBlank()) {
+                                state.put("id", sku)
+                            }
+                        }
                     }
                     "lookup_image" -> {
                         Unit
@@ -419,6 +429,42 @@ class PriceQueryEngine(
         if (existing != null) return@withContext existing to null
         if (!isOnline) return@withContext null to null
 
+        val cachedProduct = db.priceCacheDao().getByEan(normalizedEan)?.let { cache ->
+            runCatching { parseProductFromCache(normalizedEan, cache) }.getOrNull()
+        }
+
+        // 1. Prioritize client-provided remote image URL
+        val clientImageUrl = cachedProduct?.clientImageUrl
+        if (!clientImageUrl.isNullOrBlank() && clientImageUrl.startsWith("http")) {
+            val clientLocal = runCatching { downloadProductImageIfNeeded(ean = normalizedEan, rawUrl = clientImageUrl) }.getOrNull()
+            if (clientLocal != null) return@withContext clientLocal to null
+        }
+
+        // 2. Alternative search for Komprão (OnWay SKU image API)
+        val isKomprao = config.integration.contains("komprao", ignoreCase = true) || config.integration.contains("komprão", ignoreCase = true)
+        if (isKomprao) {
+            val sku = cachedProduct?.id ?: normalizedEan
+            val token = sessionState.optString("access_token", "").ifBlank {
+                val authStep = config.steps.firstOrNull { it.type == "authenticate" }
+                if (authStep != null) {
+                    runCatching {
+                        val resp = executeStep(authStep, sessionState)
+                        applyMapping(resp, authStep.mapping, sessionState)
+                        sessionState.optString("access_token", "")
+                    }.getOrNull()
+                } else ""
+            }
+            if (!sku.isNullOrBlank() && !token.isNullOrBlank()) {
+                val kompraoUrl = "https://apionway.superkoch.com.br/on-way/product/image/$sku"
+                val headers = mapOf("accept" to "image/jpeg", "Authorization" to "Bearer $token")
+                val kompraoLocal = runCatching {
+                    downloadProductImageIfNeeded(ean = normalizedEan, rawUrl = kompraoUrl, headers = headers)
+                }.getOrNull()
+                if (kompraoLocal != null) return@withContext kompraoLocal to null
+            }
+        }
+
+        // 3. Fallback to normal VTEX and Mupa image flow
         val vtexUrl = fetchVtexImageUrlFromApiProdutos(ean = normalizedEan)
         val vtexLocal = vtexUrl?.let { downloadProductImageIfNeeded(ean = normalizedEan, rawUrl = it) }
         if (vtexLocal != null) return@withContext vtexLocal to null
@@ -589,7 +635,11 @@ class PriceQueryEngine(
         return product.copy(image = sanitizeLocalPathOrNull(product.image))
     }
 
-    private fun downloadProductImageIfNeeded(ean: String, rawUrl: String): String? {
+    private fun downloadProductImageIfNeeded(
+        ean: String,
+        rawUrl: String,
+        headers: Map<String, String>? = null
+    ): String? {
         val url = normalizeExternalUrl(rawUrl).trim()
         if (url.isBlank()) return null
         val optimizedTarget = File(productsDir(), "$ean.webp")
@@ -643,7 +693,9 @@ class PriceQueryEngine(
         }
 
         val tmpDownload = File(productsDir(), "$ean.download.tmp")
-        val req = Request.Builder().url(url).get().build()
+        val reqBuilder = Request.Builder().url(url)
+        headers?.forEach { (k, v) -> reqBuilder.header(k, v) }
+        val req = reqBuilder.get().build()
         http.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) throw IllegalStateException("product_image_download_http_${resp.code}")
             val body = resp.body ?: throw IllegalStateException("product_image_empty_body")
@@ -849,6 +901,7 @@ class PriceQueryEngine(
                 cardPrice = o.optDouble("cardPrice", Double.NaN).takeIf { !it.isNaN() },
                 stock = o.optInt("stock", Int.MIN_VALUE).takeIf { it != Int.MIN_VALUE },
                 image = o.optString("image", "").ifBlank { null },
+                clientImageUrl = o.optString("clientImageUrl", "").ifBlank { o.optString("client_image_url", "").ifBlank { null } },
                 offer = offer,
                 packs = packs,
                 theme = theme,
@@ -1026,6 +1079,11 @@ class PriceQueryEngine(
 
         val stock = state.optInt("stock", Int.MIN_VALUE).takeIf { it != Int.MIN_VALUE }
         val image = state.optString("image", "").ifBlank { null }
+        val clientImageUrl = state.optString("client_image_url", "").ifBlank {
+            state.optString("clientImageUrl", "").ifBlank {
+                if (image?.startsWith("http") == true) image else null
+            }
+        }
 
         if (desc == null && resolvedPrice == null && image == null) return null
 
@@ -1065,7 +1123,7 @@ class PriceQueryEngine(
         val xmlLayoutType = state.optString("xml_layout_type", "").ifBlank { state.optString("xmlLayoutType", "").ifBlank { null } }
 
         return PriceProduct(
-            id = state.optString("id", "").ifBlank { null },
+            id = state.optString("id", "").ifBlank { state.optString("sku", "").ifBlank { null } },
             ean = ean,
             description = desc,
             price = resolvedPrice,
@@ -1079,6 +1137,7 @@ class PriceQueryEngine(
             cardPrice = cardPrice,
             stock = stock,
             image = image,
+            clientImageUrl = clientImageUrl,
             offer = offer,
             packs = emptyList(),
             theme = null,
@@ -1144,6 +1203,7 @@ class PriceQueryEngine(
             .put("cardPrice", product.cardPrice)
             .put("stock", product.stock)
             .put("image", product.image)
+            .put("clientImageUrl", product.clientImageUrl)
             .put("offer", offer)
             .put("packs", packs)
             .put("theme", theme)

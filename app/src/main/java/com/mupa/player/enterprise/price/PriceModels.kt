@@ -37,6 +37,7 @@ data class PriceProduct(
     val cardPrice: Double? = null,
     val stock: Int? = null,
     val image: String? = null,
+    val clientImageUrl: String? = null,
     val offer: PriceOffer? = null,
     val packs: List<PricePack> = emptyList(),
     val theme: PriceTheme? = null,
