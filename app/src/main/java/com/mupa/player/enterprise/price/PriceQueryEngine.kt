@@ -707,7 +707,13 @@ class PriceQueryEngine(
             }
         }
 
-        if (!tmpDownload.exists() || tmpDownload.length() == 0L) {
+        if (!tmpDownload.exists() || tmpDownload.length() < 100L) {
+            runCatching { tmpDownload.delete() }
+            return null
+        }
+
+        val firstChar = runCatching { tmpDownload.bufferedReader().use { it.read() } }.getOrDefault(-1)
+        if (firstChar == '{'.code || firstChar == '['.code) {
             runCatching { tmpDownload.delete() }
             return null
         }
