@@ -22,7 +22,7 @@ import java.nio.ByteOrder
 class AudienceAnalyticsNativeEngine(
     private val context: Context,
     private val modelsDir: File,
-) {
+) : AudienceAnalyticsEngine {
     private var faceDetector: FaceDetector? = null
     private var ageGenderInterpreter: Interpreter? = null
     private var faceRecInterpreter: Interpreter? = null
@@ -46,7 +46,7 @@ class AudienceAnalyticsNativeEngine(
         return Math.sqrt(sum.toDouble()).toFloat()
     }
 
-    suspend fun init(): Boolean = withContext(Dispatchers.IO) {
+    override suspend fun init(): Boolean = withContext(Dispatchers.IO) {
         try {
             val options = FaceDetectorOptions.Builder()
                 .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
@@ -71,7 +71,7 @@ class AudienceAnalyticsNativeEngine(
         }
     }
 
-    suspend fun processFrameJpegBase64(base64Jpeg: String, rotationDegrees: Int = 0): AudienceFrameResult = withContext(Dispatchers.Default) {
+    override suspend fun processFrameJpegBase64(base64Jpeg: String, rotationDegrees: Int): AudienceFrameResult = withContext(Dispatchers.Default) {
         val detector = faceDetector ?: return@withContext AudienceFrameResult(emptyList())
         val jpegBytes = try {
             Base64.decode(base64Jpeg, Base64.DEFAULT)
@@ -313,7 +313,7 @@ class AudienceAnalyticsNativeEngine(
         )
     }
 
-    suspend fun release() = withContext(Dispatchers.IO) {
+    override suspend fun release() = withContext(Dispatchers.IO) {
         faceDetector?.close()
         faceDetector = null
         ageGenderInterpreter?.close()

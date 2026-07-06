@@ -19,12 +19,12 @@ import java.util.UUID
 class AudienceAnalyticsWebViewEngine(
     private val context: Context,
     private val modelsDir: File,
-) {
+) : AudienceAnalyticsEngine {
     private var webView: WebView? = null
     private val pending = HashMap<String, CompletableDeferred<AudienceFrameResult>>()
     private var pageLoaded: CompletableDeferred<Unit>? = null
 
-    suspend fun init(): Boolean {
+    override suspend fun init(): Boolean {
         if (webView != null) return true
 
         val tf = File(modelsDir, "libs/tf.min.js")
@@ -83,7 +83,7 @@ class AudienceAnalyticsWebViewEngine(
         return true
     }
 
-    suspend fun processFrameJpegBase64(base64Jpeg: String): AudienceFrameResult = withContext(Dispatchers.Main) {
+    override suspend fun processFrameJpegBase64(base64Jpeg: String, rotationDegrees: Int): AudienceFrameResult = withContext(Dispatchers.Main) {
         val wv = webView ?: throw IllegalStateException("not_initialized")
         val requestId = UUID.randomUUID().toString()
         val deferred = CompletableDeferred<AudienceFrameResult>()
@@ -92,7 +92,7 @@ class AudienceAnalyticsWebViewEngine(
         deferred.await()
     }
 
-    suspend fun release() = withContext(Dispatchers.Main) {
+    override suspend fun release() = withContext(Dispatchers.Main) {
         webView?.destroy()
         webView = null
         pending.clear()

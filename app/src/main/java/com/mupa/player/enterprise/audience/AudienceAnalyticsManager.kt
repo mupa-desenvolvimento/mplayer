@@ -29,9 +29,9 @@ class AudienceAnalyticsManager(
     private val deviceId: String,
     private val contentPlayingProvider: () -> String?,
     private val playlistProvider: () -> String?,
+    private val engine: AudienceAnalyticsEngine = AudienceAnalyticsNativeEngine(context, File(context.filesDir, "models")),
 ) {
     private val modelsDir = File(context.filesDir, "models")
-    private val nativeEngine = AudienceAnalyticsNativeEngine(context, modelsDir)
     private val tracker = ViewingSessionTracker(deviceId)
     private val db = AppDatabase.get(context)
 
@@ -53,7 +53,7 @@ class AudienceAnalyticsManager(
         // Provision TFLite models before engine initialization
         ModelProvisioningManager.ensureModelsProvisioned(context, cache?.tipoDaLicenca)
 
-        val ok = nativeEngine.init()
+        val ok = engine.init()
         if (!ok) return false
 
         val provider =
@@ -101,7 +101,7 @@ class AudienceAnalyticsManager(
         val ended = tracker.flushAll()
         ended.forEach { db.audienceSessionDao().upsert(it) }
 
-        nativeEngine.release()
+        engine.release()
     }
 
     @Volatile private var isFaceActive = false
@@ -134,7 +134,7 @@ class AudienceAnalyticsManager(
 
         scope.launch {
             try {
-                val result = runCatching { nativeEngine.processFrameJpegBase64(base64, rotation) }.getOrNull()
+                val result = runCatching { engine.processFrameJpegBase64(base64, rotation) }.getOrNull()
                     ?: AudienceFrameResult(emptyList())
 
                 isFaceActive = result.faces.isNotEmpty()
