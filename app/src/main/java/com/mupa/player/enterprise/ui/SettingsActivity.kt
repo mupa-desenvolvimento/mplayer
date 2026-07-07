@@ -16,13 +16,8 @@ import com.mupa.player.enterprise.managers.DeviceCacheManager
 import com.mupa.player.enterprise.managers.DeviceIdentityManager
 import com.mupa.player.enterprise.managers.ManifestManager
 import com.mupa.player.enterprise.managers.SettingsManager
-import com.mupa.player.enterprise.price.PriceConfig
-import com.mupa.player.enterprise.price.PriceConfigParser
-import com.mupa.player.enterprise.price.PriceQueryEngine
 import com.mupa.player.enterprise.storage.db.AppDatabase
 import com.mupa.player.enterprise.storage.settingsDataStore
-import com.mupa.player.enterprise.audience.AudienceSyncManager
-import com.mupa.player.enterprise.price.PriceAnalyticsSyncManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -34,7 +29,6 @@ class SettingsActivity : ComponentActivity() {
 
     private lateinit var binding: ActivitySettingsBinding
     private lateinit var deviceId: String
-    private var priceConfig: PriceConfig? = null
     private var maintenanceModeEnabled = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -53,7 +47,7 @@ class SettingsActivity : ComponentActivity() {
         val cache = runCatching { DeviceCacheManager(applicationContext).load() }.getOrNull()
         val settings = runCatching { SettingsManager(applicationContext).getSettings() }.getOrNull()
 
-        // Local manifest parsing to fetch playlist name and price config
+        // Local manifest parsing to fetch playlist name
         val rawManifest = runCatching { ManifestManager(applicationContext).loadOfflineManifest(deviceId) }.getOrNull()
         var playlistName = "-"
         if (!rawManifest.isNullOrBlank()) {
@@ -61,10 +55,6 @@ class SettingsActivity : ComponentActivity() {
                 val root = JSONObject(rawManifest)
                 val manifestObj = root.optJSONObject("manifest")
                 playlistName = manifestObj?.optString("name", "-") ?: "-"
-                val priceCfgObj = manifestObj?.optJSONObject("price_config") ?: root.optJSONObject("price_config")
-                if (priceCfgObj != null) {
-                    priceConfig = PriceConfigParser.parse(priceCfgObj.toString())
-                }
             }
         }
 
@@ -75,19 +65,9 @@ class SettingsActivity : ComponentActivity() {
             binding.txtCompanyTenant.text = "Empresa: ${cache?.companyName ?: "-"} (Tenant: ${cache?.tenant ?: "-"})"
             binding.editFilial.setText(cache?.filial ?: "")
 
-            // Get API endpoints being queried
-            val stepsList = priceConfig?.steps
-            if (!stepsList.isNullOrEmpty()) {
-                val apiUrls = stepsList.joinToString("\n") { "${it.type}: [${it.method}] ${it.url}" }
-                binding.txtApiEndpoint.text = "APIs de Consulta:\n$apiUrls"
-            } else {
-                binding.txtApiEndpoint.text = "API de Consulta: Supabase (Padrão)"
-            }
-
             binding.switchDevMode.isChecked = settings?.devMode ?: false
             binding.switchDemoMode.isChecked = settings?.demoMode ?: false
-            binding.btnTestFaceRecognition.visibility = if (settings?.devMode == true) View.VISIBLE else View.GONE
-            
+
             // Read Maintenance Mode setting
             val prefs = applicationContext.settingsDataStore.data.first()
             maintenanceModeEnabled = prefs[androidx.datastore.preferences.core.booleanPreferencesKey("maintenance_mode")] ?: false
@@ -136,13 +116,8 @@ class SettingsActivity : ComponentActivity() {
         binding.switchDevMode.setOnCheckedChangeListener { _, isChecked ->
             lifecycleScope.launch {
                 SettingsManager(applicationContext).setDevMode(isChecked)
-                binding.btnTestFaceRecognition.visibility = if (isChecked) View.VISIBLE else View.GONE
                 Toast.makeText(this@SettingsActivity, if (isChecked) "Modo Dev Ativado" else "Modo Dev Desativado", Toast.LENGTH_SHORT).show()
             }
-        }
-
-        binding.btnTestFaceRecognition.setOnClickListener {
-            startActivity(Intent(this, FaceRecognitionTestActivity::class.java))
         }
 
         binding.switchDemoMode.setOnCheckedChangeListener { _, isChecked ->
@@ -239,114 +214,6 @@ class SettingsActivity : ComponentActivity() {
                     }
                 } else {
                     binding.txtSyncProgress.text = "Falha no download inicial do manifesto."
-                }
-            }
-        }
-
-        binding.btnUploadDetections.setOnClickListener {
-            binding.txtSyncProgress.visibility = View.VISIBLE
-            binding.txtSyncProgress.text = "Verificando dados de detecção..."
-            lifecycleScope.launch {
-                val db = AppDatabase.get(applicationContext)
-                val count = db.audienceSessionDao().getPendingCount()
-                if (count == 0) {
-                    binding.txtSyncProgress.text = "Nenhum dado de detecção pendente para envio."
-                    Toast.makeText(this@SettingsActivity, "Nenhum dado pendente.", Toast.LENGTH_SHORT).show()
-                    return@launch
-                }
-                
-                binding.txtSyncProgress.text = "Enviando $count detecção(ões) para o Supabase..."
-                val success = AudienceSyncManager(applicationContext).uploadPending()
-                if (success) {
-                    binding.txtSyncProgress.text = "Detecções enviadas com sucesso!"
-                    Toast.makeText(this@SettingsActivity, "Detecções enviadas com sucesso!", Toast.LENGTH_SHORT).show()
-                } else {
-                    binding.txtSyncProgress.text = "Falha ao enviar detecções para o Supabase."
-                    Toast.makeText(this@SettingsActivity, "Falha no envio.", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
-
-        binding.btnUploadPriceQueries.setOnClickListener {
-            binding.txtSyncProgress.visibility = View.VISIBLE
-            binding.txtSyncProgress.text = "Verificando consultas de preços..."
-            lifecycleScope.launch {
-                val db = AppDatabase.get(applicationContext)
-                val count = db.priceQueryEventDao().getPendingCount()
-                if (count == 0) {
-                    binding.txtSyncProgress.text = "Nenhuma consulta de preço pendente para envio."
-                    Toast.makeText(this@SettingsActivity, "Nenhuma consulta pendente.", Toast.LENGTH_SHORT).show()
-                    return@launch
-                }
-                
-                binding.txtSyncProgress.text = "Enviando $count consulta(s) de preços para o Supabase..."
-                val success = PriceAnalyticsSyncManager(applicationContext).uploadPending()
-                if (success) {
-                    binding.txtSyncProgress.text = "Consultas de preços enviadas com sucesso!"
-                    Toast.makeText(this@SettingsActivity, "Consultas enviadas com sucesso!", Toast.LENGTH_SHORT).show()
-                } else {
-                    binding.txtSyncProgress.text = "Falha ao enviar consultas de preços para o Supabase."
-                    Toast.makeText(this@SettingsActivity, "Falha no envio.", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
-
-        binding.btnSimulateQuery.setOnClickListener {
-            val barcode = binding.editSimulateBarcode.text.toString().trim()
-            if (barcode.isBlank()) {
-                Toast.makeText(this, "Digite um código de barras para simular.", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
-
-            binding.txtSyncProgress.visibility = View.VISIBLE
-            binding.txtSyncProgress.text = "Simulando consulta para: $barcode..."
-            lifecycleScope.launch {
-                val engine = PriceQueryEngine(applicationContext, deviceId)
-                val cfg = priceConfig ?: run {
-                    loadDeviceInformation()
-                    priceConfig
-                }
-
-                if (cfg == null) {
-                    withContext(Dispatchers.Main) {
-                        binding.txtSyncProgress.text = "Erro: Configuração de preço não disponível."
-                        AlertDialog.Builder(this@SettingsActivity)
-                            .setTitle("Simulador")
-                            .setMessage("Nenhuma configuração de preço ativa no manifest.json local.")
-                            .setPositiveButton("Ok", null)
-                            .show()
-                    }
-                    return@launch
-                }
-
-                val product = runCatching { engine.query(barcode, cfg, true) }.getOrNull()
-                withContext(Dispatchers.Main) {
-                    binding.txtSyncProgress.text = "Consulta simulada concluída!"
-                    if (product != null) {
-                        val detailText = StringBuilder().apply {
-                            append("EAN: ${product.ean}\n")
-                            append("Descrição: ${product.description}\n")
-                            append("Preço: R$ ${product.price}\n")
-                            append("Preço Original: R$ ${product.originalPrice}\n")
-                            append("Preço Clube: R$ ${product.clubPrice}\n")
-                            append("Offline: ${product.offline}\n")
-                            append("Packs: ${product.packs.size} combo(s)\n")
-                            product.packs.forEach {
-                                append("  - ${it.label}: R$ ${it.price} (unit: R$ ${it.unitPrice})\n")
-                            }
-                        }.toString()
-                        AlertDialog.Builder(this@SettingsActivity)
-                            .setTitle("Produto Retornado")
-                            .setMessage(detailText)
-                            .setPositiveButton("Ok", null)
-                            .show()
-                    } else {
-                        AlertDialog.Builder(this@SettingsActivity)
-                            .setTitle("Produto Retornado")
-                            .setMessage("Nenhum produto correspondente retornado da API local.")
-                            .setPositiveButton("Ok", null)
-                            .show()
-                    }
                 }
             }
         }

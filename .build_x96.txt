@@ -1,0 +1,117 @@
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preLegacyDebugBuild UP-TO-DATE
+> Task :app:mergeLegacyDebugNativeDebugMetadata NO-SOURCE
+> Task :app:checkKotlinGradlePluginConfigurationErrors
+> Task :app:dataBindingMergeDependencyArtifactsLegacyDebug UP-TO-DATE
+> Task :app:generateLegacyDebugResValues UP-TO-DATE
+> Task :app:generateLegacyDebugResources
+> Task :app:packageLegacyDebugResources
+> Task :app:generateLegacyDebugBuildConfig
+> Task :app:checkLegacyDebugAarMetadata UP-TO-DATE
+> Task :app:parseLegacyDebugLocalResources
+> Task :app:mapLegacyDebugSourceSetPaths
+> Task :app:createLegacyDebugCompatibleScreenManifests
+> Task :app:extractDeepLinksLegacyDebug UP-TO-DATE
+> Task :app:processLegacyDebugMainManifest
+> Task :app:processLegacyDebugManifest
+> Task :app:mergeLegacyDebugResources
+> Task :app:javaPreCompileLegacyDebug UP-TO-DATE
+> Task :app:dataBindingGenBaseClassesLegacyDebug UP-TO-DATE
+> Task :app:mergeLegacyDebugShaders UP-TO-DATE
+> Task :app:compileLegacyDebugShaders NO-SOURCE
+> Task :app:generateLegacyDebugAssets UP-TO-DATE
+> Task :app:mergeLegacyDebugAssets UP-TO-DATE
+> Task :app:compressLegacyDebugAssets UP-TO-DATE
+> Task :app:checkLegacyDebugDuplicateClasses UP-TO-DATE
+> Task :app:desugarLegacyDebugFileDependencies UP-TO-DATE
+> Task :app:mergeLegacyDebugStartupProfile UP-TO-DATE
+> Task :app:mergeExtDexLegacyDebug UP-TO-DATE
+> Task :app:mergeLibDexLegacyDebug UP-TO-DATE
+> Task :app:mergeLegacyDebugJniLibFolders UP-TO-DATE
+> Task :app:mergeLegacyDebugNativeLibs UP-TO-DATE
+> Task :app:stripLegacyDebugDebugSymbols UP-TO-DATE
+> Task :app:validateSigningLegacyDebug UP-TO-DATE
+> Task :app:writeLegacyDebugAppMetadata UP-TO-DATE
+> Task :app:writeLegacyDebugSigningConfigVersions UP-TO-DATE
+> Task :app:preModernDebugBuild UP-TO-DATE
+> Task :app:mergeModernDebugNativeDebugMetadata NO-SOURCE
+> Task :app:dataBindingMergeDependencyArtifactsModernDebug UP-TO-DATE
+> Task :app:generateModernDebugResValues UP-TO-DATE
+> Task :app:generateModernDebugResources
+> Task :app:packageModernDebugResources
+> Task :app:generateModernDebugBuildConfig
+> Task :app:checkModernDebugAarMetadata UP-TO-DATE
+> Task :app:parseModernDebugLocalResources
+> Task :app:mapModernDebugSourceSetPaths
+> Task :app:createModernDebugCompatibleScreenManifests
+> Task :app:extractDeepLinksModernDebug UP-TO-DATE
+> Task :app:mergeModernDebugResources
+
+> Task :app:processModernDebugMainManifest
+[EasyLayerUnificadaVarejo_1_0_3.aar] C:\Users\adria\.gradle\caches\transforms-4\1c467fecf84430ab32382675fd838493\transformed\jetified-EasyLayerUnificadaVarejo_1_0_3\AndroidManifest.xml:41:5-73 Warning:
+	Element uses-permission#android.permission.USB_PERMISSION at [EasyLayerUnificadaVarejo_1_0_3.aar] AndroidManifest.xml:41:5-73 duplicated with element declared at [EasyLayerUnificadaVarejo_1_0_3.aar] AndroidManifest.xml:33:5-73
+[EasyLayerUnificadaVarejo_1_0_3.aar] C:\Users\adria\.gradle\caches\transforms-4\1c467fecf84430ab32382675fd838493\transformed\jetified-EasyLayerUnificadaVarejo_1_0_3\AndroidManifest.xml:43:5-45:35 Warning:
+	Element uses-feature#android.hardware.usb.host at [EasyLayerUnificadaVarejo_1_0_3.aar] AndroidManifest.xml:43:5-45:35 duplicated with element declared at [EasyLayerUnificadaVarejo_1_0_3.aar] AndroidManifest.xml:35:5-37:35
+
+> Task :app:dataBindingGenBaseClassesModernDebug UP-TO-DATE
+> Task :app:processModernDebugManifest
+> Task :app:javaPreCompileModernDebug UP-TO-DATE
+> Task :app:mergeModernDebugShaders UP-TO-DATE
+> Task :app:compileModernDebugShaders NO-SOURCE
+> Task :app:generateModernDebugAssets UP-TO-DATE
+> Task :app:mergeModernDebugAssets UP-TO-DATE
+> Task :app:compressModernDebugAssets UP-TO-DATE
+> Task :app:checkModernDebugDuplicateClasses UP-TO-DATE
+> Task :app:desugarModernDebugFileDependencies UP-TO-DATE
+> Task :app:mergeModernDebugStartupProfile UP-TO-DATE
+> Task :app:mergeExtDexModernDebug UP-TO-DATE
+> Task :app:mergeLibDexModernDebug UP-TO-DATE
+> Task :app:mergeModernDebugJniLibFolders UP-TO-DATE
+> Task :app:mergeModernDebugNativeLibs UP-TO-DATE
+> Task :app:stripModernDebugDebugSymbols UP-TO-DATE
+> Task :app:validateSigningModernDebug UP-TO-DATE
+> Task :app:writeModernDebugAppMetadata UP-TO-DATE
+> Task :app:writeModernDebugSigningConfigVersions UP-TO-DATE
+> Task :app:processModernDebugManifestForPackage
+> Task :app:processLegacyDebugManifestForPackage
+> Task :app:processModernDebugResources
+> Task :app:processLegacyDebugResources
+> Task :app:kaptGenerateStubsModernDebugKotlin
+> Task :app:kaptGenerateStubsLegacyDebugKotlin
+> Task :app:kaptLegacyDebugKotlin
+> Task :app:kaptModernDebugKotlin
+> Task :app:compileLegacyDebugKotlin
+> Task :app:compileModernDebugKotlin
+w: file:///C:/src/mplayer_x96/app/src/main/java/com/mupa/player/enterprise/ui/SettingsActivity.kt:265:36 'getColor(Int): Int' is deprecated. Deprecated in Java
+
+> Task :app:compileLegacyDebugKotlin
+w: file:///C:/src/mplayer_x96/app/src/main/java/com/mupa/player/enterprise/ui/SettingsActivity.kt:265:36 'getColor(Int): Int' is deprecated. Deprecated in Java
+
+> Task :app:compileLegacyDebugJavaWithJavac
+> Task :app:dexBuilderLegacyDebug
+> Task :app:mergeLegacyDebugGlobalSynthetics UP-TO-DATE
+> Task :app:processLegacyDebugJavaRes UP-TO-DATE
+> Task :app:mergeLegacyDebugJavaResource UP-TO-DATE
+> Task :app:mergeProjectDexLegacyDebug
+> Task :app:compileModernDebugJavaWithJavac
+> Task :app:dexBuilderModernDebug
+> Task :app:mergeModernDebugGlobalSynthetics UP-TO-DATE
+> Task :app:processModernDebugJavaRes UP-TO-DATE
+> Task :app:mergeModernDebugJavaResource UP-TO-DATE
+> Task :app:packageLegacyDebug
+> Task :app:createLegacyDebugApkListingFileRedirect
+> Task :app:assembleLegacyDebug
+> Task :app:mergeProjectDexModernDebug
+> Task :app:packageModernDebug
+> Task :app:createModernDebugApkListingFileRedirect
+> Task :app:assembleModernDebug
+> Task :app:assembleDebug
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 9.0.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/8.7/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+
+BUILD SUCCESSFUL in 1m 20s
+85 actionable tasks: 39 executed, 46 up-to-date

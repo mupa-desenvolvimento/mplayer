@@ -1,0 +1,63 @@
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/8.7/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preLegacyDebugBuild UP-TO-DATE
+> Task :app:mergeLegacyDebugNativeDebugMetadata NO-SOURCE
+> Task :app:checkKotlinGradlePluginConfigurationErrors
+> Task :app:dataBindingMergeDependencyArtifactsLegacyDebug UP-TO-DATE
+> Task :app:generateLegacyDebugResValues UP-TO-DATE
+> Task :app:generateLegacyDebugResources
+> Task :app:packageLegacyDebugResources
+> Task :app:generateLegacyDebugBuildConfig
+> Task :app:checkLegacyDebugAarMetadata UP-TO-DATE
+> Task :app:mapLegacyDebugSourceSetPaths
+> Task :app:createLegacyDebugCompatibleScreenManifests UP-TO-DATE
+> Task :app:extractDeepLinksLegacyDebug UP-TO-DATE
+> Task :app:parseLegacyDebugLocalResources
+> Task :app:processLegacyDebugMainManifest
+> Task :app:processLegacyDebugManifest
+> Task :app:javaPreCompileLegacyDebug UP-TO-DATE
+> Task :app:mergeLegacyDebugResources
+> Task :app:mergeLegacyDebugShaders UP-TO-DATE
+> Task :app:dataBindingGenBaseClassesLegacyDebug
+> Task :app:compileLegacyDebugShaders NO-SOURCE
+> Task :app:generateLegacyDebugAssets UP-TO-DATE
+> Task :app:mergeLegacyDebugAssets UP-TO-DATE
+> Task :app:compressLegacyDebugAssets UP-TO-DATE
+> Task :app:checkLegacyDebugDuplicateClasses UP-TO-DATE
+> Task :app:desugarLegacyDebugFileDependencies UP-TO-DATE
+> Task :app:mergeLegacyDebugStartupProfile UP-TO-DATE
+> Task :app:mergeExtDexLegacyDebug UP-TO-DATE
+> Task :app:mergeLibDexLegacyDebug UP-TO-DATE
+> Task :app:mergeLegacyDebugJniLibFolders UP-TO-DATE
+> Task :app:mergeLegacyDebugNativeLibs UP-TO-DATE
+> Task :app:stripLegacyDebugDebugSymbols UP-TO-DATE
+> Task :app:validateSigningLegacyDebug UP-TO-DATE
+> Task :app:writeLegacyDebugAppMetadata UP-TO-DATE
+> Task :app:writeLegacyDebugSigningConfigVersions UP-TO-DATE
+> Task :app:processLegacyDebugManifestForPackage
+> Task :app:processLegacyDebugResources
+> Task :app:kaptGenerateStubsLegacyDebugKotlin
+> Task :app:kaptLegacyDebugKotlin
+
+> Task :app:compileLegacyDebugKotlin
+w: file:///C:/src/mplayer_x96/app/src/main/java/com/mupa/player/enterprise/ui/SettingsActivity.kt:265:36 'getColor(Int): Int' is deprecated. Deprecated in Java
+
+> Task :app:compileLegacyDebugJavaWithJavac
+> Task :app:dexBuilderLegacyDebug
+> Task :app:mergeLegacyDebugGlobalSynthetics UP-TO-DATE
+> Task :app:processLegacyDebugJavaRes UP-TO-DATE
+> Task :app:mergeLegacyDebugJavaResource UP-TO-DATE
+> Task :app:mergeProjectDexLegacyDebug
+> Task :app:packageLegacyDebug
+> Task :app:createLegacyDebugApkListingFileRedirect UP-TO-DATE
+> Task :app:assembleLegacyDebug
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 9.0.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/8.7/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+
+BUILD SUCCESSFUL in 1m 3s
+43 actionable tasks: 19 executed, 24 up-to-date

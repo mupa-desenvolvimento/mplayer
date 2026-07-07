@@ -23,11 +23,17 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.mupa.player.enterprise"
+        applicationId = "com.mupa.player.x96"
         minSdk = 21
         targetSdk = 34
-        versionCode = 19
-        versionName = "1.1.8"
+        versionCode = 1
+        versionName = "1.0.0"
+
+        // Dedicated to Android-9-and-below TV boxes with no camera/barcode scanner
+        // (see DeviceIdentityManager.resolveMacAddress()) — every device running this
+        // app uses the WiFi MAC as its serial, must match the ARGOS Agent legacy
+        // flavor's algorithm byte-for-byte so both apps register the same device.
+        buildConfigField("Boolean", "USE_MAC_AS_SERIAL", "true")
 
         fun String.escapeForBuildConfig(): String = replace("\\", "\\\\").replace("\"", "\\\"")
 
@@ -52,11 +58,6 @@ android {
             "String",
             "SUPABASE_COMPANIES_URL",
             "\"https://iurqddkuihjsmxubibao.supabase.co/rest/v1/companies\"",
-        )
-        buildConfigField(
-            "String",
-            "TFLITE_MODELS_BASE_URL",
-            "\"https://pub-0e15cc358ba84ff2a24226b12278433b.r2.dev/tflite/\"",
         )
     }
 
@@ -134,10 +135,6 @@ android {
         }
     }
 
-    @Suppress("UnstableApiUsage")
-    aaptOptions {
-        noCompress("tflite")
-    }
 }
 
 dependencies {
@@ -174,18 +171,6 @@ dependencies {
     implementation("io.coil-kt:coil:2.6.0")
 
     implementation("androidx.palette:palette-ktx:1.0.0")
-
-    val cameraXVersion = "1.3.4"
-    implementation("androidx.camera:camera-camera2:$cameraXVersion")
-    implementation("androidx.camera:camera-lifecycle:$cameraXVersion")
-    implementation("androidx.camera:camera-view:$cameraXVersion")
-
-    // Google ML Kit Face Detection
-    implementation("com.google.mlkit:face-detection:16.1.7")
-
-    // TensorFlow Lite
-    implementation("org.tensorflow:tensorflow-lite:2.14.0")
-    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
 
     add("modernImplementation", files("libs/EasyLayerUnificadaVarejo_1_0_3.aar"))
 

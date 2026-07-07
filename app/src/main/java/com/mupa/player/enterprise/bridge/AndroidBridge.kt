@@ -36,7 +36,6 @@ class AndroidBridge(
         fun toggleKiosk(enabled: Boolean)
         fun hideSystemBars()
         fun showSystemBars()
-        fun scanBarcode(formatsCsv: String?)
     }
 
     @JavascriptInterface
@@ -128,18 +127,6 @@ class AndroidBridge(
     @JavascriptInterface
     fun showSystemBars() {
         commands.showSystemBars()
-    }
-
-    @JavascriptInterface
-    fun scanBarcode(): Boolean {
-        commands.scanBarcode(null)
-        return true
-    }
-
-    @JavascriptInterface
-    fun scanBarcodeFormats(formatsCsv: String): Boolean {
-        commands.scanBarcode(formatsCsv)
-        return true
     }
 
     @JavascriptInterface

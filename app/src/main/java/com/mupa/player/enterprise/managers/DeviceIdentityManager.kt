@@ -5,8 +5,10 @@ import android.os.Build
 import android.provider.Settings
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
+import com.mupa.player.enterprise.BuildConfig
 import com.mupa.player.enterprise.storage.settingsDataStore
 import kotlinx.coroutines.flow.first
+import java.net.NetworkInterface
 import java.util.UUID
 
 class DeviceIdentityManager(private val context: Context) {
@@ -79,6 +81,15 @@ class DeviceIdentityManager(private val context: Context) {
     }
 
     private fun resolveStableHardwareId(): String? {
+        // This app is dedicated to Android-9-and-below TV boxes with no camera/barcode
+        // scanner; must match the ARGOS Agent legacy flavor's algorithm exactly (same
+        // NetworkInterface("wlan0") MAC read, same uppercase-hex-no-separators format)
+        // since the Web panel registration needs both apps to agree on one serial for
+        // the same physical device. Build.getSerial() is unreliable on these devices.
+        if (BuildConfig.USE_MAC_AS_SERIAL) {
+            resolveMacAddress()?.let { return it }
+        }
+
         val zebraId = resolveZebraStableId()
         if (!zebraId.isNullOrBlank()) return zebraId
 
@@ -94,6 +105,20 @@ class DeviceIdentityManager(private val context: Context) {
         if (serial.equals("unknown", ignoreCase = true)) return null
         if (!validate(serial)) return null
         return serial
+    }
+
+    private fun resolveMacAddress(): String? {
+        val mac = runCatching {
+            val interfaces = NetworkInterface.getNetworkInterfaces() ?: return@runCatching null
+            for (iface in interfaces) {
+                if (!iface.name.equals("wlan0", ignoreCase = true)) continue
+                val bytes = iface.hardwareAddress ?: continue
+                val formatted = bytes.joinToString("") { "%02X".format(it) }
+                if (formatted.isNotBlank() && formatted != "000000000000") return@runCatching formatted
+            }
+            null
+        }.getOrNull()
+        return mac?.takeIf { validate(it) }
     }
 
     private fun resolveZebraStableId(): String? {
