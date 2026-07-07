@@ -146,6 +146,28 @@ class PriceQueryEngine(
                 .getOrNull()
         }
 
+        if (config.integration == "integra-americana") {
+            return@withContext runCatching { queryAmericanas(normalizedEan, config, isOnline, filial) }
+                .onFailure {
+                    Log.w(
+                        "MPlayerPrice",
+                        "query_failed integration=integra-americana ean=$normalizedEan err=${it.javaClass.simpleName}:${it.message}",
+                    )
+                }
+                .getOrNull()
+        }
+
+        if (config.integration == "integra-zaffari") {
+            return@withContext runCatching { queryZaffari(normalizedEan, config, isOnline, filial) }
+                .onFailure {
+                    Log.w(
+                        "MPlayerPrice",
+                        "query_failed integration=integra-zaffari ean=$normalizedEan err=${it.javaClass.simpleName}:${it.message}",
+                    )
+                }
+                .getOrNull()
+        }
+
         val startedAt = System.currentTimeMillis()
         val state = JSONObject()
             .put("ean", normalizedEan)
@@ -404,6 +426,400 @@ class PriceQueryEngine(
         }
 
         return product
+    }
+
+    // ────────────���───────────────────────────���────────────────────────────────
+    // Integração Zaffari
+    // API: GET https://zaffariexpress.com.br/api/v1/consultapreco/precos?loja={loja}&ean={ean}
+    // Auth: Bearer JWT (1h) via POST https://zaffariexpress.com.br/api/login/login
+    // Resposta: { success, data: { preco_base, preco_clube, preco_apartirde,
+    //   preco_prop_sellprice, preco_prop_clube, codigo_etiqueta, descricao_produto,
+    //   embalagem_venda, qtd_apartirde, link_imagem, ... } }
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private suspend fun queryZaffari(ean: String, config: PriceConfig, isOnline: Boolean, filial: String): PriceProduct? {
+        val now = System.currentTimeMillis()
+        val cache = db.priceCacheDao().getByEan(ean)
+        val fromCache = cache != null && (now - cache.updatedAtEpochMs) <= config.cacheMinutes * 60 * 1000L
+
+        if (fromCache) {
+            val product = normalizeCachedProduct(parseProductFromCache(ean, cache))
+            insertEvent(ean = ean, filial = filial, responseTimeMs = 0L, fromCache = true, success = product != null)
+            return product
+        }
+
+        if (!isOnline) {
+            val product = normalizeCachedProduct(parseProductFromCache(ean, cache))?.copy(offline = true)
+            insertEvent(ean = ean, filial = filial, responseTimeMs = 0L, fromCache = false, success = product != null)
+            return product
+        }
+
+        val startedAt = System.currentTimeMillis()
+        var product: PriceProduct? = null
+        try {
+            val state = JSONObject()
+                .put("ean", ean)
+                .put("filial", filial)
+                .put("loja", filial)
+                .put("store_id", filial)
+
+            // 1. Autenticação: step "authenticate" obrigatório para obter Bearer token
+            val authStep = config.steps.firstOrNull { it.type == "authenticate" }
+            var bearerToken = ""
+            if (authStep != null) {
+                val cachedToken = sessionState.optString("zaffari_access_token", "")
+                val cachedAt = sessionState.optLong("zaffari_access_token_at", 0L)
+                if (cachedToken.isNotBlank() && (now - cachedAt) < 55 * 60 * 1000L) {
+                    bearerToken = cachedToken
+                } else {
+                    val resp = executeStep(authStep, state)
+                    // A API Zaffari retorna o token no campo "token"
+                    val token = resp.optString("token", "").ifBlank {
+                        resp.optString("access_token", "").ifBlank {
+                            applyMapping(resp, authStep.mapping, state)
+                            state.optString("access_token", "")
+                        }
+                    }
+                    if (token.isNotBlank()) {
+                        bearerToken = token
+                        sessionState.put("zaffari_access_token", token)
+                        sessionState.put("zaffari_access_token_at", now)
+                    }
+                }
+            }
+
+            // 2. Consulta de preço
+            val lookupStep = config.steps.firstOrNull { it.type == "lookup_price" }
+            val priceResp = if (lookupStep != null) {
+                state.put("access_token", bearerToken)
+                executeStep(lookupStep, state)
+            } else {
+                fetchZaffariPrice(ean = ean, loja = filial, bearerToken = bearerToken)
+            }
+
+            // 3. Parse → PriceProduct
+            product = parseZaffariResponse(ean = ean, json = priceResp)?.let { attachLocalImageIfExists(it) }
+
+            if (product != null) {
+                db.priceCacheDao().upsert(
+                    PriceCacheEntity(
+                        ean = ean,
+                        productJson = productToJson(product).toString(),
+                        updatedAtEpochMs = System.currentTimeMillis(),
+                    ),
+                )
+            }
+        } catch (t: Throwable) {
+            Log.w("MPlayerPrice", "query_zaffari_failed ean=$ean err=${t.javaClass.simpleName}:${t.message}")
+        } finally {
+            val took = System.currentTimeMillis() - startedAt
+            insertEvent(ean = ean, filial = filial, responseTimeMs = took, fromCache = false, success = product != null)
+        }
+
+        return product
+    }
+
+    private fun fetchZaffariPrice(ean: String, loja: String, bearerToken: String): JSONObject {
+        val url = "https://zaffariexpress.com.br/api/v1/consultapreco/precos?loja=$loja&ean=$ean"
+        val reqBuilder = Request.Builder().url(url)
+        if (bearerToken.isNotBlank()) {
+            reqBuilder.header("Authorization", "Bearer $bearerToken")
+        }
+        http.newCall(reqBuilder.build()).execute().use { resp ->
+            val body = resp.body?.string().orEmpty()
+            return runCatching { JSONObject(body) }.getOrElse { JSONObject() }
+        }
+    }
+
+    private fun parseZaffariResponse(ean: String, json: JSONObject): PriceProduct? {
+        if (!json.optBoolean("success", true)) return null
+        val data = json.optJSONObject("data") ?: return null
+
+        fun field(key: String): Double? =
+            data.optString(key, "").trim().replace(",", ".").toDoubleOrNull()?.takeIf { it > 0 }
+
+        val precoBase = field("preco_base") ?: return null
+        val precoClube = field("preco_clube")?.takeIf { it < precoBase }
+        val precoApartirde = field("preco_apartirde")?.takeIf { it < precoBase }
+        val precoApartirdeClube = field("preco_apartirdeclube")?.takeIf { it < precoBase }
+        val qtdApartirde = data.optString("qtd_apartirde", "").trim().toIntOrNull() ?: 0
+
+        // preco_prop_* = preço por KG (produtos pesáveis)
+        val precoPropBase = field("preco_prop_sellprice")
+        val precoPropClube = field("preco_prop_clube")?.takeIf { pc -> precoClube != null || (precoPropBase != null && pc < precoPropBase) }
+        val precoPropApartirde = field("preco_prop_apartirde")
+
+        // codigo_etiqueta "2" indica pesável (venda por peso)
+        val codigoEtiqueta = data.optString("codigo_etiqueta", "").trim()
+        val isPesavel = codigoEtiqueta == "2"
+
+        val description = data.optString("descricao_produto", "").ifBlank { null }
+        val embalagVenda = data.optString("embalagem_venda", "UN").ifBlank { "UN" }
+        val clientImageUrl = data.optString("link_imagem", "").ifBlank { null }
+        val codigoProduto = data.optString("codigo_produto", "").ifBlank { null }
+
+        // ── Monta priceSlots (ordem visual: base → pesável/kg → clube → bulk) ──
+        val slots = ArrayList<ProductPriceSlot>()
+
+        if (isPesavel && precoPropBase != null) {
+            // Pesável: mostra preço por KG como slot principal
+            slots += ProductPriceSlot(
+                label = "PREÇO POR KG",
+                value = precoPropBase,
+                field = "price_weighable",
+                isPromo = false,
+                isClub = false,
+            )
+        } else {
+            // Não pesável: slot do preço base
+            slots += ProductPriceSlot(
+                label = "PREÇO/$embalagVenda",
+                value = precoBase,
+                field = "price",
+                isPromo = false,
+                isClub = false,
+            )
+        }
+
+        // Clube (preço unitário)
+        if (precoClube != null) {
+            slots += ProductPriceSlot(
+                label = "CLIENTE CLUBE",
+                value = precoClube,
+                field = "price_club",
+                isPromo = false,
+                isClub = true,
+            )
+        }
+
+        // Clube pesável (preço por kg clube)
+        if (isPesavel && precoPropClube != null) {
+            slots += ProductPriceSlot(
+                label = "CLUBE POR KG",
+                value = precoPropClube,
+                field = "price_club",
+                isPromo = false,
+                isClub = true,
+            )
+        }
+
+        // "A partir de X unidades" (bulk)
+        val bulkPrice = precoApartirdeClube ?: precoApartirde
+        val bulkPropPrice = precoPropApartirde
+        if (bulkPrice != null) {
+            val bulkLabel = if (qtdApartirde > 0) "A PARTIR DE $qtdApartirde UN" else "ATACADO"
+            slots += ProductPriceSlot(
+                label = bulkLabel,
+                value = bulkPrice,
+                field = "price_wholesale",
+                isPromo = precoApartirdeClube != null,
+                isClub = precoApartirdeClube != null,
+            )
+        } else if (isPesavel && bulkPropPrice != null) {
+            val bulkLabel = if (qtdApartirde > 0) "A PARTIR DE $qtdApartirde KG" else "KG ATACADO"
+            slots += ProductPriceSlot(
+                label = bulkLabel,
+                value = bulkPropPrice,
+                field = "price_wholesale",
+                isPromo = false,
+                isClub = false,
+            )
+        }
+
+        // Offer badge para bulk (A partir de X un)
+        val offer: PriceOffer? = if (bulkPrice != null && qtdApartirde > 0) {
+            PriceOffer(
+                enabled = true,
+                title = "A PARTIR DE $qtdApartirde UN",
+                description = null,
+                secondUnit = bulkPrice,
+                type = "bulk",
+            )
+        } else null
+
+        val localImagePath = localProductImagePathIfExists(ean)
+
+        return PriceProduct(
+            id = codigoProduto,
+            ean = ean,
+            description = description,
+            price = if (isPesavel) precoPropBase ?: precoBase else precoBase,
+            originalPrice = null,
+            priceFrom = null,
+            pricePromotional = null,
+            clubPrice = precoClube,
+            priceClub = precoClube,
+            priceWholesale = bulkPrice,
+            priceWeighable = if (isPesavel) precoPropBase else null,
+            cardPrice = null,
+            stock = null,
+            image = localImagePath,
+            clientImageUrl = clientImageUrl,
+            offer = offer,
+            packs = emptyList(),
+            theme = null,
+            offline = false,
+            priceSlots = slots.ifEmpty { null },
+            xmlLayoutType = "multi_price",
+        )
+    }
+
+    private suspend fun queryAmericanas(ean: String, config: PriceConfig, isOnline: Boolean, filial: String): PriceProduct? {
+        val now = System.currentTimeMillis()
+        val cache = db.priceCacheDao().getByEan(ean)
+        val fromCache = cache != null && (now - cache.updatedAtEpochMs) <= config.cacheMinutes * 60 * 1000L
+
+        if (fromCache) {
+            val product = normalizeCachedProduct(parseProductFromCache(ean, cache))
+            insertEvent(ean = ean, filial = filial, responseTimeMs = 0L, fromCache = true, success = product != null)
+            return product
+        }
+
+        if (!isOnline) {
+            val product = normalizeCachedProduct(parseProductFromCache(ean, cache))?.copy(offline = true)
+            insertEvent(ean = ean, filial = filial, responseTimeMs = 0L, fromCache = false, success = product != null)
+            return product
+        }
+
+        val startedAt = System.currentTimeMillis()
+        var product: PriceProduct? = null
+        try {
+            val state = JSONObject()
+                .put("ean", ean)
+                .put("filial", filial)
+                .put("store_id", filial)
+                .put("storeId", filial)
+
+            // 1. Autenticação (Bearer token via step "authenticate", se configurado)
+            val authStep = config.steps.firstOrNull { it.type == "authenticate" }
+            var bearerToken = ""
+            if (authStep != null) {
+                val cachedToken = sessionState.optString("access_token", "")
+                val cachedAt = sessionState.optLong("access_token_at", 0L)
+                if (cachedToken.isNotBlank() && (now - cachedAt) < 50 * 60 * 1000L) {
+                    bearerToken = cachedToken
+                    state.put("access_token", cachedToken)
+                } else {
+                    val resp = executeStep(authStep, state)
+                    applyMapping(resp, authStep.mapping, state)
+                    bearerToken = state.optString("access_token", "")
+                    if (bearerToken.isNotBlank()) {
+                        sessionState.put("access_token", bearerToken)
+                        sessionState.put("access_token_at", now)
+                    }
+                }
+            }
+
+            // 2. Consulta de preço: usa step "lookup_price" se configurado, senão endpoint padrão Americana
+            val lookupStep = config.steps.firstOrNull { it.type == "lookup_price" }
+            val priceResp = if (lookupStep != null) {
+                executeStep(lookupStep, state)
+            } else {
+                fetchAmericanasPrice(ean = ean, storeId = filial, bearerToken = bearerToken)
+            }
+
+            // 3. Parse da resposta → PriceProduct
+            product = parseAmericanasResponse(ean = ean, json = priceResp)?.let { attachLocalImageIfExists(it) }
+
+            if (product != null) {
+                db.priceCacheDao().upsert(
+                    PriceCacheEntity(
+                        ean = ean,
+                        productJson = productToJson(product).toString(),
+                        updatedAtEpochMs = System.currentTimeMillis(),
+                    ),
+                )
+            }
+        } catch (t: Throwable) {
+            Log.w("MPlayerPrice", "query_americana_failed ean=$ean err=${t.javaClass.simpleName}:${t.message}")
+        } finally {
+            val took = System.currentTimeMillis() - startedAt
+            insertEvent(ean = ean, filial = filial, responseTimeMs = took, fromCache = false, success = product != null)
+        }
+
+        return product
+    }
+
+    private fun fetchAmericanasPrice(ean: String, storeId: String, bearerToken: String): JSONObject {
+        val url = "https://pricing-query.azr.internal.americanas.io/price?storeId=$storeId&ean=$ean"
+        val reqBuilder = Request.Builder().url(url)
+        if (bearerToken.isNotBlank()) {
+            reqBuilder.header("Authorization", "Bearer $bearerToken")
+        }
+        http.newCall(reqBuilder.build()).execute().use { resp ->
+            val body = resp.body?.string().orEmpty()
+            return runCatching { JSONObject(body) }.getOrElse { JSONObject() }
+        }
+    }
+
+    private fun parseAmericanasResponse(ean: String, json: JSONObject): PriceProduct? {
+        val items = json.optJSONArray("items") ?: return null
+        if (items.length() == 0) return null
+        val item = items.optJSONObject(0) ?: return null
+
+        val productObj = item.optJSONObject("product")
+        val description = productObj?.optString("description")?.ifBlank { null }
+        val sapId = productObj?.optString("sapId")?.ifBlank { null }
+
+        val regularPrice = item.optDouble("regularPrice", Double.NaN).takeIf { !it.isNaN() && it > 0 }
+
+        val promoObj = item.optJSONObject("promotional")
+        val promoPrice = promoObj?.optDouble("price", Double.NaN)?.takeIf { !it.isNaN() && it > 0 }
+
+        val takeWinObj = item.optJSONObject("takeWin")
+        var offer: PriceOffer? = null
+        val packs = ArrayList<PricePack>()
+        if (takeWinObj != null) {
+            val qty = takeWinObj.optInt("quantity", 0)
+            val totalWithDiscount = takeWinObj.optDouble("totalPriceWithDiscount", Double.NaN).takeIf { !it.isNaN() && it > 0 }
+            val unitWithDiscount = takeWinObj.optDouble("unitPriceWithDiscount", Double.NaN).takeIf { !it.isNaN() && it > 0 }
+            val discountValue = takeWinObj.optDouble("discountValue", Double.NaN).takeIf { !it.isNaN() && it > 0 }
+            val type = takeWinObj.optString("type", "").ifBlank { null }
+
+            if (qty > 0 && totalWithDiscount != null) {
+                packs += PricePack(
+                    label = "Leve $qty unidades",
+                    price = totalWithDiscount,
+                    unitPrice = unitWithDiscount ?: (totalWithDiscount / qty),
+                )
+                offer = PriceOffer(
+                    enabled = true,
+                    title = "COMPRE $qty",
+                    description = discountValue?.let { "Economize R$ ${"%.2f".format(it).replace('.', ',')}" },
+                    secondUnit = unitWithDiscount,
+                    type = type,
+                )
+            }
+        }
+
+        // Se há preço promocional menor que o regular → layout De/Por
+        val hasPromo = promoPrice != null && regularPrice != null && promoPrice < regularPrice
+        val xmlLayoutType = if (hasPromo) "price_check_de_por" else null
+
+        val localImagePath = localProductImagePathIfExists(ean)
+
+        return PriceProduct(
+            id = sapId,
+            ean = ean,
+            description = description,
+            price = regularPrice,
+            originalPrice = if (hasPromo) regularPrice else null,
+            priceFrom = if (hasPromo) regularPrice else null,
+            pricePromotional = if (hasPromo) promoPrice else null,
+            clubPrice = null,
+            priceClub = null,
+            priceWholesale = null,
+            priceWeighable = null,
+            cardPrice = null,
+            stock = null,
+            image = localImagePath,
+            clientImageUrl = null,
+            offer = offer,
+            packs = packs,
+            theme = null,
+            offline = false,
+            xmlLayoutType = xmlLayoutType,
+        )
     }
 
     private fun attachLocalImageIfExists(

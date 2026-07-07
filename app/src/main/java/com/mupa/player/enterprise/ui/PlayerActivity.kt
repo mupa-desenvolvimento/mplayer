@@ -83,6 +83,7 @@ import com.mupa.player.enterprise.price.PriceTheme
 import com.mupa.player.enterprise.price.PriceQueryEngine
 import com.mupa.player.enterprise.price.LayoutConfig
 import com.mupa.player.enterprise.price.PriceSlot
+import com.mupa.player.enterprise.price.ProductPriceSlot
 import android.widget.TextView
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -382,6 +383,8 @@ class PlayerActivity : ComponentActivity() {
         binding.deviceNameText.text = cache?.deviceName?.ifBlank { deviceId } ?: deviceId
         companyId = cache?.company?.trim()?.ifBlank { null }
         ensureAssaiDefaultPriceConfigIfNeeded()
+        ensureAmericanasDefaultPriceConfigIfNeeded()
+        ensureZaffariDefaultPriceConfigIfNeeded()
 
         ensureStoragePermissionIfNeeded()
         tryStartOfflinePlayback()
@@ -1198,6 +1201,10 @@ class PlayerActivity : ComponentActivity() {
                 priceConfig ?: run {
                     if (shouldForceAssaiIntegration()) {
                         ensureAssaiDefaultPriceConfigIfNeeded()
+                    } else if (shouldForceAmericanasIntegration()) {
+                        ensureAmericanasDefaultPriceConfigIfNeeded()
+                    } else if (shouldForceZaffariIntegration()) {
+                        ensureZaffariDefaultPriceConfigIfNeeded()
                     } else {
                         ensureDefaultSupabasePriceConfig()
                     }
@@ -1269,6 +1276,123 @@ class PlayerActivity : ComponentActivity() {
                         id = "5", ean = "TEST_CARTAO", description = "PRODUTO TESTE CARTÃO KOCH",
                         price = 9.99, originalPrice = null, clubPrice = null, cardPrice = 8.99,
                         xmlLayoutType = "price_check_cartao_koch", packs = emptyList(), theme = null, offline = false
+                    )
+                    true
+                }
+                // ── Zaffari ─────────────────────────────────────────────────
+                // Só preço base, sem clube nem bulk
+                "test_zaf_normal" -> {
+                    mockProduct = PriceProduct(
+                        id = "ZAF001", ean = "7898080640413", description = "LEITE CONDENSADO ITALAC 395G",
+                        price = 4.99, originalPrice = null, clubPrice = null,
+                        priceSlots = listOf(
+                            ProductPriceSlot(label = "PREÇO/UN", value = 4.99, field = "price", isPromo = false, isClub = false),
+                        ),
+                        xmlLayoutType = "multi_price", packs = emptyList(), theme = null, offline = false
+                    )
+                    true
+                }
+                // Preço base + preço clube (caixa verde "CLIENTE CLUBE")
+                "test_zaf_clube" -> {
+                    mockProduct = PriceProduct(
+                        id = "ZAF002", ean = "7891000100103", description = "BISCOITO OREO 90G",
+                        price = 4.99, originalPrice = null, clubPrice = 2.19, priceClub = 2.19,
+                        priceSlots = listOf(
+                            ProductPriceSlot(label = "PREÇO/UN", value = 4.99, field = "price", isPromo = false, isClub = false),
+                            ProductPriceSlot(label = "CLIENTE CLUBE", value = 2.19, field = "price_club", isPromo = false, isClub = true),
+                        ),
+                        xmlLayoutType = "multi_price", packs = emptyList(), theme = null, offline = false
+                    )
+                    true
+                }
+                // Preço base + "A PARTIR DE X un" (bulk sem clube)
+                "test_zaf_bulk" -> {
+                    mockProduct = PriceProduct(
+                        id = "ZAF003", ean = "7622210565563", description = "TRIDENT MAX MENTA 16G",
+                        price = 5.99, originalPrice = null, clubPrice = null, priceWholesale = 4.49,
+                        offer = PriceOffer(enabled = true, title = "A PARTIR DE 27 UN", description = null, secondUnit = 4.49, type = "bulk"),
+                        priceSlots = listOf(
+                            ProductPriceSlot(label = "PREÇO/UN", value = 5.99, field = "price", isPromo = false, isClub = false),
+                            ProductPriceSlot(label = "A PARTIR DE 27 UN", value = 4.49, field = "price_wholesale", isPromo = false, isClub = false),
+                        ),
+                        xmlLayoutType = "multi_price", packs = emptyList(), theme = null, offline = false
+                    )
+                    true
+                }
+                // Pesável: preço por KG + preço clube por KG
+                "test_zaf_pesavel" -> {
+                    mockProduct = PriceProduct(
+                        id = "ZAF004", ean = "2133390007187", description = "QUEIJO MUSSARELA FATIADO KG",
+                        price = 49.90, originalPrice = null, clubPrice = 39.90, priceClub = 39.90,
+                        priceWeighable = 49.90,
+                        priceSlots = listOf(
+                            ProductPriceSlot(label = "PREÇO POR KG", value = 49.90, field = "price_weighable", isPromo = false, isClub = false),
+                            ProductPriceSlot(label = "CLIENTE CLUBE", value = 39.90, field = "price_club", isPromo = false, isClub = true),
+                        ),
+                        xmlLayoutType = "multi_price", packs = emptyList(), theme = null, offline = false
+                    )
+                    true
+                }
+                // Preço base + clube + "A PARTIR DE X un" + clube a partir de — todas as camadas
+                "test_zaf_full" -> {
+                    mockProduct = PriceProduct(
+                        id = "ZAF005", ean = "7891000315507", description = "CHOCOLATE LACTA AO LEITE 80G",
+                        price = 5.99, originalPrice = null, clubPrice = 2.19, priceClub = 2.19, priceWholesale = 2.09,
+                        offer = PriceOffer(enabled = true, title = "A PARTIR DE 27 UN", description = null, secondUnit = 2.09, type = "bulk"),
+                        priceSlots = listOf(
+                            ProductPriceSlot(label = "PREÇO/UN", value = 5.99, field = "price", isPromo = false, isClub = false),
+                            ProductPriceSlot(label = "CLIENTE CLUBE", value = 2.19, field = "price_club", isPromo = false, isClub = true),
+                            ProductPriceSlot(label = "A PARTIR DE 27 UN", value = 4.49, field = "price_wholesale", isPromo = false, isClub = false),
+                            ProductPriceSlot(label = "CLUBE 27 UN", value = 2.09, field = "price_club", isPromo = false, isClub = true),
+                        ),
+                        xmlLayoutType = "multi_price", packs = emptyList(), theme = null, offline = false
+                    )
+                    true
+                }
+                // ── Americanas ──────────────────────────────────────────────
+                // Só preço regular, sem promoção
+                "test_ame_normal" -> {
+                    mockProduct = PriceProduct(
+                        id = "AME001", ean = "7891000100103", description = "BISCOITO OREO RECHEADO 90G",
+                        price = 4.99, originalPrice = null, clubPrice = null, pricePromotional = null,
+                        xmlLayoutType = null, packs = emptyList(), theme = null, offline = false
+                    )
+                    true
+                }
+                // Preço regular + preço promocional (layout De / Por)
+                "test_ame_promo" -> {
+                    mockProduct = PriceProduct(
+                        id = "AME002", ean = "7622210565563", description = "TRIDENT MAX MENTA 16G",
+                        price = 5.99, originalPrice = 5.99, clubPrice = null, priceFrom = 5.99, pricePromotional = 5.49,
+                        xmlLayoutType = "price_check_de_por", packs = emptyList(), theme = null, offline = false
+                    )
+                    true
+                }
+                // Só promoção de pacote "Leve Mais" (takeWin), sem desconto de preço unitário
+                "test_ame_bundle" -> {
+                    mockProduct = PriceProduct(
+                        id = "AME003", ean = "7891000315507", description = "CHOCOLATE LACTA AO LEITE 80G",
+                        price = 5.49, originalPrice = null, clubPrice = null, pricePromotional = null,
+                        offer = PriceOffer(
+                            enabled = true, title = "COMPRE 2",
+                            description = "Economize R$ 1,99", secondUnit = 4.50, type = "BUY_N_GET_DISCOUNT"
+                        ),
+                        packs = listOf(PricePack(label = "Leve 2 unidades", price = 8.99, unitPrice = 4.50)),
+                        xmlLayoutType = null, theme = null, offline = false
+                    )
+                    true
+                }
+                // Preço regular + promoção unitária (De/Por) + pacote "Leve Mais" — todas as camadas
+                "test_ame_full" -> {
+                    mockProduct = PriceProduct(
+                        id = "AME004", ean = "7891910000197", description = "NESCAFÉ TRADIÇÃO SOLÚVEL 50G",
+                        price = 12.99, originalPrice = 12.99, clubPrice = null, priceFrom = 12.99, pricePromotional = 10.99,
+                        offer = PriceOffer(
+                            enabled = true, title = "COMPRE 3",
+                            description = "Economize R$ 6,00", secondUnit = 9.99, type = "BUY_N_GET_DISCOUNT"
+                        ),
+                        packs = listOf(PricePack(label = "Leve 3 unidades", price = 29.97, unitPrice = 9.99)),
+                        xmlLayoutType = "price_check_de_por", theme = null, offline = false
                     )
                     true
                 }
@@ -1460,6 +1584,16 @@ class PlayerActivity : ComponentActivity() {
             Log.i("MPlayerPrice", "price_config_applied forced_integration=integra-assai companyId=$companyId")
             return
         }
+        if (shouldForceAmericanasIntegration()) {
+            priceConfig = cfg.copy(integration = "integra-americana")
+            Log.i("MPlayerPrice", "price_config_applied forced_integration=integra-americana companyId=$companyId")
+            return
+        }
+        if (shouldForceZaffariIntegration()) {
+            priceConfig = cfg.copy(integration = "integra-zaffari")
+            Log.i("MPlayerPrice", "price_config_applied forced_integration=integra-zaffari companyId=$companyId")
+            return
+        }
         priceConfig = cfg
         Log.i("MPlayerPrice", "price_config_applied integration=${cfg.integration} companyId=$companyId")
     }
@@ -1467,6 +1601,11 @@ class PlayerActivity : ComponentActivity() {
     private fun shouldForceAssaiIntegration(): Boolean {
         val id = companyId?.trim().orEmpty()
         return id.equals("687b2692-dab7-4934-8ed1-eee6eb02dbb8", ignoreCase = true)
+    }
+
+    private fun shouldForceAmericanasIntegration(): Boolean {
+        val id = companyId?.trim().orEmpty()
+        return id.equals("510a683a-db10-466f-8890-dc8629a36390", ignoreCase = true)
     }
 
     private fun ensureAssaiDefaultPriceConfigIfNeeded() {
@@ -1481,6 +1620,39 @@ class PlayerActivity : ComponentActivity() {
                 analyticsUploadUrl = null,
             )
         Log.i("MPlayerPrice", "price_config_default_assai_applied companyId=$companyId")
+    }
+
+    private fun ensureAmericanasDefaultPriceConfigIfNeeded() {
+        if (!shouldForceAmericanasIntegration()) return
+        if (priceConfig != null) return
+        priceConfig =
+            PriceConfig(
+                integration = "integra-americana",
+                timeoutMs = 8000L,
+                cacheMinutes = 5,
+                steps = emptyList(),
+                analyticsUploadUrl = null,
+            )
+        Log.i("MPlayerPrice", "price_config_default_americana_applied companyId=$companyId")
+    }
+
+    private fun shouldForceZaffariIntegration(): Boolean {
+        val id = companyId?.trim().orEmpty()
+        return id.equals("fd55dbdd-63da-442e-aa99-5575c0496622", ignoreCase = true)
+    }
+
+    private fun ensureZaffariDefaultPriceConfigIfNeeded() {
+        if (!shouldForceZaffariIntegration()) return
+        if (priceConfig != null) return
+        priceConfig =
+            PriceConfig(
+                integration = "integra-zaffari",
+                timeoutMs = 9000L,
+                cacheMinutes = 5,
+                steps = emptyList(),
+                analyticsUploadUrl = null,
+            )
+        Log.i("MPlayerPrice", "price_config_default_zaffari_applied companyId=$companyId")
     }
 
     private fun ensureDefaultSupabasePriceConfig() {
