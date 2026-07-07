@@ -121,16 +121,154 @@
                 android:visibility="gone" />
         </LinearLayout>
 
-        <!-- Container dinâmico para linhas de preço -->
+        <!-- De / Por Estático -->
         <LinearLayout
-            android:id="@+id/price_container"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_marginTop="18dp"
+            android:layout_marginTop="24dp"
             android:orientation="vertical"
+            android:paddingStart="18dp"
+            android:paddingEnd="18dp"
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintTop_toBottomOf="@id/priceBadgesRow" />
+            app:layout_constraintTop_toBottomOf="@id/priceBadgesRow">
+
+            <!-- Seção De -->
+            <LinearLayout
+                android:id="@+id/deSection"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="vertical">
+
+                <com.google.android.material.textview.MaterialTextView
+                    android:id="@+id/priceFromLabel"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="De:"
+                    android:textColor="#9CA3AF"
+                    android:textSize="14sp"
+                    android:layout_marginStart="2dp"
+                    android:layout_marginBottom="6dp" />
+
+                <FrameLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/bg_price_slot_box"
+                    android:paddingStart="14dp"
+                    android:paddingEnd="14dp"
+                    android:paddingTop="6dp"
+                    android:paddingBottom="6dp">
+
+                    <LinearLayout
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="bottom">
+
+                        <com.google.android.material.textview.MaterialTextView
+                            android:id="@+id/priceFromCurrency"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="R$"
+                            android:textSize="14sp"
+                            android:textStyle="bold"
+                            android:textColor="#6B7280"
+                            android:layout_marginBottom="3dp"
+                            android:layout_marginEnd="2dp" />
+
+                        <com.google.android.material.textview.MaterialTextView
+                            android:id="@+id/priceFromInteger"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="0"
+                            android:textSize="28sp"
+                            android:textStyle="bold"
+                            android:textColor="#6B7280"
+                            android:includeFontPadding="false" />
+
+                        <com.google.android.material.textview.MaterialTextView
+                            android:id="@+id/priceFromDecimal"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text=",00"
+                            android:textSize="16sp"
+                            android:textStyle="bold"
+                            android:textColor="#6B7280"
+                            android:layout_marginBottom="5dp"
+                            android:includeFontPadding="false" />
+                    </LinearLayout>
+                </FrameLayout>
+            </LinearLayout>
+
+            <!-- Seção Por -->
+            <LinearLayout
+                android:id="@+id/porSection"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:layout_marginTop="14dp">
+
+                <com.google.android.material.textview.MaterialTextView
+                    android:id="@+id/priceLabel"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Por:"
+                    android:textColor="#ef4444"
+                    android:textSize="16sp"
+                    android:textStyle="bold"
+                    android:layout_marginStart="2dp"
+                    android:layout_marginBottom="6dp" />
+
+                <FrameLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/bg_price_slot_box"
+                    android:paddingStart="18dp"
+                    android:paddingEnd="18dp"
+                    android:paddingTop="10dp"
+                    android:paddingBottom="10dp">
+
+                    <LinearLayout
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="bottom">
+
+                        <com.google.android.material.textview.MaterialTextView
+                            android:id="@+id/priceCurrency"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="R$"
+                            android:textSize="24sp"
+                            android:textStyle="bold"
+                            android:textColor="#ef4444"
+                            android:layout_marginBottom="6dp"
+                            android:layout_marginEnd="4dp" />
+
+                        <com.google.android.material.textview.MaterialTextView
+                            android:id="@+id/priceInteger"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="0"
+                            android:textSize="64sp"
+                            android:textStyle="bold"
+                            android:textColor="#ef4444"
+                            android:includeFontPadding="false" />
+
+                        <com.google.android.material.textview.MaterialTextView
+                            android:id="@+id/priceDecimal"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text=",00"
+                            android:textSize="36sp"
+                            android:textStyle="bold"
+                            android:textColor="#ef4444"
+                            android:layout_marginBottom="16dp"
+                            android:includeFontPadding="false" />
+                    </LinearLayout>
+                </FrameLayout>
+            </LinearLayout>
+        </LinearLayout>
 
         <LinearLayout
             android:id="@+id/priceOfferContainer"
@@ -142,39 +280,8 @@
             android:visibility="gone"
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintTop_toBottomOf="@id/price_container">
-
-            <com.google.android.material.textview.MaterialTextView
-                android:id="@+id/priceOfferText"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:includeFontPadding="false"
-                android:text="Oferta"
-                android:textColor="#FFFFFF"
-                android:textSize="14sp" />
+            app:layout_constraintTop_toBottomOf="@id/priceLeftPanel"> <!-- Placeholder target -->
         </LinearLayout>
-
-        <!-- Removido second unit hardcoded e pacotes, mantendo apenas para compatibilidade de ids se necessário -->
-        <LinearLayout
-            android:id="@+id/priceSecondUnitContainer"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:visibility="gone"
-            app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintTop_toBottomOf="@id/priceOfferContainer">
-            <TextView android:id="@+id/priceSecondUnitLabel" android:layout_width="wrap_content" android:layout_height="wrap_content"/>
-            <TextView android:id="@+id/priceSecondUnitValue" android:layout_width="wrap_content" android:layout_height="wrap_content"/>
-        </LinearLayout>
-
-        <LinearLayout
-            android:id="@+id/pricePacksContainer"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:visibility="gone"
-            app:layout_constraintEnd_toEndOf="parent"
-            app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintTop_toBottomOf="@id/priceSecondUnitContainer" />
 
         <com.google.android.material.textview.MaterialTextView
             android:id="@+id/priceCodeText"
@@ -187,8 +294,7 @@
             android:textSize="12sp"
             app:layout_constraintBottom_toBottomOf="parent"
             app:layout_constraintEnd_toEndOf="parent"
-            app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintTop_toBottomOf="@id/pricePacksContainer" />
+            app:layout_constraintStart_toStartOf="parent" />
     </androidx.constraintlayout.widget.ConstraintLayout>
 
     <FrameLayout
