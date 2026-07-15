@@ -364,6 +364,11 @@ class PlayerActivity : ComponentActivity() {
         super.onStop()
     }
 
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        applyPriceOverlayLayout()
+    }
+
     private suspend fun startLoop() {
         deviceId = intent.getStringExtra(EXTRA_DEVICE_ID)?.trim().orEmpty()
         if (deviceId.isBlank()) {
