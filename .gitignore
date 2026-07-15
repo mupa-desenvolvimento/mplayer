@@ -38,3 +38,17 @@ logo_argos_*.png
 
 # Keras models
 *.h5
+
+# Build outputs / scratch (raiz)
+.build/
+builds/
+.gradle-user/
+.dbg/
+.claude/
+
+# Debug logs / dumps
+*.ndjson
+trae-debug-log-*
+
+# ML models (baixados em runtime via AudienceModelDownloader)
+*.tflite

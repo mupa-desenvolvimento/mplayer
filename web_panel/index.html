@@ -253,7 +253,9 @@
           <div class="split">
             <div class="card">
               <div class="title">Ações rápidas</div>
-              <div class="sub">Envia em <span class="mono">/commands/{deviceId}</span> com timestamp.</div>
+              <div class="sub">
+                Envia em <span class="mono">/m_argos/devices/{deviceId}/command_queue/{command_id}</span>.
+              </div>
               <div style="margin-top: 12px" class="row-1">
                 <div class="row">
                   <button class="primary" data-template="lock_device">Lock</button>
@@ -286,15 +288,15 @@
 
           <div class="split">
             <div class="card">
-              <div class="title">Detalhes (dispositivos/{deviceId})</div>
-              <div class="sub">Mostra o JSON atual do nó do dispositivo.</div>
+              <div class="title">Detalhes (m_argos/devices/{deviceId})</div>
+              <div class="sub">Mostra o JSON atual (config/commands/queue).</div>
               <div style="margin-top: 12px">
                 <textarea id="deviceJson" readonly></textarea>
               </div>
             </div>
 
             <div class="card">
-              <div class="title">Logs (device_logs/{deviceId})</div>
+              <div class="title">Logs (m_argos/device_logs/{deviceId})</div>
               <div class="sub">Últimos 30 ACKs.</div>
               <div style="margin-top: 12px" class="logs" id="logs"></div>
             </div>
@@ -320,10 +322,10 @@
       } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-database.js";
 
       const firebaseConfig = {
-        apiKey: "AIzaSyBMxPXdguRbv1h0VrHDWOQFhjzv5ufTKgg",
-        databaseURL: "https://comandos-1621d-default-rtdb.firebaseio.com",
-        projectId: "comandos-1621d",
-        appId: "1:348140452021:android:0f699372d315b3d2f3e6fc",
+        apiKey: "AIzaSyBRNCqzGbKoBivdGpD-3uHS_Uzm5f9ga40",
+        databaseURL: "https://argos-3b428-default-rtdb.firebaseio.com",
+        projectId: "argos-3b428",
+        appId: "1:827552493755:android:1c0f9b26e7600ffba2b99e",
       };
 
       const app = initializeApp(firebaseConfig);
@@ -349,6 +351,12 @@
 
       els.dbUrl.textContent = firebaseConfig.databaseURL;
 
+      const BASE = "m_argos";
+      function p(path) {
+        const x = String(path || "").replace(/^\/+/, "");
+        return `${BASE}/${x}`;
+      }
+
       function setConn(ok, text) {
         els.connDot.classList.toggle("ok", ok);
         els.connDot.classList.toggle("bad", !ok);
@@ -363,8 +371,26 @@
         return JSON.stringify(value, null, 2);
       }
 
-      function buildCommand(comando, extra = {}) {
-        return { comando, timestamp: nowTs(), ...extra };
+      function randomSuffix() {
+        return Math.random().toString(36).slice(2, 8);
+      }
+
+      function buildCommand(command, params = {}) {
+        const ts = nowTs();
+        return {
+          command_id: `cmd-${ts}-${randomSuffix()}`,
+          command,
+          timestamp: ts,
+          device_id: state.selectedId || "",
+          status: "queued",
+          ack_required: true,
+          created_at: ts,
+          updated_at: ts,
+          retry_count: 0,
+          max_retries: 3,
+          timeout_ms: 300000,
+          params,
+        };
       }
 
       const state = {
@@ -387,10 +413,13 @@
           const deviceNode = document.createElement("div");
           deviceNode.className = "device" + (id === state.selectedId ? " selected" : "");
           const meta = state.devices.get(id);
-          const online =
-            meta && typeof meta === "object"
-              ? meta.online === true || meta.status === "online" || meta.conectado === true
-              : false;
+          const online = (() => {
+            if (!meta || typeof meta !== "object") return false;
+            if (meta.online === true || meta.status === "online" || meta.conectado === true) return true;
+            const updatedAt = Number(meta.updated_at || meta.updatedAt || 0);
+            if (!Number.isFinite(updatedAt) || updatedAt <= 0) return false;
+            return nowTs() - updatedAt <= 3 * 60 * 1000;
+          })();
           deviceNode.innerHTML = `
             <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
               <div class="mono" style="font-weight:650">${escapeHtml(id)}</div>
@@ -421,7 +450,7 @@
         els.commandJson.value = jsonPretty(cmd);
       }
 
-      setDefaultCommandJson(buildCommand("lock_device"));
+      setDefaultCommandJson(buildCommand("kiosk_on"));
 
       async function selectDevice(id) {
         state.selectedId = id;
@@ -439,8 +468,8 @@
         els.deviceJson.value = "";
         els.logs.innerHTML = "";
 
-        const deviceRef = ref(db, `dispositivos/${id}`);
-        const logsRef = query(ref(db, `device_logs/${id}`), limitToLast(30));
+        const deviceRef = ref(db, p(`devices/${id}`));
+        const logsRef = query(ref(db, p(`device_logs/${id}`)), limitToLast(30));
 
         const onDevice = onValue(
           deviceRef,
@@ -501,7 +530,7 @@
 
       async function refreshAll() {
         setConn(true, "Conectado");
-        const snap = await get(ref(db, "dispositivos"));
+        const snap = await get(ref(db, p("device_inventory")));
         const val = snap.val() || {};
         state.devices = new Map(Object.entries(val));
         renderDeviceList();
@@ -521,7 +550,7 @@
       );
 
       onValue(
-        ref(db, "dispositivos"),
+        ref(db, p("device_inventory")),
         (snap) => {
           const val = snap.val() || {};
           state.devices = new Map(Object.entries(val));
@@ -552,7 +581,17 @@
         btn.addEventListener("click", () => {
           const cmd = btn.getAttribute("data-template");
           if (!cmd) return;
-          setDefaultCommandJson(buildCommand(cmd));
+          const mapped = (() => {
+            switch (cmd) {
+              case "lock_device":
+                return { command: "kiosk_on", params: {} };
+              case "unlock_device":
+                return { command: "kiosk_off", params: {} };
+              default:
+                return { command: cmd, params: {} };
+            }
+          })();
+          setDefaultCommandJson(buildCommand(mapped.command, mapped.params));
         });
       });
 
@@ -580,13 +619,28 @@
           setSendStatus("JSON inválido.");
           return;
         }
-        if (!payload.comando) {
-          setSendStatus("Campo 'comando' obrigatório.");
+        const command = String(payload.command || "").trim();
+        if (!command) {
+          setSendStatus("Campo 'command' obrigatório.");
           return;
         }
-        if (!payload.timestamp) payload.timestamp = nowTs();
+        const dangerous = ["reboot_device", "reiniciar", "reboot", "restart_device", "factory_reset", "wipe_device", "reset_factory", "reset_fabrica", "resetar_fabrica"];
+        if (dangerous.includes(command.toLowerCase())) {
+          const ok = confirm(`Você está prestes a enviar um comando perigoso (${command}). Confirmar?`);
+          if (!ok) return;
+        }
 
-        const r = push(ref(db, `commands/${id}`));
+        if (!payload.command_id) payload.command_id = `cmd-${nowTs()}-${randomSuffix()}`;
+        if (!payload.timestamp) payload.timestamp = nowTs();
+        payload.device_id = id;
+        if (!payload.params || typeof payload.params !== "object") payload.params = {};
+        if (!payload.status) payload.status = "queued";
+        payload.updated_at = nowTs();
+        if (!payload.created_at) payload.created_at = payload.timestamp;
+
+        const cmdId = String(payload.command_id || "").trim();
+        const cmdKey = cmdId.replaceAll(".", "_").replaceAll("#", "_").replaceAll("$", "_").replaceAll("[", "_").replaceAll("]", "_").replaceAll("/", "_");
+        const r = ref(db, p(`devices/${id}/command_queue/${cmdKey}`));
         try {
           await set(r, payload);
           setSendStatus("Comando enviado.");
