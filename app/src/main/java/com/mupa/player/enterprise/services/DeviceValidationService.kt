@@ -62,8 +62,8 @@ class DeviceValidationService(private val context: Context) {
 
         val name = obj.optString("apelido_interno", "")
         val filial = obj.optString("num_filial", "")
-        val company = obj.optString("empresa", "").ifBlank { obj.optString("company", "") }
-        val tenant = obj.optString("tenant_id", "").ifBlank { obj.optString("tenant", "") }
+        val company = obj.optString("company_id", "").ifBlank { obj.optString("empresa", "").ifBlank { obj.optString("company", "") } }.trim()
+        val tenant = obj.optString("tenant_id", "").ifBlank { obj.optString("tenant", "") }.trim()
         val dbId = obj.optLong("id", 0L)
         val licenseType = obj.optString("tipo_da_licenca", "").takeIf { it.isNotBlank() && it != "null" }
 
@@ -73,8 +73,8 @@ class DeviceValidationService(private val context: Context) {
             deviceName = name,
             filial = filial,
             company = company,
-            companyCode = obj.optString("empresa", ""),
-            companyName = obj.optString("empresa_nome", ""),
+            companyCode = company,
+            companyName = obj.optString("empresa_nome", "").ifBlank { obj.optString("company_name", "") }.trim(),
             tenant = tenant,
             lastSyncEpochMs = System.currentTimeMillis(),
             deviceRegistered = true,

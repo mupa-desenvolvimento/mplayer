@@ -28,7 +28,7 @@ object PriceConfigParser {
         if (integration.isBlank()) return null
 
         val timeout = root.optLong("timeout", 8000L).coerceAtLeast(1000L)
-        val cacheMin = root.optInt("cache_minutes", 30).coerceAtLeast(0)
+        val cacheMin = 10
         val uploadUrl = root.optString("analytics_upload_url", "").trim().ifBlank { null }
 
         val stepsArr = root.optJSONArray("steps") ?: JSONArray()
