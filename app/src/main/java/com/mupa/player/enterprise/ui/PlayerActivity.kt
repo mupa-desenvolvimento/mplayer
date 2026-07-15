@@ -58,6 +58,7 @@ import com.google.android.material.card.MaterialCardView
 import com.google.android.material.textview.MaterialTextView
 import com.mupa.player.enterprise.audience.AudienceAnalyticsManager
 import com.mupa.player.enterprise.audience.AudienceSyncManager
+import com.mupa.player.enterprise.player.MediaPlayLogsSyncManager
 import com.mupa.player.enterprise.BuildConfig
 import com.mupa.player.enterprise.databinding.ActivityPlayerBinding
 import com.mupa.player.enterprise.demo.DemoColors
@@ -409,6 +410,7 @@ class PlayerActivity : ComponentActivity() {
                 if (isOnline()) {
                     runCatching { AudienceSyncManager(applicationContext).uploadPending() }
                     runCatching { PriceAnalyticsSyncManager(applicationContext).uploadPending() }
+                    runCatching { MediaPlayLogsSyncManager(applicationContext).uploadPending() }
                 }
             }
         }
@@ -879,6 +881,7 @@ class PlayerActivity : ComponentActivity() {
                 volume = item.volume,
                 offsetStartMs = item.offsetStartMs,
                 offsetEndMs = item.offsetEndMs,
+                name = item.name,
             )
         }
     }

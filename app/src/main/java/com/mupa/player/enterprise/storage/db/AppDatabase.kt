@@ -14,8 +14,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         AudienceSessionEntity::class,
         PriceCacheEntity::class,
         PriceQueryEventEntity::class,
+        MediaPlayLogEntity::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -24,6 +25,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun audienceSessionDao(): AudienceSessionDao
     abstract fun priceCacheDao(): PriceCacheDao
     abstract fun priceQueryEventDao(): PriceQueryEventDao
+    abstract fun mediaPlayLogDao(): MediaPlayLogDao
 
     companion object {
         @Volatile
@@ -40,6 +42,7 @@ abstract class AppDatabase : RoomDatabase() {
                     .addMigrations(MIGRATION_2_3)
                     .addMigrations(MIGRATION_3_4)
                     .addMigrations(MIGRATION_4_5)
+                    .addMigrations(MIGRATION_5_6)
                     .build()
                     .also { instance = it }
             }
@@ -119,6 +122,30 @@ abstract class AppDatabase : RoomDatabase() {
             object : Migration(4, 5) {
                 override fun migrate(db: SupportSQLiteDatabase) {
                     db.execSQL("ALTER TABLE price_query_events ADD COLUMN filial TEXT NOT NULL DEFAULT ''")
+                }
+            }
+
+        private val MIGRATION_5_6 =
+            object : Migration(5, 6) {
+                override fun migrate(db: SupportSQLiteDatabase) {
+                    db.execSQL(
+                        """
+                        CREATE TABLE IF NOT EXISTS media_play_logs (
+                          id TEXT NOT NULL PRIMARY KEY,
+                          deviceDbId INTEGER NOT NULL,
+                          deviceId TEXT NOT NULL,
+                          mediaId TEXT NOT NULL,
+                          mediaName TEXT NOT NULL,
+                          mediaType TEXT NOT NULL,
+                          playedAtEpochMs INTEGER NOT NULL,
+                          durationSeconds INTEGER NOT NULL,
+                          uploadedAtEpochMs INTEGER
+                        )
+                        """.trimIndent(),
+                    )
+                    db.execSQL("CREATE INDEX IF NOT EXISTS index_media_play_logs_deviceId ON media_play_logs(deviceId)")
+                    db.execSQL("CREATE INDEX IF NOT EXISTS index_media_play_logs_mediaId ON media_play_logs(mediaId)")
+                    db.execSQL("CREATE INDEX IF NOT EXISTS index_media_play_logs_playedAtEpochMs ON media_play_logs(playedAtEpochMs)")
                 }
             }
     }
