@@ -26,8 +26,8 @@ android {
         applicationId = "com.mupa.player.enterprise"
         minSdk = 21
         targetSdk = 34
-        versionCode = 30
-        versionName = "1.1.19"
+        versionCode = 32
+        versionName = "1.1.21"
 
         fun String.escapeForBuildConfig(): String = replace("\\", "\\\\").replace("\"", "\\\"")
 
@@ -111,6 +111,10 @@ android {
             dimension = "api"
             minSdk = 24
         }
+        create("komprao") {
+            dimension = "api"
+            minSdk = 24
+        }
     }
 
     compileOptions {
@@ -141,6 +145,9 @@ android {
 }
 
 dependencies {
+    // SDK Gertec EasyLayer (scanner do SK100 e outros terminais Gertec)
+    implementation(files("libs/EasyLayerUnificadaVarejo_1_0_3.aar"))
+
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.core:core-splashscreen:1.0.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
@@ -189,6 +196,7 @@ dependencies {
     implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
 
     add("modernImplementation", files("libs/EasyLayerUnificadaVarejo_1_0_3.aar"))
+    add("kompraoImplementation", files("libs/EasyLayerUnificadaVarejo_1_0_3.aar"))
 
     // Unit testing dependencies
     testImplementation("junit:junit:4.13.2")

@@ -34,6 +34,8 @@ class SettingsManager(private val context: Context) {
         val deviceUuid = stringPreferencesKey("device_uuid")
         val devMode = booleanPreferencesKey("dev_mode")
         val demoMode = booleanPreferencesKey("demo_mode")
+        val tcServerAddress = stringPreferencesKey("tc_server_address")
+        val gertecScannerEnabled = booleanPreferencesKey("gertec_scanner_enabled")
     }
 
     val settingsFlow: Flow<AppSettings> =
@@ -97,6 +99,22 @@ class SettingsManager(private val context: Context) {
 
     suspend fun setDemoMode(enabled: Boolean) {
         persistBoolean(Keys.demoMode, LEGACY_KEY_DEMO_MODE, enabled)
+    }
+
+    suspend fun setTcServerAddress(value: String) {
+        context.settingsDataStore.edit { it[Keys.tcServerAddress] = value.trim() }
+    }
+
+    suspend fun getTcServerAddress(): String {
+        return context.settingsDataStore.data.first()[Keys.tcServerAddress]?.trim().orEmpty()
+    }
+
+    suspend fun setGertecScannerEnabled(enabled: Boolean) {
+        context.settingsDataStore.edit { it[Keys.gertecScannerEnabled] = enabled }
+    }
+
+    suspend fun getGertecScannerEnabled(): Boolean {
+        return context.settingsDataStore.data.first()[Keys.gertecScannerEnabled] ?: false
     }
 
     suspend fun getOrCreateDeviceUuid(): String {

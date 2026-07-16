@@ -7,37 +7,28 @@
     android:paddingBottom="10dp"
     android:paddingTop="10dp">
 
+    <!-- Título acima do box (ex: "Produto em oferta!", "CLUBE") -->
     <com.google.android.material.textview.MaterialTextView
         android:id="@+id/slotLabel"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginBottom="6dp"
         android:layout_marginStart="2dp"
-        android:textSize="13sp"
-        android:textColor="#B3FFFFFF"
-        android:textStyle="normal"
-        android:letterSpacing="0.04"
+        android:textSize="15sp"
+        android:textColor="#FFFFFF"
+        android:textStyle="bold"
+        android:letterSpacing="0.02"
         android:maxLines="2"
         android:ellipsize="end" />
-
-    <com.google.android.material.textview.MaterialTextView
-        android:id="@+id/slotFromPrice"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginStart="2dp"
-        android:layout_marginBottom="4dp"
-        android:textSize="14sp"
-        android:textColor="#B3FFFFFF"
-        android:visibility="gone" />
 
     <FrameLayout
         android:id="@+id/slotPriceBox"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:minWidth="120dp"
+        android:minWidth="150dp"
         android:background="@drawable/bg_price_slot_box"
-        android:paddingStart="18dp"
-        android:paddingEnd="18dp"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
         android:paddingTop="10dp"
         android:paddingBottom="10dp">
 
@@ -46,8 +37,21 @@
             android:layout_height="wrap_content"
             android:layout_gravity="center_vertical"
             android:orientation="horizontal"
-            android:gravity="bottom">
+            android:gravity="center_vertical">
 
+            <!-- Label lateral à esquerda do valor: "Preço por un." -->
+            <com.google.android.material.textview.MaterialTextView
+                android:id="@+id/slotUnitLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="8dp"
+                android:text="Preço\npor un."
+                android:textSize="11sp"
+                android:textColor="#111827"
+                android:lineSpacingMultiplier="0.95"
+                android:gravity="start" />
+
+            <!-- Valor grande (R$ + inteiro + decimal) -->
             <com.google.android.material.textview.MaterialTextView
                 android:id="@+id/slotCurrency"
                 android:layout_width="wrap_content"
@@ -56,6 +60,7 @@
                 android:textSize="18sp"
                 android:textStyle="bold"
                 android:textColor="#111827"
+                android:layout_gravity="bottom"
                 android:layout_marginBottom="6dp"
                 android:layout_marginEnd="3dp" />
 
@@ -67,7 +72,8 @@
                 android:textSize="46sp"
                 android:textStyle="bold"
                 android:textColor="#111827"
-                android:includeFontPadding="false" />
+                android:includeFontPadding="false"
+                android:layout_gravity="bottom" />
 
             <com.google.android.material.textview.MaterialTextView
                 android:id="@+id/slotDecimalPrice"
@@ -77,8 +83,21 @@
                 android:textSize="24sp"
                 android:textStyle="bold"
                 android:textColor="#111827"
+                android:layout_gravity="bottom"
                 android:layout_marginBottom="8dp"
                 android:includeFontPadding="false" />
+
+            <!-- Info à direita do valor (ex: "de 24 un", preço riscado) -->
+            <com.google.android.material.textview.MaterialTextView
+                android:id="@+id/slotFromPrice"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:textSize="12sp"
+                android:textColor="#111827"
+                android:layout_gravity="bottom"
+                android:layout_marginBottom="6dp"
+                android:visibility="gone" />
         </LinearLayout>
     </FrameLayout>
 </LinearLayout>

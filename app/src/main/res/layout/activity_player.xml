@@ -427,6 +427,20 @@
 
             </androidx.constraintlayout.widget.ConstraintLayout>
 
+            <!-- Faixa de luz que varre a tela quando o preço aparece -->
+            <View
+                android:id="@+id/priceShine"
+                android:layout_width="360dp"
+                android:layout_height="0dp"
+                android:background="@drawable/bg_price_shine"
+                android:rotation="16"
+                android:clickable="false"
+                android:focusable="false"
+                android:visibility="gone"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintTop_toTopOf="parent"
+                app:layout_constraintStart_toStartOf="parent" />
+
         </androidx.constraintlayout.widget.ConstraintLayout>
 
     </FrameLayout>
