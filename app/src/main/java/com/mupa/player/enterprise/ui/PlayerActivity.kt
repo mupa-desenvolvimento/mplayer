@@ -41,6 +41,7 @@ import android.view.inputmethod.InputMethodManager
 import android.view.animation.OvershootInterpolator
 import android.view.animation.DecelerateInterpolator
 import android.view.animation.AccelerateDecelerateInterpolator
+import androidx.constraintlayout.widget.ConstraintSet
 import android.widget.Toast
 import android.widget.EditText
 import android.text.Editable
@@ -1965,6 +1966,8 @@ class PlayerActivity : ComponentActivity() {
 
                     val layoutType = product.xmlLayoutType ?: priceConfig?.layout?.xmlLayoutType ?: "split"
                     inflateLayoutForProduct(layoutType)
+                    // Adapta imediatamente à orientação atual (portrait/landscape)
+                    applyPriceOverlayLayout()
 
                     val nameText = binding.priceResultRoot.findViewById<TextView>(R.id.priceNameText)
                     val codeText = binding.priceResultRoot.findViewById<TextView>(R.id.priceCodeText)
@@ -2483,44 +2486,62 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private fun applyPriceOverlayLayout() {
-        val set = androidx.constraintlayout.widget.ConstraintSet()
-        set.clone(binding.priceResultRoot)
-        
-        val guideId = if (binding.priceResultRoot.findViewById<View>(R.id.priceLandscapeSplitGuide) != null) {
-            set.create(R.id.priceLandscapeSplitGuide, androidx.constraintlayout.widget.ConstraintSet.HORIZONTAL_GUIDELINE)
-            R.id.priceLandscapeSplitGuide
+        // Só o layout multi_price tem os painéis esquerdo/direito reposicionáveis.
+        val root = binding.priceResultRoot
+        if (root.findViewById<View>(R.id.priceLandscapeSplitGuide) == null) return
+        if (root.findViewById<View>(R.id.priceLeftPanel) == null ||
+            root.findViewById<View>(R.id.priceRightPanel) == null
+        ) return
+
+        val isPortrait = resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
+        val guideId = R.id.priceLandscapeSplitGuide
+
+        val set = ConstraintSet()
+        set.clone(root)
+
+        if (isPortrait) {
+            // Retrato: imagem EM CIMA, informações EMBAIXO (empilhado vertical)
+            set.create(guideId, ConstraintSet.HORIZONTAL_GUIDELINE)
+            set.setGuidelinePercent(guideId, 0.42f)
+
+            set.clear(R.id.priceRightPanel)
+            set.constrainWidth(R.id.priceRightPanel, ConstraintSet.MATCH_CONSTRAINT)
+            set.constrainHeight(R.id.priceRightPanel, ConstraintSet.MATCH_CONSTRAINT)
+            set.connect(R.id.priceRightPanel, ConstraintSet.TOP, ConstraintSet.PARENT_ID, ConstraintSet.TOP)
+            set.connect(R.id.priceRightPanel, ConstraintSet.BOTTOM, guideId, ConstraintSet.TOP)
+            set.connect(R.id.priceRightPanel, ConstraintSet.START, ConstraintSet.PARENT_ID, ConstraintSet.START)
+            set.connect(R.id.priceRightPanel, ConstraintSet.END, ConstraintSet.PARENT_ID, ConstraintSet.END)
+
+            set.clear(R.id.priceLeftPanel)
+            set.constrainWidth(R.id.priceLeftPanel, ConstraintSet.MATCH_CONSTRAINT)
+            set.constrainHeight(R.id.priceLeftPanel, ConstraintSet.MATCH_CONSTRAINT)
+            set.connect(R.id.priceLeftPanel, ConstraintSet.TOP, guideId, ConstraintSet.BOTTOM)
+            set.connect(R.id.priceLeftPanel, ConstraintSet.BOTTOM, ConstraintSet.PARENT_ID, ConstraintSet.BOTTOM)
+            set.connect(R.id.priceLeftPanel, ConstraintSet.START, ConstraintSet.PARENT_ID, ConstraintSet.START)
+            set.connect(R.id.priceLeftPanel, ConstraintSet.END, ConstraintSet.PARENT_ID, ConstraintSet.END)
         } else {
-            R.id.priceImageSplitGuide
+            // Paisagem: informações à ESQUERDA, imagem à DIREITA (aproveita a largura)
+            set.create(guideId, ConstraintSet.VERTICAL_GUIDELINE)
+            set.setGuidelinePercent(guideId, 0.45f)
+
+            set.clear(R.id.priceLeftPanel)
+            set.constrainWidth(R.id.priceLeftPanel, ConstraintSet.MATCH_CONSTRAINT)
+            set.constrainHeight(R.id.priceLeftPanel, ConstraintSet.MATCH_CONSTRAINT)
+            set.connect(R.id.priceLeftPanel, ConstraintSet.TOP, ConstraintSet.PARENT_ID, ConstraintSet.TOP)
+            set.connect(R.id.priceLeftPanel, ConstraintSet.BOTTOM, ConstraintSet.PARENT_ID, ConstraintSet.BOTTOM)
+            set.connect(R.id.priceLeftPanel, ConstraintSet.START, ConstraintSet.PARENT_ID, ConstraintSet.START)
+            set.connect(R.id.priceLeftPanel, ConstraintSet.END, guideId, ConstraintSet.START)
+
+            set.clear(R.id.priceRightPanel)
+            set.constrainWidth(R.id.priceRightPanel, ConstraintSet.MATCH_CONSTRAINT)
+            set.constrainHeight(R.id.priceRightPanel, ConstraintSet.MATCH_CONSTRAINT)
+            set.connect(R.id.priceRightPanel, ConstraintSet.TOP, ConstraintSet.PARENT_ID, ConstraintSet.TOP)
+            set.connect(R.id.priceRightPanel, ConstraintSet.BOTTOM, ConstraintSet.PARENT_ID, ConstraintSet.BOTTOM)
+            set.connect(R.id.priceRightPanel, ConstraintSet.START, guideId, ConstraintSet.END)
+            set.connect(R.id.priceRightPanel, ConstraintSet.END, ConstraintSet.PARENT_ID, ConstraintSet.END)
         }
 
-        // Define a divisão: parte superior (imagem) com 45% da altura
-        set.setGuidelinePercent(guideId, 0.45f)
-
-        // Configura o painel direito (imagem) na parte superior (acima da guia)
-        set.clear(R.id.priceRightPanel)
-        set.constrainWidth(R.id.priceRightPanel, androidx.constraintlayout.widget.ConstraintSet.MATCH_CONSTRAINT)
-        set.constrainHeight(R.id.priceRightPanel, androidx.constraintlayout.widget.ConstraintSet.MATCH_CONSTRAINT)
-        set.connect(R.id.priceRightPanel, androidx.constraintlayout.widget.ConstraintSet.TOP, androidx.constraintlayout.widget.ConstraintSet.PARENT_ID, androidx.constraintlayout.widget.ConstraintSet.TOP)
-        set.connect(R.id.priceRightPanel, androidx.constraintlayout.widget.ConstraintSet.BOTTOM, guideId, androidx.constraintlayout.widget.ConstraintSet.TOP)
-        set.connect(R.id.priceRightPanel, androidx.constraintlayout.widget.ConstraintSet.START, androidx.constraintlayout.widget.ConstraintSet.PARENT_ID, androidx.constraintlayout.widget.ConstraintSet.START)
-        set.connect(R.id.priceRightPanel, androidx.constraintlayout.widget.ConstraintSet.END, androidx.constraintlayout.widget.ConstraintSet.PARENT_ID, androidx.constraintlayout.widget.ConstraintSet.END)
-
-        // Configura o painel esquerdo (informações e preço) na parte inferior (abaixo da guia)
-        set.clear(R.id.priceLeftPanel)
-        set.constrainWidth(R.id.priceLeftPanel, androidx.constraintlayout.widget.ConstraintSet.MATCH_CONSTRAINT)
-        set.constrainHeight(R.id.priceLeftPanel, androidx.constraintlayout.widget.ConstraintSet.MATCH_CONSTRAINT)
-        set.connect(R.id.priceLeftPanel, androidx.constraintlayout.widget.ConstraintSet.TOP, guideId, androidx.constraintlayout.widget.ConstraintSet.BOTTOM)
-        set.connect(R.id.priceLeftPanel, androidx.constraintlayout.widget.ConstraintSet.BOTTOM, androidx.constraintlayout.widget.ConstraintSet.PARENT_ID, androidx.constraintlayout.widget.ConstraintSet.BOTTOM)
-        set.connect(R.id.priceLeftPanel, androidx.constraintlayout.widget.ConstraintSet.START, androidx.constraintlayout.widget.ConstraintSet.PARENT_ID, androidx.constraintlayout.widget.ConstraintSet.START)
-        set.connect(R.id.priceLeftPanel, androidx.constraintlayout.widget.ConstraintSet.END, androidx.constraintlayout.widget.ConstraintSet.PARENT_ID, androidx.constraintlayout.widget.ConstraintSet.END)
-
-        // Ajusta tamanhos de texto caso os TextViews estejam na hierarquia ativa
-        val root = binding.priceResultRoot
-        root.findViewById<TextView>(R.id.priceCurrencyText)?.setTextSize(TypedValue.COMPLEX_UNIT_SP, 28f)
-        root.findViewById<TextView>(R.id.priceIntegerText)?.setTextSize(TypedValue.COMPLEX_UNIT_SP, 92f)
-        root.findViewById<TextView>(R.id.priceDecimalText)?.setTextSize(TypedValue.COMPLEX_UNIT_SP, 44f)
-
-        set.applyTo(binding.priceResultRoot)
+        set.applyTo(root)
     }
 
     private fun renderPrice(value: Double?, animate: Boolean) {
@@ -3299,7 +3320,7 @@ class PlayerActivity : ComponentActivity() {
             isClub -> Color.parseColor("#10b981")
             isPromo -> Color.parseColor("#ef4444")
             isBest -> accentColor
-            else -> Color.parseColor("#FFFFFF")
+            else -> Color.parseColor("#1E6FC4")
         }
         val textColor = idealTextColor(boxColor)
 
@@ -3326,20 +3347,20 @@ class PlayerActivity : ComponentActivity() {
         isBest: Boolean,
         compact: Boolean = false,
     ) {
-        // Com 3+ tipos de preço na tela, reduz um pouco os tamanhos pra caber tudo sem cortar
-        // nem precisar rolar.
+        // Preços bem maiores para leitura a distância (item 1). O melhor preço é o
+        // maior destaque da tela; com 3+ tipos, reduz um pouco (compact) pra caber sem rolar.
         if (isBest) {
-            label.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 13f else 14f)
+            label.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 15f else 18f)
             label.alpha = 1f
-            currency?.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 19f else 22f)
-            integer.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 44f else 54f)
-            decimal.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 24f else 30f)
+            currency?.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 26f else 34f)
+            integer.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 66f else 88f)
+            decimal.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 36f else 46f)
         } else {
-            label.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 11f else 12f)
-            label.alpha = 0.75f
-            currency?.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 13f else 15f)
-            integer.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 30f else 36f)
-            decimal.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 17f else 20f)
+            label.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 12f else 14f)
+            label.alpha = 0.85f
+            currency?.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 18f else 22f)
+            integer.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 40f else 52f)
+            decimal.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 22f else 28f)
         }
     }
 
@@ -3399,6 +3420,40 @@ class PlayerActivity : ComponentActivity() {
 
 
 
+    // Frases comerciais rotativas exibidas quando há oferta (item 3).
+    // Escolha aleatória, sem repetir a mesma frase consecutivamente.
+    private val frasesOferta = listOf(
+        "Produto em oferta. Aproveite!",
+        "Preço especial por tempo limitado!",
+        "Oferta imperdível. Garanta já!",
+        "Economize mais neste produto!",
+        "Promoção exclusiva para você!",
+        "Leve mais, pagando menos!",
+        "Desconto aplicado. Aproveite!",
+        "Oferta do dia. Não perca!",
+        "Preço baixo que vale a pena!",
+        "Seu bolso agradece essa oferta!",
+        "Uma excelente oportunidade de economia!",
+        "Oferta especial esperando por você!",
+        "Mais economia na sua compra!",
+        "Este produto está com preço reduzido!",
+        "Aproveite este desconto exclusivo!",
+        "Qualidade e economia em um só produto!",
+        "Oferta relâmpago. Aproveite agora!",
+        "Mais vantagens para a sua compra!",
+        "Bom preço para você economizar!",
+        "Um ótimo negócio para levar hoje!",
+    )
+    private var ultimaFraseOfertaIdx = -1
+
+    private fun proximaFraseOferta(): String {
+        if (frasesOferta.size <= 1) return frasesOferta.firstOrNull().orEmpty()
+        var idx: Int
+        do { idx = (frasesOferta.indices).random() } while (idx == ultimaFraseOfertaIdx)
+        ultimaFraseOfertaIdx = idx
+        return frasesOferta[idx]
+    }
+
     private fun renderOffer(offer: PriceOffer?, offerContainer: View?, offerText: TextView?) {
         val badgesRow = binding.priceResultRoot.findViewById<View>(R.id.priceBadgesRow)
         val leftBadge = binding.priceResultRoot.findViewById<TextView>(R.id.priceLeftBadgeText)
@@ -3435,9 +3490,9 @@ class PlayerActivity : ComponentActivity() {
             rightBadge?.visibility = View.GONE
         }
 
-        val desc = offer.description?.trim().orEmpty()
-        if (desc.isNotBlank() && offerText != null) {
-            offerText.text = desc
+        // Frase comercial rotativa (item 3): substitui a mensagem estática
+        if (offerText != null) {
+            offerText.text = proximaFraseOferta()
             offerContainer?.visibility = View.VISIBLE
         } else {
             offerContainer?.visibility = View.GONE

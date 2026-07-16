@@ -16,7 +16,7 @@
         android:id="@+id/priceLeftPanel"
         android:layout_width="0dp"
         android:layout_height="match_parent"
-        android:background="#111827"
+        android:background="@drawable/bg_price_panel"
         android:padding="22dp"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toStartOf="@id/priceLandscapeSplitGuide"
@@ -27,7 +27,11 @@
             android:id="@+id/priceNameBar"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:padding="12dp"
+            android:background="@drawable/bg_price_name_bar"
+            android:paddingStart="16dp"
+            android:paddingEnd="16dp"
+            android:paddingTop="14dp"
+            android:paddingBottom="14dp"
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toTopOf="parent">
@@ -46,8 +50,9 @@
                     android:text="PRODUTO"
                     android:textAllCaps="false"
                     android:textColor="#FFFFFF"
-                    android:textSize="28sp"
-                    android:textStyle="bold" />
+                    android:textSize="32sp"
+                    android:textStyle="bold"
+                    android:letterSpacing="0.01" />
 
                 <com.google.android.material.textview.MaterialTextView
                     android:id="@+id/priceSubtitleText"
