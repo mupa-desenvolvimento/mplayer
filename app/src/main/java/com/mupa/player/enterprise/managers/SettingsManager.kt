@@ -21,6 +21,7 @@ data class AppSettings(
     val deviceUuid: String,
     val devMode: Boolean,
     val demoMode: Boolean,
+    val imageSearchEnabled: Boolean,
 )
 
 class SettingsManager(private val context: Context) {
@@ -36,6 +37,7 @@ class SettingsManager(private val context: Context) {
         val demoMode = booleanPreferencesKey("demo_mode")
         val tcServerAddress = stringPreferencesKey("tc_server_address")
         val gertecScannerEnabled = booleanPreferencesKey("gertec_scanner_enabled")
+        val imageSearchEnabled = booleanPreferencesKey("image_search_enabled")
     }
 
     val settingsFlow: Flow<AppSettings> =
@@ -63,6 +65,8 @@ class SettingsManager(private val context: Context) {
                         ?: legacyPrefs.getBoolean(LEGACY_KEY_DEV_MODE, false),
                     demoMode = prefs[Keys.demoMode]
                         ?: legacyPrefs.getBoolean(LEGACY_KEY_DEMO_MODE, false),
+                    imageSearchEnabled = prefs[Keys.imageSearchEnabled]
+                        ?: legacyPrefs.getBoolean(LEGACY_KEY_IMAGE_SEARCH_ENABLED, true),
                 )
             }
             .distinctUntilChanged()
@@ -117,6 +121,10 @@ class SettingsManager(private val context: Context) {
         return context.settingsDataStore.data.first()[Keys.gertecScannerEnabled] ?: false
     }
 
+    suspend fun setImageSearchEnabled(enabled: Boolean) {
+        persistBoolean(Keys.imageSearchEnabled, LEGACY_KEY_IMAGE_SEARCH_ENABLED, enabled)
+    }
+
     suspend fun getOrCreateDeviceUuid(): String {
         val current = context.settingsDataStore.data.first()[Keys.deviceUuid]
             ?: legacyPrefs.getString(LEGACY_KEY_DEVICE_UUID, null)
@@ -165,6 +173,7 @@ class SettingsManager(private val context: Context) {
         private const val LEGACY_KEY_DEVICE_UUID = "device_uuid"
         private const val LEGACY_KEY_DEV_MODE = "dev_mode"
         private const val LEGACY_KEY_DEMO_MODE = "demo_mode"
+        private const val LEGACY_KEY_IMAGE_SEARCH_ENABLED = "image_search_enabled"
 
         private const val ANDROID_ID_BUG = "9774d56d682e549c"
     }

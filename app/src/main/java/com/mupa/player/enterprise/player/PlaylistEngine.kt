@@ -7,11 +7,15 @@ import androidx.media3.common.Player
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import com.mupa.player.enterprise.storage.db.AppDatabase
+import com.mupa.player.enterprise.storage.db.MediaPlayLogEntity
+import com.mupa.player.enterprise.managers.DeviceCacheManager
 
 internal class PlaylistEngine(
     private val context: Context,
@@ -39,11 +43,59 @@ internal class PlaylistEngine(
     private var lastFpsBFrames: Long = 0L
     private var lastFpsBTime: Long = 0L
 
+    private var currentPlayingItem: PlayerEngine.PlaybackItem? = null
+    private var lastSessionItem: PlayerEngine.PlaybackItem? = null
+    private var currentPlayStartRealtime: Long = 0L
+    private var currentPlayStartEpoch: Long = 0L
+
+    private fun startSession(item: PlayerEngine.PlaybackItem) {
+        endSession()
+        currentPlayingItem = item
+        lastSessionItem = item
+        currentPlayStartRealtime = SystemClock.elapsedRealtime()
+        currentPlayStartEpoch = System.currentTimeMillis()
+    }
+
+    private fun endSession() {
+        val item = currentPlayingItem ?: return
+        currentPlayingItem = null
+        val startRealtime = currentPlayStartRealtime
+        val startEpoch = currentPlayStartEpoch
+        currentPlayStartRealtime = 0L
+        currentPlayStartEpoch = 0L
+
+        val durationMs = SystemClock.elapsedRealtime() - startRealtime
+        val durationSec = Math.round(durationMs / 1000.0).coerceAtLeast(0)
+        if (durationSec <= 0) return
+
+        scope.launch(Dispatchers.IO) {
+            val db = AppDatabase.get(context)
+            val cache = runCatching { DeviceCacheManager(context).load() }.getOrNull()
+            val deviceDbId = cache?.deviceDbId
+            val serial = cache?.deviceId ?: ""
+            if (deviceDbId != null) {
+                val log = MediaPlayLogEntity(
+                    id = java.util.UUID.randomUUID().toString(),
+                    deviceDbId = deviceDbId,
+                    deviceId = serial,
+                    mediaId = item.id,
+                    mediaName = item.name ?: item.file.name,
+                    mediaType = item.type,
+                    playedAtEpochMs = startEpoch,
+                    durationSeconds = durationSec,
+                    uploadedAtEpochMs = null
+                )
+                db.mediaPlayLogDao().upsert(log)
+            }
+        }
+    }
+
     fun getCurrentItemId(): String? = currentItemIdRef.get()
 
     fun pause() {
         if (releasedRef.get()) return
         pausedRef.set(true)
+        endSession()
         videoEngine.pause(VideoEngine.Slot.A)
         videoEngine.pause(VideoEngine.Slot.B)
     }
@@ -51,6 +103,7 @@ internal class PlaylistEngine(
     fun resume() {
         if (releasedRef.get()) return
         pausedRef.set(false)
+        lastSessionItem?.let { startSession(it) }
         val type = currentItemTypeRef.get()
         if (!type.equals("video", ignoreCase = true)) return
         val slot = activeVideoSlotRef.get() ?: return
@@ -78,6 +131,7 @@ internal class PlaylistEngine(
                 val first = playlist[index]
                 prepareInto(activeLayer(), activeSlot(), first)
                 startPrepared(activeSlot(), first)
+                startSession(first)
                 layer(activeLayerIndex).container.visibility = View.VISIBLE
                 layer(activeLayerIndex).container.alpha = 1f
 
@@ -100,13 +154,17 @@ internal class PlaylistEngine(
                         index = 0
                         val pFirst = playlist[index]
                         prepareInto(inactive, inactiveSlot, pFirst)
+                        endSession()
                         transitionToPrepared(currentItem, activeLayer(), activeSlot(), inactive, inactiveSlot, pFirst)
+                        startSession(pFirst)
                         clearLayer(activeLayer(), activeSlot())
                         toggleActiveLayer()
                         continue
                     }
 
+                    endSession()
                     transitionToPrepared(currentItem, activeLayer(), activeSlot(), inactive, inactiveSlot, nextItem)
+                    startSession(nextItem)
                     clearLayer(activeLayer(), activeSlot())
                     toggleActiveLayer()
                     index = nextIndex
@@ -126,6 +184,8 @@ internal class PlaylistEngine(
     }
 
     private fun stopInternal() {
+        endSession()
+        lastSessionItem = null
         loopJob?.cancel()
         loopJob = null
         clearLayer(layerA, VideoEngine.Slot.A)

@@ -26,8 +26,8 @@ android {
         applicationId = "com.mupa.player.enterprise"
         minSdk = 21
         targetSdk = 34
-        versionCode = 32
-        versionName = "1.1.21"
+        versionCode = 39
+        versionName = "1.1.28"
 
         fun String.escapeForBuildConfig(): String = replace("\\", "\\\\").replace("\"", "\\\"")
 
@@ -194,9 +194,6 @@ dependencies {
     // TensorFlow Lite
     implementation("org.tensorflow:tensorflow-lite:2.14.0")
     implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
-
-    add("modernImplementation", files("libs/EasyLayerUnificadaVarejo_1_0_3.aar"))
-    add("kompraoImplementation", files("libs/EasyLayerUnificadaVarejo_1_0_3.aar"))
 
     // Unit testing dependencies
     testImplementation("junit:junit:4.13.2")

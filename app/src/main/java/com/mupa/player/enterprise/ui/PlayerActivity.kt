@@ -63,6 +63,7 @@ import com.google.android.material.card.MaterialCardView
 import com.google.android.material.textview.MaterialTextView
 import com.mupa.player.enterprise.audience.AudienceAnalyticsManager
 import com.mupa.player.enterprise.audience.AudienceSyncManager
+import com.mupa.player.enterprise.player.MediaPlayLogsSyncManager
 import com.mupa.player.enterprise.BuildConfig
 import com.mupa.player.enterprise.databinding.ActivityPlayerBinding
 import com.mupa.player.enterprise.demo.DemoColors
@@ -450,6 +451,11 @@ class PlayerActivity : ComponentActivity() {
         super.onStop()
     }
 
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        applyPriceOverlayLayout()
+    }
+
     private suspend fun startLoop() {
         deviceId = intent.getStringExtra(EXTRA_DEVICE_ID)?.trim().orEmpty()
         if (deviceId.isBlank()) {
@@ -495,6 +501,7 @@ class PlayerActivity : ComponentActivity() {
                 if (isOnline()) {
                     runCatching { AudienceSyncManager(applicationContext).uploadPending() }
                     runCatching { PriceAnalyticsSyncManager(applicationContext).uploadPending() }
+                    runCatching { MediaPlayLogsSyncManager(applicationContext).uploadPending() }
                 }
             }
         }
@@ -965,6 +972,7 @@ class PlayerActivity : ComponentActivity() {
                 volume = item.volume,
                 offsetStartMs = item.offsetStartMs,
                 offsetEndMs = item.offsetEndMs,
+                name = item.name,
             )
         }
     }
@@ -1722,7 +1730,7 @@ class PlayerActivity : ComponentActivity() {
             PriceConfig(
                 integration = "integra-assai",
                 timeoutMs = 8000L,
-                cacheMinutes = 3,
+                cacheMinutes = 10,
                 steps = emptyList(),
                 analyticsUploadUrl = null,
             )
@@ -1736,7 +1744,7 @@ class PlayerActivity : ComponentActivity() {
             PriceConfig(
                 integration = "integra-americana",
                 timeoutMs = 8000L,
-                cacheMinutes = 5,
+                cacheMinutes = 10,
                 steps = emptyList(),
                 analyticsUploadUrl = null,
             )
@@ -1934,8 +1942,10 @@ class PlayerActivity : ComponentActivity() {
                 val localPath = localFromProduct ?: engine?.getLocalProductImagePathIfExists(expectedEan)
 
                 // Renderiza o preço imediatamente com a imagem local (se houver);
-                // o download da imagem remota acontece em segundo plano depois
-                val needsBackgroundImageFetch = localPath.isNullOrBlank()
+                // o download da imagem remota acontece em segundo plano depois.
+                // Respeita o toggle imageSearchEnabled (busca de imagem pode ser desligada).
+                val imageSearchEnabled = runCatching { SettingsManager(applicationContext).getSettings().imageSearchEnabled }.getOrElse { true }
+                val needsBackgroundImageFetch = localPath.isNullOrBlank() && imageSearchEnabled
                 var finalImagePath: String? = localPath
                 val finalTheme: PriceTheme? = product.theme
 
@@ -2054,7 +2064,8 @@ class PlayerActivity : ComponentActivity() {
                         price = product.price,
                         oldPrice = product.originalPrice,
                         offer = product.offer,
-                        clubPrice = product.clubPrice
+                        clubPrice = product.clubPrice,
+                        pricePromotional = product.pricePromotional
                     )
 
                     animateOverlayWidgets()
@@ -2307,6 +2318,10 @@ class PlayerActivity : ComponentActivity() {
         hideOverlayJob =
             lifecycleScope.launch {
                 delay(timeoutMs.coerceAtLeast(1000L))
+                // Se o TTS estiver ativo e falando, aguarda terminar antes de fechar o painel
+                while (ttsReady && tts?.isSpeaking == true) {
+                    delay(200L)
+                }
                 setPriceOverlayVisible(false)
             }
     }
@@ -2468,46 +2483,42 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private fun applyPriceOverlayLayout() {
-        val isLandscape = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
         val set = androidx.constraintlayout.widget.ConstraintSet()
         set.clone(binding.priceResultRoot)
-        if (isLandscape) {
-            set.setGuidelinePercent(binding.priceLandscapeSplitGuide.id, 0.50f)
-
-            set.clear(binding.priceLeftPanel.id)
-            set.connect(binding.priceLeftPanel.id, androidx.constraintlayout.widget.ConstraintSet.TOP, androidx.constraintlayout.widget.ConstraintSet.PARENT_ID, androidx.constraintlayout.widget.ConstraintSet.TOP)
-            set.connect(binding.priceLeftPanel.id, androidx.constraintlayout.widget.ConstraintSet.BOTTOM, androidx.constraintlayout.widget.ConstraintSet.PARENT_ID, androidx.constraintlayout.widget.ConstraintSet.BOTTOM)
-            set.connect(binding.priceLeftPanel.id, androidx.constraintlayout.widget.ConstraintSet.START, androidx.constraintlayout.widget.ConstraintSet.PARENT_ID, androidx.constraintlayout.widget.ConstraintSet.START)
-            set.connect(binding.priceLeftPanel.id, androidx.constraintlayout.widget.ConstraintSet.END, binding.priceLandscapeSplitGuide.id, androidx.constraintlayout.widget.ConstraintSet.START)
-
-            set.clear(binding.priceRightPanel.id)
-            set.connect(binding.priceRightPanel.id, androidx.constraintlayout.widget.ConstraintSet.TOP, androidx.constraintlayout.widget.ConstraintSet.PARENT_ID, androidx.constraintlayout.widget.ConstraintSet.TOP)
-            set.connect(binding.priceRightPanel.id, androidx.constraintlayout.widget.ConstraintSet.BOTTOM, androidx.constraintlayout.widget.ConstraintSet.PARENT_ID, androidx.constraintlayout.widget.ConstraintSet.BOTTOM)
-            set.connect(binding.priceRightPanel.id, androidx.constraintlayout.widget.ConstraintSet.START, binding.priceLandscapeSplitGuide.id, androidx.constraintlayout.widget.ConstraintSet.END)
-            set.connect(binding.priceRightPanel.id, androidx.constraintlayout.widget.ConstraintSet.END, androidx.constraintlayout.widget.ConstraintSet.PARENT_ID, androidx.constraintlayout.widget.ConstraintSet.END)
-
-            binding.priceCurrencyText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 30f)
-            binding.priceIntegerText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 98f)
-            binding.priceDecimalText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 46f)
+        
+        val guideId = if (binding.priceResultRoot.findViewById<View>(R.id.priceLandscapeSplitGuide) != null) {
+            set.create(R.id.priceLandscapeSplitGuide, androidx.constraintlayout.widget.ConstraintSet.HORIZONTAL_GUIDELINE)
+            R.id.priceLandscapeSplitGuide
         } else {
-            set.setGuidelinePercent(binding.priceImageSplitGuide.id, 0.45f)
-
-            set.clear(binding.priceRightPanel.id)
-            set.connect(binding.priceRightPanel.id, androidx.constraintlayout.widget.ConstraintSet.TOP, androidx.constraintlayout.widget.ConstraintSet.PARENT_ID, androidx.constraintlayout.widget.ConstraintSet.TOP)
-            set.connect(binding.priceRightPanel.id, androidx.constraintlayout.widget.ConstraintSet.BOTTOM, binding.priceImageSplitGuide.id, androidx.constraintlayout.widget.ConstraintSet.TOP)
-            set.connect(binding.priceRightPanel.id, androidx.constraintlayout.widget.ConstraintSet.START, androidx.constraintlayout.widget.ConstraintSet.PARENT_ID, androidx.constraintlayout.widget.ConstraintSet.START)
-            set.connect(binding.priceRightPanel.id, androidx.constraintlayout.widget.ConstraintSet.END, androidx.constraintlayout.widget.ConstraintSet.PARENT_ID, androidx.constraintlayout.widget.ConstraintSet.END)
-
-            set.clear(binding.priceLeftPanel.id)
-            set.connect(binding.priceLeftPanel.id, androidx.constraintlayout.widget.ConstraintSet.TOP, binding.priceImageSplitGuide.id, androidx.constraintlayout.widget.ConstraintSet.BOTTOM)
-            set.connect(binding.priceLeftPanel.id, androidx.constraintlayout.widget.ConstraintSet.BOTTOM, androidx.constraintlayout.widget.ConstraintSet.PARENT_ID, androidx.constraintlayout.widget.ConstraintSet.BOTTOM)
-            set.connect(binding.priceLeftPanel.id, androidx.constraintlayout.widget.ConstraintSet.START, androidx.constraintlayout.widget.ConstraintSet.PARENT_ID, androidx.constraintlayout.widget.ConstraintSet.START)
-            set.connect(binding.priceLeftPanel.id, androidx.constraintlayout.widget.ConstraintSet.END, androidx.constraintlayout.widget.ConstraintSet.PARENT_ID, androidx.constraintlayout.widget.ConstraintSet.END)
-
-            binding.priceCurrencyText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 28f)
-            binding.priceIntegerText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 92f)
-            binding.priceDecimalText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 44f)
+            R.id.priceImageSplitGuide
         }
+
+        // Define a divisão: parte superior (imagem) com 45% da altura
+        set.setGuidelinePercent(guideId, 0.45f)
+
+        // Configura o painel direito (imagem) na parte superior (acima da guia)
+        set.clear(R.id.priceRightPanel)
+        set.constrainWidth(R.id.priceRightPanel, androidx.constraintlayout.widget.ConstraintSet.MATCH_CONSTRAINT)
+        set.constrainHeight(R.id.priceRightPanel, androidx.constraintlayout.widget.ConstraintSet.MATCH_CONSTRAINT)
+        set.connect(R.id.priceRightPanel, androidx.constraintlayout.widget.ConstraintSet.TOP, androidx.constraintlayout.widget.ConstraintSet.PARENT_ID, androidx.constraintlayout.widget.ConstraintSet.TOP)
+        set.connect(R.id.priceRightPanel, androidx.constraintlayout.widget.ConstraintSet.BOTTOM, guideId, androidx.constraintlayout.widget.ConstraintSet.TOP)
+        set.connect(R.id.priceRightPanel, androidx.constraintlayout.widget.ConstraintSet.START, androidx.constraintlayout.widget.ConstraintSet.PARENT_ID, androidx.constraintlayout.widget.ConstraintSet.START)
+        set.connect(R.id.priceRightPanel, androidx.constraintlayout.widget.ConstraintSet.END, androidx.constraintlayout.widget.ConstraintSet.PARENT_ID, androidx.constraintlayout.widget.ConstraintSet.END)
+
+        // Configura o painel esquerdo (informações e preço) na parte inferior (abaixo da guia)
+        set.clear(R.id.priceLeftPanel)
+        set.constrainWidth(R.id.priceLeftPanel, androidx.constraintlayout.widget.ConstraintSet.MATCH_CONSTRAINT)
+        set.constrainHeight(R.id.priceLeftPanel, androidx.constraintlayout.widget.ConstraintSet.MATCH_CONSTRAINT)
+        set.connect(R.id.priceLeftPanel, androidx.constraintlayout.widget.ConstraintSet.TOP, guideId, androidx.constraintlayout.widget.ConstraintSet.BOTTOM)
+        set.connect(R.id.priceLeftPanel, androidx.constraintlayout.widget.ConstraintSet.BOTTOM, androidx.constraintlayout.widget.ConstraintSet.PARENT_ID, androidx.constraintlayout.widget.ConstraintSet.BOTTOM)
+        set.connect(R.id.priceLeftPanel, androidx.constraintlayout.widget.ConstraintSet.START, androidx.constraintlayout.widget.ConstraintSet.PARENT_ID, androidx.constraintlayout.widget.ConstraintSet.START)
+        set.connect(R.id.priceLeftPanel, androidx.constraintlayout.widget.ConstraintSet.END, androidx.constraintlayout.widget.ConstraintSet.PARENT_ID, androidx.constraintlayout.widget.ConstraintSet.END)
+
+        // Ajusta tamanhos de texto caso os TextViews estejam na hierarquia ativa
+        val root = binding.priceResultRoot
+        root.findViewById<TextView>(R.id.priceCurrencyText)?.setTextSize(TypedValue.COMPLEX_UNIT_SP, 28f)
+        root.findViewById<TextView>(R.id.priceIntegerText)?.setTextSize(TypedValue.COMPLEX_UNIT_SP, 92f)
+        root.findViewById<TextView>(R.id.priceDecimalText)?.setTextSize(TypedValue.COMPLEX_UNIT_SP, 44f)
 
         set.applyTo(binding.priceResultRoot)
     }
@@ -2778,12 +2789,18 @@ class PlayerActivity : ComponentActivity() {
         oldPrice: Double?,
         offer: com.mupa.player.enterprise.price.PriceOffer?,
         clubPrice: Double? = null,
+        pricePromotional: Double? = null,
     ) {
         if (!ttsReady) return
 
         var resolvedPrice = price
         var resolvedOldPrice = oldPrice
         var resolvedClubPrice = clubPrice
+
+        if (pricePromotional != null && pricePromotional > 0.0) {
+            resolvedOldPrice = oldPrice ?: price
+            resolvedPrice = pricePromotional
+        }
 
         // Se preço promocional for maior ou igual ao preço normal de tabela, ignorar preço promocional
         if (resolvedPrice != null && resolvedOldPrice != null && resolvedPrice >= resolvedOldPrice) {

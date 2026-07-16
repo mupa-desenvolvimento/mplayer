@@ -72,7 +72,12 @@ class SettingsActivity : ComponentActivity() {
             binding.txtDeviceName.text = "Nome: ${cache?.deviceName ?: "-"}"
             binding.txtDeviceId.text = "Serial/ID: $deviceId"
             binding.txtPlaylistName.text = "Playlist Ativa: $playlistName"
-            binding.txtCompanyTenant.text = "Empresa: ${cache?.companyName ?: "-"} (Tenant: ${cache?.tenant ?: "-"})"
+            val companyDisplay = if (!cache?.companyName.isNullOrBlank()) {
+                "${cache?.companyName} (${cache?.company})"
+            } else {
+                cache?.company?.ifBlank { null } ?: "-"
+            }
+            binding.txtCompanyTenant.text = "Empresa: $companyDisplay (Tenant: ${cache?.tenant?.ifBlank { null } ?: "-"})"
             binding.editFilial.setText(cache?.filial ?: "")
 
             // Get API endpoints being queried

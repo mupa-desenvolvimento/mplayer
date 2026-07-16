@@ -17,3 +17,13 @@ dependencyResolutionManagement {
 rootProject.name = "mupa_player_enterprise"
 include(":app")
 include(":agent")
+include(":mplayer_renner")
+include(":core-player")
+include(":core-network")
+include(":core-storage")
+include(":core-manifest")
+include(":engage-camera")
+include(":engage-vision")
+include(":engage-analytics")
+include(":engage-tts")
+include(":engage-ui")

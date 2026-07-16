@@ -23,6 +23,7 @@ class PlayerEngine(
         val volume: Float?,
         val offsetStartMs: Long?,
         val offsetEndMs: Long?,
+        val name: String? = null,
     )
 
     data class LayerViews(
