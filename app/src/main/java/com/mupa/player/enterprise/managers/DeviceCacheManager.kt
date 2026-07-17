@@ -21,6 +21,7 @@ data class DeviceCache(
     val lastSyncEpochMs: Long,
     val deviceRegistered: Boolean,
     val tipoDaLicenca: String?,
+    val deviceUuid: String = "",
 )
 
 class DeviceCacheManager(private val context: Context) {
@@ -39,6 +40,7 @@ class DeviceCacheManager(private val context: Context) {
         val rawJson = stringPreferencesKey("device_cache_json")
         val deviceRegistered = booleanPreferencesKey("device_registered")
         val tipoDaLicenca = stringPreferencesKey("tipo_da_licenca")
+        val deviceUuid = stringPreferencesKey("device_uuid")
     }
 
     suspend fun save(cache: DeviceCache) {
@@ -54,6 +56,7 @@ class DeviceCacheManager(private val context: Context) {
             .putLong("ultimo_sync", cache.lastSyncEpochMs)
             .putBoolean("device_registered", cache.deviceRegistered)
             .putString("tipo_da_licenca", cache.tipoDaLicenca)
+            .putString("device_uuid", cache.deviceUuid)
             .apply()
 
         val json = JSONObject()
@@ -68,6 +71,7 @@ class DeviceCacheManager(private val context: Context) {
             .put("ultimo_sync", cache.lastSyncEpochMs)
             .put("device_registered", cache.deviceRegistered)
             .put("tipo_da_licenca", cache.tipoDaLicenca)
+            .put("device_uuid", cache.deviceUuid)
             .toString()
 
         context.settingsDataStore.edit { prefs ->
@@ -83,6 +87,7 @@ class DeviceCacheManager(private val context: Context) {
             prefs[Keys.rawJson] = json
             prefs[Keys.deviceRegistered] = cache.deviceRegistered
             prefs[Keys.tipoDaLicenca] = cache.tipoDaLicenca ?: ""
+            prefs[Keys.deviceUuid] = cache.deviceUuid
         }
     }
 
@@ -103,6 +108,7 @@ class DeviceCacheManager(private val context: Context) {
             lastSyncEpochMs = prefs[Keys.lastSync] ?: legacyPrefs.getLong("ultimo_sync", 0L),
             deviceRegistered = prefs[Keys.deviceRegistered] ?: legacyPrefs.getBoolean("device_registered", false),
             tipoDaLicenca = prefs[Keys.tipoDaLicenca]?.takeIf { it.isNotBlank() } ?: legacyPrefs.getString("tipo_da_licenca", null),
+            deviceUuid = prefs[Keys.deviceUuid] ?: legacyPrefs.getString("device_uuid", "") ?: "",
         )
     }
 

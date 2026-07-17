@@ -23,6 +23,7 @@ import com.mupa.player.enterprise.storage.db.AppDatabase
 import com.mupa.player.enterprise.storage.settingsDataStore
 import com.mupa.player.enterprise.audience.AudienceSyncManager
 import com.mupa.player.enterprise.price.PriceAnalyticsSyncManager
+import com.mupa.player.enterprise.player.MediaPlayLogsSyncManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -291,6 +292,30 @@ class SettingsActivity : ComponentActivity() {
                     Toast.makeText(this@SettingsActivity, "Consultas enviadas com sucesso!", Toast.LENGTH_SHORT).show()
                 } else {
                     binding.txtSyncProgress.text = "Falha ao enviar consultas de preços para o Supabase."
+                    Toast.makeText(this@SettingsActivity, "Falha no envio.", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+
+        binding.btnUploadMediaPlayLogs.setOnClickListener {
+            binding.txtSyncProgress.visibility = View.VISIBLE
+            binding.txtSyncProgress.text = "Verificando relatório de mídias..."
+            lifecycleScope.launch {
+                val db = AppDatabase.get(applicationContext)
+                val count = db.mediaPlayLogDao().getPendingCount()
+                if (count == 0) {
+                    binding.txtSyncProgress.text = "Nenhum log de reprodução de mídia pendente para envio."
+                    Toast.makeText(this@SettingsActivity, "Nenhum log pendente.", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+                
+                binding.txtSyncProgress.text = "Enviando $count log(s) de reprodução de mídias para o Supabase..."
+                val success = MediaPlayLogsSyncManager(applicationContext).uploadPending()
+                if (success) {
+                    binding.txtSyncProgress.text = "Logs de mídias enviados com sucesso!"
+                    Toast.makeText(this@SettingsActivity, "Relatório de mídias enviado com sucesso!", Toast.LENGTH_SHORT).show()
+                } else {
+                    binding.txtSyncProgress.text = "Falha ao enviar relatório de mídias para o Supabase."
                     Toast.makeText(this@SettingsActivity, "Falha no envio.", Toast.LENGTH_SHORT).show()
                 }
             }

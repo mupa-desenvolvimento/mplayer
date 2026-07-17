@@ -381,6 +381,15 @@
                         android:textColor="@color/enterprise_on"
                         android:layout_marginTop="8dp" />
 
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnUploadMediaPlayLogs"
+                        style="@style/Widget.Material3.Button.TonalButton"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Enviar Relatório de Mídias para o Supabase"
+                        android:textColor="@color/enterprise_on"
+                        android:layout_marginTop="8dp" />
+
                     <com.google.android.material.textview.MaterialTextView
                         android:id="@+id/txtSyncProgress"
                         android:layout_width="match_parent"
