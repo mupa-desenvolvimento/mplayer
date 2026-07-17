@@ -26,8 +26,8 @@ android {
         applicationId = "com.mupa.player.enterprise"
         minSdk = 21
         targetSdk = 34
-        versionCode = 39
-        versionName = "1.1.28"
+        versionCode = 40
+        versionName = "1.1.29"
 
         fun String.escapeForBuildConfig(): String = replace("\\", "\\\\").replace("\"", "\\\"")
 

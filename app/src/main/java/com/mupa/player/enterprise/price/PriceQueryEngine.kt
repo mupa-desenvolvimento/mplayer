@@ -1880,69 +1880,71 @@ class PriceQueryEngine(
         }
 
         // ── Fonte da verdade: o array "prices" (o mesmo usado para imprimir a etiqueta).
-        // Só os preços realmente relevantes vêm nele; cada item = { description, value }. ──
-        val pricesArr = data.optJSONArray("prices")
-        val precos = LinkedHashMap<String, Double>()
-        if (pricesArr != null) {
-            for (i in 0 until pricesArr.length()) {
-                val o = pricesArr.optJSONObject(i) ?: continue
-                val desc = o.optString("description", "").trim().uppercase()
-                val value = o.opt("value")?.toString()?.trim()?.toDoubleOrNull()?.takeIf { it > 0 } ?: continue
-                if (desc.isNotBlank()) precos[desc] = value
-            }
-        }
-        if (precos.isEmpty()) return null
+        // Cada item traz { description, value, label, a_partir_de_x }. A label já vem pronta
+        // da API (ex: "OFERTA", "Oferta Clube K:", "A partir de {{a_partir_de_x}} unidades…")
+        // e o {{a_partir_de_x}} é interpolado com a quantidade retornada. ──
+        val pricesArr = data.optJSONArray("prices") ?: return null
 
-        val normal = precos["PRECO_NORMAL"]
-        val pdv = precos["PRECO_PDV"]
-        val atacado = precos["PRECO_PDV_ATACADO"]
-        val clube = precos["PRECO_CLUBE_KOCH"]
-        val levePague = precos["PRECO_LEVEPAGUE"]
+        val slots = ArrayList<ProductPriceSlot>()
+        val precos = LinkedHashMap<String, Double>()
+        var normal: Double? = null
+        var pdv: Double? = null
+        var atacado: Double? = null
+        var clube: Double? = null
+
+        for (i in 0 until pricesArr.length()) {
+            val o = pricesArr.optJSONObject(i) ?: continue
+            val desc = o.optString("description", "").trim().uppercase()
+            val value = o.opt("value")?.toString()?.trim()?.toDoubleOrNull()?.takeIf { it > 0 } ?: continue
+            if (desc.isBlank()) continue
+            precos[desc] = value
+
+            // Label da API, com {{a_partir_de_x}} substituído pela quantidade
+            val aPartirDe = o.opt("a_partir_de_x")?.toString()?.trim()?.toIntOrNull()
+            val label = o.optString("label", "").trim()
+                .replace("{{a_partir_de_x}}", aPartirDe?.toString().orEmpty())
+                .trim()
+                .removeSuffix(":")
+                .trim()
+
+            // Cor/estilo pelo tipo de preço
+            val isClube = desc.contains("CLUBE")
+            val isOferta = !isClube && desc != "PRECO_NORMAL" &&
+                !label.equals("Preço Normal", ignoreCase = true)
+
+            when (desc) {
+                "PRECO_NORMAL" -> normal = value
+                "PRECO_PDV" -> pdv = value
+                "PRECO_PDV_ATACADO" -> atacado = value
+                else -> if (isClube) clube = value
+            }
+
+            slots += ProductPriceSlot(
+                label = label.ifBlank { "PREÇO" },
+                value = value,
+                field = when {
+                    isClube -> "price_club"
+                    isOferta -> "price_wholesale"
+                    else -> "price"
+                },
+                isPromo = isOferta,
+                isClub = isClube,
+            )
+        }
+        if (slots.isEmpty()) return null
 
         // Preço de venda de referência (o "cheio" do dia)
         val precoVenda = pdv ?: normal ?: precos.values.first()
 
-        val slots = ArrayList<ProductPriceSlot>()
-
-        // 1) Preço normal / promoção: se há NORMAL e PDV menor, é oferta (De/Por)
-        if (normal != null && pdv != null && pdv < normal) {
-            slots += ProductPriceSlot(
-                label = "PREÇO NORMAL", value = normal, field = "price",
-                isPromo = false, isClub = false,
-            )
-            slots += ProductPriceSlot(
-                label = "EM PROMOÇÃO", value = pdv, field = "price_wholesale",
-                isPromo = true, isClub = false, fromValue = normal,
-            )
-        } else {
-            slots += ProductPriceSlot(
-                label = "PREÇO NORMAL", value = precoVenda, field = "price",
-                isPromo = false, isClub = false,
-            )
-        }
-
-        // 2) Atacado (a partir de X unidades) — vermelho
-        if (atacado != null && atacado < precoVenda) {
-            slots += ProductPriceSlot(
-                label = "ATACADO", value = atacado, field = "price_wholesale",
-                isPromo = true, isClub = false, fromValue = precoVenda,
-            )
-        }
-
-        // 3) Leve/Pague — vermelho
-        if (levePague != null && levePague < precoVenda) {
-            slots += ProductPriceSlot(
-                label = "LEVE E PAGUE", value = levePague, field = "price_wholesale",
-                isPromo = true, isClub = false, fromValue = precoVenda,
-            )
-        }
-
-        // 4) Clube K — verde
-        if (clube != null && clube < precoVenda) {
-            slots += ProductPriceSlot(
-                label = "CLUBE K", value = clube, field = "price_club",
-                isPromo = false, isClub = true, fromValue = precoVenda,
-            )
+        // Mostra o preço normal riscado dentro do box das ofertas mais baratas
+        val referencia = normal ?: pdv
+        if (referencia != null) {
+            for (i in slots.indices) {
+                val s = slots[i]
+                if ((s.isPromo || s.isClub) && s.value < referencia) {
+                    slots[i] = s.copy(fromValue = referencia)
+                }
+            }
         }
 
         val localImagePath = localProductImagePathIfExists(ean)

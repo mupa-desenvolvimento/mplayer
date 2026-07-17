@@ -41,6 +41,7 @@ import android.view.inputmethod.InputMethodManager
 import android.view.animation.OvershootInterpolator
 import android.view.animation.DecelerateInterpolator
 import android.view.animation.AccelerateDecelerateInterpolator
+import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.constraintlayout.widget.ConstraintSet
 import android.widget.Toast
 import android.widget.EditText
@@ -115,6 +116,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import kotlin.math.roundToInt
 import java.util.UUID
@@ -232,6 +235,36 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private val demoHttp: OkHttpClient by lazy { TlsCompat.newClient() }
+    // #region debug-point A:orientation-debug-reporter
+    private fun debugOrientationEvent(
+        hypothesisId: String,
+        location: String,
+        msg: String,
+        data: JSONObject = JSONObject(),
+    ) {
+        val body =
+            JSONObject()
+                .put("sessionId", "device-orientation-layout")
+                .put("runId", "pre-fix")
+                .put("hypothesisId", hypothesisId)
+                .put("location", location)
+                .put("msg", "[DEBUG] $msg")
+                .put("data", data)
+                .put("ts", System.currentTimeMillis())
+                .toString()
+                .toRequestBody("application/json; charset=utf-8".toMediaType())
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching {
+                demoHttp.newCall(
+                    Request.Builder()
+                        .url("http://127.0.0.1:7777/event")
+                        .post(body)
+                        .build(),
+                ).execute().use { }
+            }
+        }
+    }
+    // #endregion
     private val overlayImageLoader: ImageLoader by lazy { ImageLoader(applicationContext) }
 
     private val cameraPermissionLauncher =
@@ -1930,6 +1963,20 @@ class PlayerActivity : ComponentActivity() {
         val expectedEan = product.ean
         overlayRenderJob =
             lifecycleScope.launch {
+                // #region debug-point B:overlay-render-start
+                debugOrientationEvent(
+                    hypothesisId = "B",
+                    location = "PlayerActivity.showPriceOverlayProduct:start",
+                    msg = "overlay render job started",
+                    data =
+                        JSONObject()
+                            .put("expectedEan", expectedEan)
+                            .put("productLayoutType", product.xmlLayoutType)
+                            .put("overlayVisible", binding.priceOverlay.visibility == View.VISIBLE)
+                            .put("loadingVisible", binding.priceLoadingContainer.visibility == View.VISIBLE)
+                            .put("orientation", resources.configuration.orientation),
+                )
+                // #endregion
                 val engine = priceEngine
                 val cfg = priceConfig
 
@@ -1954,6 +2001,22 @@ class PlayerActivity : ComponentActivity() {
                     finalImagePath = runCatching { engine?.getDefaultProductImagePath() }.getOrNull()
                 }
 
+                // #region debug-point C:overlay-image-prepared
+                debugOrientationEvent(
+                    hypothesisId = "C",
+                    location = "PlayerActivity.showPriceOverlayProduct:image",
+                    msg = "overlay image/theme preflight finished",
+                    data =
+                        JSONObject()
+                            .put("expectedEan", expectedEan)
+                            .put("localPathExists", !localPath.isNullOrBlank())
+                            .put("finalImagePathExists", !finalImagePath.isNullOrBlank())
+                            .put("needsBackgroundImageFetch", needsBackgroundImageFetch)
+                            .put("enginePresent", engine != null)
+                            .put("cfgPresent", cfg != null),
+                )
+                // #endregion
+
                 val prepared =
                     if (!finalImagePath.isNullOrBlank()) {
                         prepareOverlayFromImage(url = finalImagePath, theme = finalTheme)
@@ -1961,8 +2024,36 @@ class PlayerActivity : ComponentActivity() {
                         null
                     }
 
+                // #region debug-point D:before-main-thread-bind
+                debugOrientationEvent(
+                    hypothesisId = "D",
+                    location = "PlayerActivity.showPriceOverlayProduct:pre-main",
+                    msg = "prepared overlay before main-thread bind",
+                    data =
+                        JSONObject()
+                            .put("expectedEan", expectedEan)
+                            .put("preparedPresent", prepared != null)
+                            .put("overlayVisible", binding.priceOverlay.visibility == View.VISIBLE)
+                            .put("loadingVisible", binding.priceLoadingContainer.visibility == View.VISIBLE),
+                )
+                // #endregion
+
                 withContext(Dispatchers.Main) {
-                    if (overlayEan != expectedEan || binding.priceOverlay.visibility != View.VISIBLE) return@withContext
+                    // #region debug-point E:main-thread-guard
+                    if (overlayEan != expectedEan || binding.priceOverlay.visibility != View.VISIBLE) {
+                        debugOrientationEvent(
+                            hypothesisId = "E",
+                            location = "PlayerActivity.showPriceOverlayProduct:guard",
+                            msg = "main-thread bind aborted by guard",
+                            data =
+                                JSONObject()
+                                    .put("expectedEan", expectedEan)
+                                    .put("overlayEan", overlayEan)
+                                    .put("overlayVisible", binding.priceOverlay.visibility == View.VISIBLE),
+                        )
+                        return@withContext
+                    }
+                    // #endregion
 
                     val layoutType = product.xmlLayoutType ?: priceConfig?.layout?.xmlLayoutType ?: "split"
                     inflateLayoutForProduct(layoutType)
@@ -2060,16 +2151,53 @@ class PlayerActivity : ComponentActivity() {
                         .setDuration(220)
                         .start()
 
+                    // #region debug-point F:bind-complete
+                    debugOrientationEvent(
+                        hypothesisId = "F",
+                        location = "PlayerActivity.showPriceOverlayProduct:bound",
+                        msg = "overlay main-thread bind completed",
+                        data =
+                            JSONObject()
+                                .put("expectedEan", expectedEan)
+                                .put("layoutType", layoutType)
+                                .put("resultVisible", binding.priceResultRoot.visibility == View.VISIBLE)
+                                .put("loadingVisible", binding.priceLoadingContainer.visibility == View.VISIBLE)
+                                .put("orientation", resources.configuration.orientation),
+                    )
+                    binding.priceOverlay.postDelayed({
+                        debugOrientationEvent(
+                            hypothesisId = "F",
+                            location = "PlayerActivity.showPriceOverlayProduct:bound+500ms",
+                            msg = "overlay state 500ms after bind",
+                            data =
+                                JSONObject()
+                                    .put("expectedEan", expectedEan)
+                                    .put("resultVisible", binding.priceResultRoot.visibility == View.VISIBLE)
+                                    .put("resultAlpha", binding.priceResultRoot.alpha.toDouble())
+                                    .put("loadingVisible", binding.priceLoadingContainer.visibility == View.VISIBLE)
+                                    .put("loadingAlpha", binding.priceLoadingContainer.alpha.toDouble())
+                                    .put("orientation", resources.configuration.orientation),
+                        )
+                    }, 500L)
+                    // #endregion
+
                     playBeep()
 
-                    speakPriceIfPossible(
-                        ean = product.ean,
-                        price = product.price,
-                        oldPrice = product.originalPrice,
-                        offer = product.offer,
-                        clubPrice = product.clubPrice,
-                        pricePromotional = product.pricePromotional
-                    )
+                    // Quando a integração traz slots com rótulo próprio (ex: Komprão, cuja API
+                    // já devolve a label pronta), a fala é montada a partir desses rótulos.
+                    val slotsParaFala = product.priceSlots
+                    if (!slotsParaFala.isNullOrEmpty()) {
+                        speakSlotsIfPossible(product.ean, slotsParaFala)
+                    } else {
+                        speakPriceIfPossible(
+                            ean = product.ean,
+                            price = product.price,
+                            oldPrice = product.originalPrice,
+                            offer = product.offer,
+                            clubPrice = product.clubPrice,
+                            pricePromotional = product.pricePromotional
+                        )
+                    }
 
                     animateOverlayWidgets()
                     playShineSweep()
@@ -2138,6 +2266,21 @@ class PlayerActivity : ComponentActivity() {
                     }
                 }
             }
+        // #region debug-point G:overlay-render-completion
+        overlayRenderJob?.invokeOnCompletion { throwable ->
+            debugOrientationEvent(
+                hypothesisId = "G",
+                location = "PlayerActivity.showPriceOverlayProduct:completion",
+                msg = "overlay render job finished",
+                data =
+                    JSONObject()
+                        .put("expectedEan", expectedEan)
+                        .put("cancelled", throwable is kotlinx.coroutines.CancellationException)
+                        .put("throwable", throwable?.javaClass?.simpleName ?: "")
+                        .put("message", throwable?.message ?: ""),
+            )
+        }
+        // #endregion
     }
 
     private fun renderPacks(packs: List<PricePack>) {
@@ -2486,62 +2629,64 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private fun applyPriceOverlayLayout() {
-        // Só o layout multi_price tem os painéis esquerdo/direito reposicionáveis.
+        // Reposiciona os painéis de qualquer layout de consulta (split, de_por, multi_price…)
+        // conforme a orientação, manipulando os LayoutParams diretamente (mais confiável que
+        // ConstraintSet neste caso). Retrato = imagem em cima + infos embaixo; paisagem = lado a lado.
         val root = binding.priceResultRoot
-        if (root.findViewById<View>(R.id.priceLandscapeSplitGuide) == null) return
-        if (root.findViewById<View>(R.id.priceLeftPanel) == null ||
-            root.findViewById<View>(R.id.priceRightPanel) == null
-        ) return
+        val left = root.findViewById<View>(R.id.priceLeftPanel) ?: return
+        val right = root.findViewById<View>(R.id.priceRightPanel) ?: return
+        val guide = root.findViewById<androidx.constraintlayout.widget.Guideline>(R.id.priceLandscapeSplitGuide) ?: return
 
-        val isPortrait = resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
-        val guideId = R.id.priceLandscapeSplitGuide
+        val lp = left.layoutParams as? ConstraintLayout.LayoutParams ?: return
+        val rp = right.layoutParams as? ConstraintLayout.LayoutParams ?: return
+        val gp = guide.layoutParams as? ConstraintLayout.LayoutParams ?: return
 
-        val set = ConstraintSet()
-        set.clone(root)
+        val parent = ConstraintLayout.LayoutParams.PARENT_ID
+        val unset = ConstraintLayout.LayoutParams.UNSET
+        val match = 0 // MATCH_CONSTRAINT
+        val isPortrait = resources.displayMetrics.heightPixels >= resources.displayMetrics.widthPixels
 
-        if (isPortrait) {
-            // Retrato: imagem EM CIMA, informações EMBAIXO (empilhado vertical)
-            set.create(guideId, ConstraintSet.HORIZONTAL_GUIDELINE)
-            set.setGuidelinePercent(guideId, 0.42f)
-
-            set.clear(R.id.priceRightPanel)
-            set.constrainWidth(R.id.priceRightPanel, ConstraintSet.MATCH_CONSTRAINT)
-            set.constrainHeight(R.id.priceRightPanel, ConstraintSet.MATCH_CONSTRAINT)
-            set.connect(R.id.priceRightPanel, ConstraintSet.TOP, ConstraintSet.PARENT_ID, ConstraintSet.TOP)
-            set.connect(R.id.priceRightPanel, ConstraintSet.BOTTOM, guideId, ConstraintSet.TOP)
-            set.connect(R.id.priceRightPanel, ConstraintSet.START, ConstraintSet.PARENT_ID, ConstraintSet.START)
-            set.connect(R.id.priceRightPanel, ConstraintSet.END, ConstraintSet.PARENT_ID, ConstraintSet.END)
-
-            set.clear(R.id.priceLeftPanel)
-            set.constrainWidth(R.id.priceLeftPanel, ConstraintSet.MATCH_CONSTRAINT)
-            set.constrainHeight(R.id.priceLeftPanel, ConstraintSet.MATCH_CONSTRAINT)
-            set.connect(R.id.priceLeftPanel, ConstraintSet.TOP, guideId, ConstraintSet.BOTTOM)
-            set.connect(R.id.priceLeftPanel, ConstraintSet.BOTTOM, ConstraintSet.PARENT_ID, ConstraintSet.BOTTOM)
-            set.connect(R.id.priceLeftPanel, ConstraintSet.START, ConstraintSet.PARENT_ID, ConstraintSet.START)
-            set.connect(R.id.priceLeftPanel, ConstraintSet.END, ConstraintSet.PARENT_ID, ConstraintSet.END)
-        } else {
-            // Paisagem: informações à ESQUERDA, imagem à DIREITA (aproveita a largura)
-            set.create(guideId, ConstraintSet.VERTICAL_GUIDELINE)
-            set.setGuidelinePercent(guideId, 0.45f)
-
-            set.clear(R.id.priceLeftPanel)
-            set.constrainWidth(R.id.priceLeftPanel, ConstraintSet.MATCH_CONSTRAINT)
-            set.constrainHeight(R.id.priceLeftPanel, ConstraintSet.MATCH_CONSTRAINT)
-            set.connect(R.id.priceLeftPanel, ConstraintSet.TOP, ConstraintSet.PARENT_ID, ConstraintSet.TOP)
-            set.connect(R.id.priceLeftPanel, ConstraintSet.BOTTOM, ConstraintSet.PARENT_ID, ConstraintSet.BOTTOM)
-            set.connect(R.id.priceLeftPanel, ConstraintSet.START, ConstraintSet.PARENT_ID, ConstraintSet.START)
-            set.connect(R.id.priceLeftPanel, ConstraintSet.END, guideId, ConstraintSet.START)
-
-            set.clear(R.id.priceRightPanel)
-            set.constrainWidth(R.id.priceRightPanel, ConstraintSet.MATCH_CONSTRAINT)
-            set.constrainHeight(R.id.priceRightPanel, ConstraintSet.MATCH_CONSTRAINT)
-            set.connect(R.id.priceRightPanel, ConstraintSet.TOP, ConstraintSet.PARENT_ID, ConstraintSet.TOP)
-            set.connect(R.id.priceRightPanel, ConstraintSet.BOTTOM, ConstraintSet.PARENT_ID, ConstraintSet.BOTTOM)
-            set.connect(R.id.priceRightPanel, ConstraintSet.START, guideId, ConstraintSet.END)
-            set.connect(R.id.priceRightPanel, ConstraintSet.END, ConstraintSet.PARENT_ID, ConstraintSet.END)
+        // Zera todas as âncoras dos dois painéis para reconstruir sem sobras
+        for (p in listOf(lp, rp)) {
+            p.topToTop = unset; p.topToBottom = unset
+            p.bottomToBottom = unset; p.bottomToTop = unset
+            p.startToStart = unset; p.startToEnd = unset
+            p.endToEnd = unset; p.endToStart = unset
         }
 
-        set.applyTo(root)
+        if (isPortrait) {
+            gp.orientation = ConstraintLayout.LayoutParams.HORIZONTAL
+            guide.setGuidelinePercent(0.38f)
+
+            // Imagem (right) EM CIMA
+            rp.width = match; rp.height = match
+            rp.topToTop = parent; rp.startToStart = parent; rp.endToEnd = parent
+            rp.bottomToBottom = R.id.priceLandscapeSplitGuide
+
+            // Infos (left) EMBAIXO
+            lp.width = match; lp.height = match
+            lp.topToTop = R.id.priceLandscapeSplitGuide
+            lp.bottomToBottom = parent; lp.startToStart = parent; lp.endToEnd = parent
+        } else {
+            gp.orientation = ConstraintLayout.LayoutParams.VERTICAL
+            guide.setGuidelinePercent(0.45f)
+
+            // Infos (left) à ESQUERDA
+            lp.width = match; lp.height = match
+            lp.topToTop = parent; lp.bottomToBottom = parent; lp.startToStart = parent
+            lp.endToStart = R.id.priceLandscapeSplitGuide
+
+            // Imagem (right) à DIREITA
+            rp.width = match; rp.height = match
+            rp.topToTop = parent; rp.bottomToBottom = parent; rp.endToEnd = parent
+            rp.startToEnd = R.id.priceLandscapeSplitGuide
+        }
+
+        guide.layoutParams = gp
+        left.layoutParams = lp
+        right.layoutParams = rp
+        Log.i("MPlayerLayout", "applyPriceOverlayLayout isPortrait=$isPortrait")
+        root.requestLayout()
     }
 
     private fun renderPrice(value: Double?, animate: Boolean) {
@@ -2802,6 +2947,48 @@ class PlayerActivity : ComponentActivity() {
                     }
                 }
             }
+    }
+
+    /**
+     * Fala o preço usando os rótulos que a própria integração devolveu (ex: Komprão, cuja API
+     * já manda a label pronta em prices[].label, com {{a_partir_de_x}} já interpolado).
+     *
+     * Regra: preço normal → fala só o valor. Ofertas → fala o rótulo + o valor.
+     * Ex: "7 reais e 19 centavos. A partir de 3 unidades, a unidade sai por 6 reais e 79 centavos."
+     */
+    private fun speakSlotsIfPossible(ean: String, slots: List<ProductPriceSlot>) {
+        if (!ttsReady) return
+        val validos = slots.filter { it.value > 0.0 }
+        if (validos.isEmpty()) return
+
+        val now = SystemClock.elapsedRealtime()
+        if (ean == lastSpokenEan && now - lastSpokenAtMs < 3500L) return
+        lastSpokenEan = ean
+        lastSpokenAtMs = now
+
+        val fala = StringBuilder()
+        for (slot in validos) {
+            val valor = buildSpokenPrice(slot.value)
+            val ehOferta = slot.isPromo || slot.isClub
+            if (ehOferta) {
+                val rotulo = slot.label.trim().trimEnd(':', '.').trim()
+                if (rotulo.isNotBlank()) fala.append("$rotulo, ")
+                fala.append("$valor. ")
+            } else {
+                // Preço normal: fala apenas o valor
+                fala.append("$valor. ")
+            }
+        }
+
+        val texto = fala.toString().trim()
+        if (texto.isBlank()) return
+        val utteranceId = UUID.randomUUID().toString()
+        if (Build.VERSION.SDK_INT >= 21) {
+            tts?.speak(texto, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+        } else {
+            @Suppress("DEPRECATION")
+            tts?.speak(texto, TextToSpeech.QUEUE_FLUSH, null)
+        }
     }
 
     private fun speakPriceIfPossible(
@@ -3201,6 +3388,7 @@ class PlayerActivity : ComponentActivity() {
                     labelTextView, currencyTextView, integerTextView, decimalTextView,
                     isBest = isBest,
                     compact = compact,
+                    value = slot.value,
                 )
                 applyCompactSpacing(itemView, compact)
 
@@ -3283,6 +3471,7 @@ class PlayerActivity : ComponentActivity() {
                 labelTextView, currencyTextView, integerTextView, decimalTextView,
                 isBest = bestValue != null && priceValue == bestValue,
                 compact = compact,
+                value = priceValue,
             )
             applyCompactSpacing(itemView, compact)
 
@@ -3346,21 +3535,32 @@ class PlayerActivity : ComponentActivity() {
         decimal: TextView,
         isBest: Boolean,
         compact: Boolean = false,
+        value: Double = 0.0,
     ) {
         // Preços bem maiores para leitura a distância (item 1). O melhor preço é o
         // maior destaque da tela; com 3+ tipos, reduz um pouco (compact) pra caber sem rolar.
+        // Tamanhos do preço aumentados +25% para leitura a distância.
+        // O fator abaixo encolhe a fonte conforme a parte inteira cresce (ex.: "10,29",
+        // "199,90") para o valor caber numa única linha e manter a harmonia do box.
+        val digits = kotlin.math.abs(value.toInt()).toString().length
+        val fit = when {
+            digits <= 1 -> 1.0f
+            digits == 2 -> 0.82f
+            digits == 3 -> 0.66f
+            else -> 0.55f
+        }
         if (isBest) {
             label.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 15f else 18f)
             label.alpha = 1f
-            currency?.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 26f else 34f)
-            integer.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 66f else 88f)
-            decimal.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 36f else 46f)
+            currency?.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 33f else 43f) * fit)
+            integer.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 83f else 110f) * fit)
+            decimal.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 45f else 58f) * fit)
         } else {
             label.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 12f else 14f)
             label.alpha = 0.85f
-            currency?.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 18f else 22f)
-            integer.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 40f else 52f)
-            decimal.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 22f else 28f)
+            currency?.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 23f else 28f) * fit)
+            integer.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 50f else 65f) * fit)
+            decimal.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 28f else 35f) * fit)
         }
     }
 
