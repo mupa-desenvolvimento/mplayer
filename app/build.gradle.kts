@@ -26,17 +26,23 @@ android {
         applicationId = "com.mupa.player.enterprise"
         minSdk = 21
         targetSdk = 34
-        versionCode = 40
-        versionName = "1.1.29"
+        versionCode = 48
+        versionName = "1.1.32"
 
         fun String.escapeForBuildConfig(): String = replace("\\", "\\\\").replace("\"", "\\\"")
 
         val supabaseToken = (getConfig("SUPABASE_TOKEN") ?: "").trim()
+        val argosOtpSecret = (getConfig("ARGOS_OTP_SECRET") ?: "").trim()
 
         buildConfigField(
             "String",
             "SUPABASE_TOKEN",
             "\"${supabaseToken.escapeForBuildConfig()}\"",
+        )
+        buildConfigField(
+            "String",
+            "ARGOS_OTP_SECRET",
+            "\"${argosOtpSecret.escapeForBuildConfig()}\"",
         )
         buildConfigField(
             "String",
