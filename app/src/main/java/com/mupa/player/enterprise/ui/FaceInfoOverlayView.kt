@@ -49,14 +49,13 @@ class FaceInfoOverlayView @JvmOverloads constructor(
         val pad = textPaint.textSize * 0.4f
 
         for (face in faces) {
-            if (face.boxRight <= face.boxLeft || face.boxBottom <= face.boxTop) continue
+            val box = face.boundingBox ?: continue
+            if (box.right <= box.left || box.bottom <= box.top) continue
 
-            // Mirror X for front camera (face-api works on non-mirrored frame,
-            // but PreviewView shows mirrored image for front camera).
-            val left  = (1f - face.boxRight) * w
-            val right = (1f - face.boxLeft)  * w
-            val top    = face.boxTop    * h
-            val bottom = face.boxBottom * h
+            val left = box.left.toFloat()
+            val right = box.right.toFloat()
+            val top = box.top.toFloat()
+            val bottom = box.bottom.toFloat()
 
             rect.set(left, top, right, bottom)
             canvas.drawRect(rect, boxPaint)
@@ -101,9 +100,6 @@ class FaceInfoOverlayView @JvmOverloads constructor(
                 }
             } ?: "N/D"
         parts += "Gênero: $genderLabel"
-
-        val emotionLabel = face.emotion?.takeIf { it.isNotBlank() } ?: "N/D"
-        parts += "Emoção: $emotionLabel"
 
         return parts
     }
