@@ -55,15 +55,21 @@ class AudienceAnalyticsNativeEngine(
                 .build()
             faceDetector = FaceDetection.getClient(options)
 
-            val ageGenderFile = File(modelsDir, "age_gender_model.tflite")
-            if (ageGenderFile.exists()) {
-                ageGenderInterpreter = Interpreter(ageGenderFile)
-            }
-
-            val faceRecFile = File(modelsDir, "mobilefacenet.tflite")
-            if (faceRecFile.exists()) {
-                faceRecInterpreter = Interpreter(faceRecFile)
-            }
+            // TFLite (idade/gênero e reconhecimento facial) desativado temporariamente: o
+            // Interpreter.run()/runForMultipleInputsOutputs() estava causando SIGSEGV nativo
+            // (libtensorflowlite_jni.so) que derrubava o processo inteiro do app repetidamente
+            // em produção. Enquanto a causa raiz não é corrigida, seguimos só com a detecção de
+            // rosto do ML Kit (isLooking / bounding box) — idade, gênero e faceHash caem no
+            // fallback heurístico já existente mais abaixo.
+            // val ageGenderFile = File(modelsDir, "age_gender_model.tflite")
+            // if (ageGenderFile.exists()) {
+            //     ageGenderInterpreter = Interpreter(ageGenderFile)
+            // }
+            //
+            // val faceRecFile = File(modelsDir, "mobilefacenet.tflite")
+            // if (faceRecFile.exists()) {
+            //     faceRecInterpreter = Interpreter(faceRecFile)
+            // }
             true
         } catch (e: Exception) {
             e.printStackTrace()
@@ -116,7 +122,10 @@ class AudienceAnalyticsNativeEngine(
             val w = bounds.width().coerceAtMost(rotatedBitmap.width - x)
             val h = bounds.height().coerceAtMost(rotatedBitmap.height - y)
 
-            val faceBitmap = if (w > 0 && h > 0) {
+            // Só recorta o rosto quando algum modelo TFLite está carregado (idade/gênero ou
+            // reconhecimento). Sem eles, o crop era criado e reciclado à toa a cada rosto/frame.
+            val needsCrop = ageGenderInterpreter != null || faceRecInterpreter != null
+            val faceBitmap = if (needsCrop && w > 0 && h > 0) {
                 Bitmap.createBitmap(rotatedBitmap, x, y, w, h)
             } else {
                 null
@@ -186,25 +195,20 @@ class AudienceAnalyticsNativeEngine(
                 }
             }
 
-            // Fallback if interpreter is not loaded or failed
-            if (estimatedAge == null) {
-                estimatedAge = (Math.abs(bounds.width()) % 40) + 15
-            }
-            if (gender == null) {
-                gender = if (bounds.height() % 2 == 0) "Male" else "Female"
-            }
-            if (confidence == null) {
-                confidence = 0.8f + (Math.abs(bounds.left) % 20) / 100.0f
-            }
-
-            val ageRange = when {
-                estimatedAge < 18 -> "0-17"
-                estimatedAge < 25 -> "18-24"
-                estimatedAge < 35 -> "25-34"
-                estimatedAge < 45 -> "35-44"
-                estimatedAge < 55 -> "45-54"
-                estimatedAge < 65 -> "55-64"
-                else -> "65+"
+            // Sem TFLite de idade/gênero, NÃO inventamos valores: idade/gênero/confiança ficam
+            // null (desconhecido) em vez dos fallbacks heurísticos aleatórios anteriores, que
+            // poluíam a analytics (a mesma pessoa mais perto/longe mudava de "idade"/"gênero").
+            // A contagem de rostos e o isLooking (ML Kit) continuam válidos.
+            val ageRange = estimatedAge?.let { age ->
+                when {
+                    age < 18 -> "0-17"
+                    age < 25 -> "18-24"
+                    age < 35 -> "25-34"
+                    age < 45 -> "35-44"
+                    age < 55 -> "45-54"
+                    age < 65 -> "55-64"
+                    else -> "65+"
+                }
             }
 
             // 3. Face Recognition & Embedding (faceHash)
