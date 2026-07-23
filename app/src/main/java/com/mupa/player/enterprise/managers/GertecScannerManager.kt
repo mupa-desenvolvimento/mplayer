@@ -27,6 +27,9 @@ class GertecScannerManager(
     private val mainHandler = Handler(Looper.getMainLooper())
     private var retryRunnable: Runnable? = null
     private var retryAttempt = 0
+    // Em terminais sem leitor compatível (ex.: i9100), o init falha sempre. Depois de esgotar
+    // as tentativas, desiste até um stop() explícito — evita re-tentar a cada onResume.
+    @Volatile private var gaveUp = false
 
     companion object {
         private const val MAX_RETRIES = 15
@@ -43,7 +46,7 @@ class GertecScannerManager(
     }
 
     fun start(context: Context) {
-        if (started) return
+        if (started || gaveUp) return
         retryAttempt = 0
         cancelRetry()
         attemptStart(WeakReference(context))
@@ -96,7 +99,8 @@ class GertecScannerManager(
             mainHandler.postDelayed(r, RETRY_DELAY_MS)
             Log.i("MPlayerScan", "gertec_sdk_retry agendado em ${RETRY_DELAY_MS}ms (tentativa $retryAttempt/$MAX_RETRIES)")
         } else {
-            Log.w("MPlayerScan", "gertec_sdk_start desistiu após $MAX_RETRIES tentativas")
+            gaveUp = true
+            Log.w("MPlayerScan", "gertec_sdk_start desistiu após $MAX_RETRIES tentativas (leitor incompatível?)")
         }
     }
 
@@ -107,6 +111,7 @@ class GertecScannerManager(
 
     fun stop() {
         cancelRetry()
+        gaveUp = false
         runCatching {
             codeScanner?.stopService()
         }.onFailure {
