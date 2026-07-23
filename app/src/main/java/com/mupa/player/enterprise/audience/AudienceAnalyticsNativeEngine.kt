@@ -27,24 +27,14 @@ class AudienceAnalyticsNativeEngine(
     private var ageGenderInterpreter: Interpreter? = null
     private var faceRecInterpreter: Interpreter? = null
 
+    // Estado de atenção por pessoa, indexado pelo trackingId ESTÁVEL do ML Kit (não mais por
+    // embedding do TFLite, que estava desativado e fazia o id "pular" a cada frame).
     private data class TrackedFace(
-        val hash: String,
-        var embedding: FloatArray,
         var lastSeenTimeMs: Long,
         var attentionDurationMs: Long = 0L,
         var lastLookStartedAtMs: Long? = null
     )
-    private val trackedFaces = ArrayList<TrackedFace>()
-
-    private fun euclideanDistance(a: FloatArray, b: FloatArray): Float {
-        if (a.size != b.size) return Float.MAX_VALUE
-        var sum = 0.0f
-        for (i in a.indices) {
-            val diff = a[i] - b[i]
-            sum += diff * diff
-        }
-        return Math.sqrt(sum.toDouble()).toFloat()
-    }
+    private val trackedFaces = HashMap<Int, TrackedFace>()
 
     suspend fun init(): Boolean = withContext(Dispatchers.IO) {
         try {
@@ -52,6 +42,10 @@ class AudienceAnalyticsNativeEngine(
                 .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
                 .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
                 .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_NONE)
+                // Tracking dá um trackingId ESTÁVEL por rosto entre frames enquanto a pessoa
+                // continua no enquadramento. É o que fixa a identidade pra somar tempo por
+                // pessoa — sem depender do modelo TFLite de reconhecimento (que está desativado).
+                .enableTracking()
                 .build()
             faceDetector = FaceDetection.getClient(options)
 
@@ -211,83 +205,41 @@ class AudienceAnalyticsNativeEngine(
                 }
             }
 
-            // 3. Face Recognition & Embedding (faceHash)
-            var faceHash: String? = null
-            var descriptor: FloatArray? = null
+            // 3. Identidade estável + tempo de atenção via trackingId do ML Kit.
+            // O trackingId persiste enquanto a MESMA pessoa continua no enquadramento, então o
+            // faceHash não "pula" mais a cada frame e o tempo por pessoa é acumulado corretamente.
+            val trackingId = face.trackingId
+            val now = System.currentTimeMillis()
             var currentAttentionDurationMs = 0L
-            if (faceBitmap != null && faceRecInterpreter != null) {
-                try {
-                    val resized = Bitmap.createScaledBitmap(faceBitmap, 112, 112, true)
-                    val inputBuffer = prepareByteBuffer(resized, 112, 112)
-                    val outputEmbedding = Array(1) { FloatArray(192) }
-                    faceRecInterpreter?.run(inputBuffer, outputEmbedding)
-
-                    val desc = outputEmbedding[0]
-                    descriptor = desc
-                    
-                    val now = System.currentTimeMillis()
-                    // Remove tracked faces older than 1 hour
-                    synchronized(trackedFaces) {
-                        trackedFaces.removeAll { now - it.lastSeenTimeMs > 3600000L }
-
-                        // Try to match with an existing tracked face
-                        var matchedFace: TrackedFace? = null
-                        var bestDist = Float.MAX_VALUE
-                        for (tf in trackedFaces) {
-                            val dist = euclideanDistance(desc, tf.embedding)
-                            android.util.Log.d("FaceRecognitionTest", "Distancia Euclidiana para ${tf.hash}: $dist")
-                            if (dist < 1.25f && dist < bestDist) {
-                                bestDist = dist
-                                matchedFace = tf
-                            }
-                        }
-
-                        if (matchedFace != null) {
-                            faceHash = matchedFace.hash
-                            val lastSeen = matchedFace.lastSeenTimeMs
-                            val timeSinceLastSeen = now - lastSeen
-                            val lastLook = if (timeSinceLastSeen > 1500L) null else matchedFace.lastLookStartedAtMs
-
-                            if (isLooking) {
-                                if (lastLook != null) {
-                                    matchedFace.attentionDurationMs += timeSinceLastSeen
-                                }
-                                matchedFace.lastLookStartedAtMs = now
-                            } else {
-                                matchedFace.lastLookStartedAtMs = null
-                            }
-                            matchedFace.embedding = desc // update embedding
-                            matchedFace.lastSeenTimeMs = now
-                            currentAttentionDurationMs = matchedFace.attentionDurationMs
-                        } else {
-                            val reduced = StringBuilder()
-                            for (j in desc.indices step 4) {
-                                val v = Math.round((desc[j] + 1.0f) * 8.0f)
-                                reduced.append(v.toChar())
-                            }
-                            val newHash = fnv1a(reduced.toString())
-                            faceHash = newHash
-                            trackedFaces.add(
-                                TrackedFace(
-                                    hash = newHash,
-                                    embedding = desc,
-                                    lastSeenTimeMs = now,
-                                    attentionDurationMs = 0L,
-                                    lastLookStartedAtMs = if (isLooking) now else null
-                                )
-                            )
-                            currentAttentionDurationMs = 0L
-                        }
+            val finalHash: String
+            if (trackingId != null) {
+                finalHash = "mlkit_$trackingId"
+                synchronized(trackedFaces) {
+                    // Descarta quem saiu de vista há mais de 1h.
+                    trackedFaces.entries.removeAll { now - it.value.lastSeenTimeMs > 3600000L }
+                    val tf = trackedFaces.getOrPut(trackingId) {
+                        TrackedFace(lastSeenTimeMs = now, lastLookStartedAtMs = if (isLooking) now else null)
                     }
-                } catch (e: Exception) {
-                    e.printStackTrace()
+                    val timeSinceLastSeen = now - tf.lastSeenTimeMs
+                    // Só acumula se a visão foi contínua (gap curto) e a pessoa estava olhando.
+                    val continuous = timeSinceLastSeen in 0..1500L
+                    if (isLooking) {
+                        if (continuous && tf.lastLookStartedAtMs != null) {
+                            tf.attentionDurationMs += timeSinceLastSeen
+                        }
+                        tf.lastLookStartedAtMs = now
+                    } else {
+                        tf.lastLookStartedAtMs = null
+                    }
+                    tf.lastSeenTimeMs = now
+                    currentAttentionDurationMs = tf.attentionDurationMs
                 }
+            } else {
+                // Sem trackingId (raro com tracking ligado) — id posicional, sem somar tempo.
+                finalHash = fnv1a("${bounds.left}_${bounds.top}_${bounds.width()}_${bounds.height()}")
             }
 
-            // Fallback for faceHash
-            val finalHash = faceHash ?: fnv1a("${bounds.left}_${bounds.top}_${bounds.width()}_${bounds.height()}")
-
-            // Recycle faceBitmap since it was cropped and processed
+            // faceBitmap só existe quando algum TFLite está carregado; recicla se foi criado.
             faceBitmap?.recycle()
 
             DetectedFace(
@@ -297,7 +249,7 @@ class AudienceAnalyticsNativeEngine(
                 gender = gender,
                 confidence = confidence,
                 isLooking = isLooking,
-                embedding = descriptor,
+                embedding = null,
                 attentionDurationSeconds = currentAttentionDurationMs / 1000L,
                 boundingBox = bounds,
             )
