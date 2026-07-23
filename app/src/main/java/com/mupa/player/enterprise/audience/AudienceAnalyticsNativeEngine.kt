@@ -27,6 +27,16 @@ class AudienceAnalyticsNativeEngine(
     private var ageGenderInterpreter: Interpreter? = null
     private var faceRecInterpreter: Interpreter? = null
 
+    // Lidas do próprio modelo em init(). Modelo real: input 80×80×3, 2 saídas —
+    // out0=[1,2] gênero [female,male], out1=[1,4] idade (4 faixas).
+    private var ageGenderInputSize = 80
+    private var genderOutLen = 2
+    private var ageOutLen = 4
+    // O Interpreter do TFLite NÃO é thread-safe; o processFrame roda em Dispatchers.Default e
+    // pode ser chamado concorrentemente — acesso concorrente ao interpreter causava o SIGSEGV
+    // nativo. Serializamos toda chamada ao modelo por este lock.
+    private val ageGenderLock = Any()
+
     // Estado de atenção por pessoa, indexado pelo trackingId ESTÁVEL do ML Kit (não mais por
     // embedding do TFLite, que estava desativado e fazia o id "pular" a cada frame).
     private data class TrackedFace(
@@ -49,21 +59,35 @@ class AudienceAnalyticsNativeEngine(
                 .build()
             faceDetector = FaceDetection.getClient(options)
 
-            // TFLite (idade/gênero e reconhecimento facial) desativado temporariamente: o
-            // Interpreter.run()/runForMultipleInputsOutputs() estava causando SIGSEGV nativo
-            // (libtensorflowlite_jni.so) que derrubava o processo inteiro do app repetidamente
-            // em produção. Enquanto a causa raiz não é corrigida, seguimos só com a detecção de
-            // rosto do ML Kit (isLooking / bounding box) — idade, gênero e faceHash caem no
-            // fallback heurístico já existente mais abaixo.
-            // val ageGenderFile = File(modelsDir, "age_gender_model.tflite")
-            // if (ageGenderFile.exists()) {
-            //     ageGenderInterpreter = Interpreter(ageGenderFile)
-            // }
-            //
-            // val faceRecFile = File(modelsDir, "mobilefacenet.tflite")
-            // if (faceRecFile.exists()) {
-            //     faceRecInterpreter = Interpreter(faceRecFile)
-            // }
+            // Idade/gênero (TFLite). O SIGSEGV anterior era por shape errada (código assumia
+            // input 80×80 + 2 saídas, mas o modelo é 224×224 + 1 saída [age, male, female]).
+            // Agora lemos input/output do próprio modelo e dimensionamos os buffers pela shape
+            // REAL — o buffer nunca desalinha, então não há mais estouro nativo.
+            val ageGenderFile = File(modelsDir, "age_gender_model.tflite")
+            if (ageGenderFile.exists()) {
+                runCatching {
+                    val interp = Interpreter(ageGenderFile, Interpreter.Options().apply { setNumThreads(2) })
+                    val inShape = interp.getInputTensor(0).shape()   // [1, H, W, 3]
+                    ageGenderInputSize = if (inShape.size >= 3) inShape[1] else 80
+                    if (interp.outputTensorCount >= 2) {
+                        genderOutLen = interp.getOutputTensor(0).shape().lastOrNull() ?: 2
+                        ageOutLen = interp.getOutputTensor(1).shape().lastOrNull() ?: 4
+                    }
+                    android.util.Log.i(
+                        "AudienceEngine",
+                        "age_gender carregado: input=${inShape.joinToString("x")} genderLen=$genderOutLen ageLen=$ageOutLen",
+                    )
+                    ageGenderInterpreter = interp
+                }.onFailure {
+                    android.util.Log.w("AudienceEngine", "falha ao carregar age_gender_model: ${it.message}")
+                    ageGenderInterpreter = null
+                }
+            } else {
+                android.util.Log.w("AudienceEngine", "age_gender_model.tflite não encontrado em $modelsDir")
+            }
+
+            // Reconhecimento facial (mobilefacenet) segue desativado — a identidade por sessão
+            // usa o trackingId do ML Kit. Só seria necessário pra visitante único/recorrência.
             true
         } catch (e: Exception) {
             e.printStackTrace()
@@ -153,36 +177,35 @@ class AudienceAnalyticsNativeEngine(
 
             if (faceBitmap != null && ageGenderInterpreter != null) {
                 try {
-                    val resized = Bitmap.createScaledBitmap(faceBitmap, 80, 80, true)
-                    val inputBuffer = prepareByteBuffer(resized, 80, 80)
-                    val genderOut = Array(1) { FloatArray(2) }
-                    val ageOut = Array(1) { FloatArray(4) }
+                    val size = ageGenderInputSize
+                    val resized = Bitmap.createScaledBitmap(faceBitmap, size, size, true)
+                    val inputBuffer = prepareByteBuffer(resized, size, size)
+                    // 2 saídas: out0=gênero [female, male], out1=idade (faixas / softmax).
+                    val genderOut = Array(1) { FloatArray(genderOutLen) }
+                    val ageOut = Array(1) { FloatArray(ageOutLen) }
                     val outputs = mapOf(0 to genderOut, 1 to ageOut)
-                    ageGenderInterpreter?.runForMultipleInputsOutputs(arrayOf(inputBuffer), outputs)
-                    
-                    val femaleProb = genderOut[0][0]
-                    val maleProb = genderOut[0][1]
-                    if (maleProb > femaleProb) {
-                        gender = "Male"
-                        confidence = maleProb
-                    } else {
-                        gender = "Female"
-                        confidence = femaleProb
+                    // Serializado: o Interpreter TFLite não é thread-safe (causa do SIGSEGV).
+                    synchronized(ageGenderLock) {
+                        ageGenderInterpreter?.runForMultipleInputsOutputs(arrayOf(inputBuffer), outputs)
                     }
 
-                    var maxAgeIdx = 0
-                    var maxAgeVal = ageOut[0][0]
-                    for (i in 1..3) {
-                        if (ageOut[0][i] > maxAgeVal) {
-                            maxAgeVal = ageOut[0][i]
-                            maxAgeIdx = i
-                        }
+                    val femaleProb = genderOut[0][0]
+                    val maleProb = genderOut[0].getOrElse(1) { 0f }
+                    if (maleProb >= femaleProb) {
+                        gender = "Male"; confidence = maleProb
+                    } else {
+                        gender = "Female"; confidence = femaleProb
                     }
-                    estimatedAge = when (maxAgeIdx) {
-                        0 -> 10
-                        1 -> 26
-                        2 -> 42
-                        else -> 65
+
+                    // Idade: argmax das faixas → idade representativa da faixa.
+                    val ages = ageOut[0]
+                    var maxIdx = 0
+                    for (i in 1 until ages.size) if (ages[i] > ages[maxIdx]) maxIdx = i
+                    estimatedAge = when (maxIdx) {
+                        0 -> 10   // criança
+                        1 -> 26   // jovem adulto
+                        2 -> 42   // adulto
+                        else -> 65 // sênior
                     }
                 } catch (e: Exception) {
                     e.printStackTrace()

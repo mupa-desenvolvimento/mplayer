@@ -193,18 +193,21 @@ class FaceRecognitionTestActivity : ComponentActivity() {
                                         val builder = StringBuilder()
                                         val drawFaces = ArrayList<FaceOverlayView.DrawFace>()
                                         result.faces.forEachIndexed { index, face ->
-                                            builder.append("Rosto #${index + 1}:\n")
-                                            builder.append("  Hash: ${face.faceHash}\n")
-                                            builder.append("  Idade (estimada): ${face.estimatedAge} (Faixa: ${face.ageRange})\n")
-                                            builder.append("  Gênero: ${face.gender} (${String.format("%.2f", (face.confidence ?: 0.0f) * 100)}%)\n")
-                                            builder.append("  Olhando p/ tela: ${if (face.isLooking) "SIM" else "NÃO"}\n")
-                                            builder.append("  Tempo de atenção: ${face.attentionDurationSeconds}s\n\n")
+                                            // Linha compacta por rosto (debug enxuto): gênero, idade,
+                                            // tempo de atenção e se está olhando.
+                                            val g = when (face.gender) {
+                                                "Male" -> "M"; "Female" -> "F"; else -> "?"
+                                            }
+                                            val age = face.estimatedAge?.let { "${it}a" } ?: "?"
+                                            val look = if (face.isLooking) "olhando" else "—"
+                                            builder.append("#${index + 1}  $g · $age · ${face.attentionDurationSeconds}s · $look\n")
 
                                             face.boundingBox?.let { rect ->
                                                 drawFaces.add(
                                                     FaceOverlayView.DrawFace(
                                                         rect = rect,
-                                                        label = "Face ID: ${face.faceHash.take(6)}"
+                                                        // Tag curta sobre o rosto: gênero + idade.
+                                                        label = "$g $age"
                                                     )
                                                 )
                                             }
