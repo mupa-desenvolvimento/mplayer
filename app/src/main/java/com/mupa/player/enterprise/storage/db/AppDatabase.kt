@@ -15,8 +15,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         PriceCacheEntity::class,
         PriceQueryEventEntity::class,
         MediaPlayLogEntity::class,
+        MissingProductImageEntity::class,
+        DeviceEventEntity::class,
     ],
-    version = 6,
+    version = 8,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -26,6 +28,8 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun priceCacheDao(): PriceCacheDao
     abstract fun priceQueryEventDao(): PriceQueryEventDao
     abstract fun mediaPlayLogDao(): MediaPlayLogDao
+    abstract fun missingProductImageDao(): MissingProductImageDao
+    abstract fun deviceEventDao(): DeviceEventDao
 
     companion object {
         @Volatile
@@ -43,6 +47,8 @@ abstract class AppDatabase : RoomDatabase() {
                     .addMigrations(MIGRATION_3_4)
                     .addMigrations(MIGRATION_4_5)
                     .addMigrations(MIGRATION_5_6)
+                    .addMigrations(MIGRATION_6_7)
+                    .addMigrations(MIGRATION_7_8)
                     .build()
                     .also { instance = it }
             }
@@ -146,6 +152,49 @@ abstract class AppDatabase : RoomDatabase() {
                     db.execSQL("CREATE INDEX IF NOT EXISTS index_media_play_logs_deviceId ON media_play_logs(deviceId)")
                     db.execSQL("CREATE INDEX IF NOT EXISTS index_media_play_logs_mediaId ON media_play_logs(mediaId)")
                     db.execSQL("CREATE INDEX IF NOT EXISTS index_media_play_logs_playedAtEpochMs ON media_play_logs(playedAtEpochMs)")
+                }
+            }
+
+        private val MIGRATION_6_7 =
+            object : Migration(6, 7) {
+                override fun migrate(db: SupportSQLiteDatabase) {
+                    db.execSQL(
+                        """
+                        CREATE TABLE IF NOT EXISTS missing_product_images (
+                          ean TEXT NOT NULL PRIMARY KEY,
+                          companyId TEXT,
+                          deviceId TEXT NOT NULL,
+                          firstReportedAtEpochMs INTEGER NOT NULL,
+                          uploadedAtEpochMs INTEGER
+                        )
+                        """.trimIndent(),
+                    )
+                    db.execSQL("CREATE INDEX IF NOT EXISTS index_missing_product_images_uploadedAtEpochMs ON missing_product_images(uploadedAtEpochMs)")
+                }
+            }
+
+        private val MIGRATION_7_8 =
+            object : Migration(7, 8) {
+                override fun migrate(db: SupportSQLiteDatabase) {
+                    db.execSQL(
+                        """
+                        CREATE TABLE IF NOT EXISTS device_events (
+                          id TEXT NOT NULL PRIMARY KEY,
+                          deviceId TEXT NOT NULL,
+                          companyId TEXT,
+                          filial TEXT,
+                          eventType TEXT NOT NULL,
+                          reason TEXT,
+                          ean TEXT,
+                          failCount INTEGER,
+                          offlineDurationSeconds INTEGER,
+                          createdAtEpochMs INTEGER NOT NULL,
+                          uploadedAtEpochMs INTEGER
+                        )
+                        """.trimIndent(),
+                    )
+                    db.execSQL("CREATE INDEX IF NOT EXISTS index_device_events_uploadedAtEpochMs ON device_events(uploadedAtEpochMs)")
+                    db.execSQL("CREATE INDEX IF NOT EXISTS index_device_events_createdAtEpochMs ON device_events(createdAtEpochMs)")
                 }
             }
     }

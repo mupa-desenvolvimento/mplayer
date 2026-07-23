@@ -18,6 +18,8 @@ import org.tensorflow.lite.Interpreter
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.exp
+import kotlin.math.roundToInt
 
 class AudienceAnalyticsNativeEngine(
     private val context: Context,
@@ -42,7 +44,8 @@ class AudienceAnalyticsNativeEngine(
     private data class TrackedFace(
         var lastSeenTimeMs: Long,
         var attentionDurationMs: Long = 0L,
-        var lastLookStartedAtMs: Long? = null
+        var lastLookStartedAtMs: Long? = null,
+        var smoothedAge: Float? = null
     )
     private val trackedFaces = HashMap<Int, TrackedFace>()
 
@@ -174,6 +177,9 @@ class AudienceAnalyticsNativeEngine(
             var estimatedAge: Int? = null
             var gender: String? = null
             var confidence: Float? = null
+            // Idade "crua" deste frame (valor contínuo). A idade final é suavizada por pessoa
+            // no bloco de tracking abaixo, evitando o pula-pula entre faixas (26↔42).
+            var rawAgeFloat: Float? = null
 
             if (faceBitmap != null && ageGenderInterpreter != null) {
                 try {
@@ -197,34 +203,11 @@ class AudienceAnalyticsNativeEngine(
                         gender = "Female"; confidence = femaleProb
                     }
 
-                    // Idade: argmax das faixas → idade representativa da faixa.
-                    val ages = ageOut[0]
-                    var maxIdx = 0
-                    for (i in 1 until ages.size) if (ages[i] > ages[maxIdx]) maxIdx = i
-                    estimatedAge = when (maxIdx) {
-                        0 -> 10   // criança
-                        1 -> 26   // jovem adulto
-                        2 -> 42   // adulto
-                        else -> 65 // sênior
-                    }
+                    // Idade contínua = média ponderada (softmax) das faixas pelas idades
+                    // representativas — muito mais estável que o argmax (que pulava 26↔42).
+                    rawAgeFloat = expectedAgeFromBuckets(ageOut[0])
                 } catch (e: Exception) {
                     e.printStackTrace()
-                }
-            }
-
-            // Sem TFLite de idade/gênero, NÃO inventamos valores: idade/gênero/confiança ficam
-            // null (desconhecido) em vez dos fallbacks heurísticos aleatórios anteriores, que
-            // poluíam a analytics (a mesma pessoa mais perto/longe mudava de "idade"/"gênero").
-            // A contagem de rostos e o isLooking (ML Kit) continuam válidos.
-            val ageRange = estimatedAge?.let { age ->
-                when {
-                    age < 18 -> "0-17"
-                    age < 25 -> "18-24"
-                    age < 35 -> "25-34"
-                    age < 45 -> "35-44"
-                    age < 55 -> "45-54"
-                    age < 65 -> "55-64"
-                    else -> "65+"
                 }
             }
 
@@ -235,6 +218,7 @@ class AudienceAnalyticsNativeEngine(
             val now = System.currentTimeMillis()
             var currentAttentionDurationMs = 0L
             val finalHash: String
+            val raw = rawAgeFloat
             if (trackingId != null) {
                 finalHash = "mlkit_$trackingId"
                 synchronized(trackedFaces) {
@@ -256,10 +240,29 @@ class AudienceAnalyticsNativeEngine(
                     }
                     tf.lastSeenTimeMs = now
                     currentAttentionDurationMs = tf.attentionDurationMs
+
+                    // Suavização da idade por pessoa (EMA) — estabiliza o valor entre frames.
+                    if (raw != null) {
+                        tf.smoothedAge = tf.smoothedAge?.let { it * 0.85f + raw * 0.15f } ?: raw
+                    }
+                    estimatedAge = tf.smoothedAge?.roundToInt()
                 }
             } else {
                 // Sem trackingId (raro com tracking ligado) — id posicional, sem somar tempo.
                 finalHash = fnv1a("${bounds.left}_${bounds.top}_${bounds.width()}_${bounds.height()}")
+                estimatedAge = raw?.roundToInt()
+            }
+
+            val ageRange = estimatedAge?.let { age ->
+                when {
+                    age < 18 -> "0-17"
+                    age < 25 -> "18-24"
+                    age < 35 -> "25-34"
+                    age < 45 -> "35-44"
+                    age < 55 -> "45-54"
+                    age < 65 -> "55-64"
+                    else -> "65+"
+                }
             }
 
             // faceBitmap só existe quando algum TFLite está carregado; recicla se foi criado.
@@ -317,6 +320,28 @@ class AudienceAnalyticsNativeEngine(
         }
         buffer.rewind()
         return buffer
+    }
+
+    // Converte as 4 saídas de faixa etária (logits) numa idade contínua = média das idades
+    // representativas de cada faixa ponderada pelo softmax. Isso evita o "pula-pula" do argmax:
+    // quando o modelo fica dividido entre faixas vizinhas, o resultado é um meio-termo estável
+    // (ex.: 42 ao invés de saltar para 26). Idades representativas calibradas para os 4 buckets
+    // do modelo age_gender (out1=1x4): criança/jovem/adulto/idoso.
+    private fun expectedAgeFromBuckets(ages: FloatArray): Float {
+        val reps = floatArrayOf(12f, 26f, 42f, 62f)
+        val n = minOf(ages.size, reps.size)
+        if (n == 0) return 0f
+        // softmax numericamente estável.
+        var maxLogit = ages[0]
+        for (i in 1 until n) if (ages[i] > maxLogit) maxLogit = ages[i]
+        var sum = 0f
+        var weighted = 0f
+        for (i in 0 until n) {
+            val w = exp((ages[i] - maxLogit).toDouble()).toFloat()
+            sum += w
+            weighted += w * reps[i]
+        }
+        return if (sum > 0f) weighted / sum else reps[n / 2]
     }
 
     private fun fnv1a(str: String): String {

@@ -57,6 +57,17 @@ class FaceRecognitionTestActivity : ComponentActivity() {
             finish()
         }
 
+        // Painel de métricas começa oculto; botão alterna entre expandir/recolher.
+        binding.metricsContent.visibility = View.GONE
+        binding.btnToggleMetrics.setOnClickListener {
+            val expanded = binding.metricsContent.visibility == View.VISIBLE
+            binding.metricsContent.visibility = if (expanded) View.GONE else View.VISIBLE
+            binding.btnToggleMetrics.setIconResource(
+                if (expanded) android.R.drawable.arrow_down_float
+                else android.R.drawable.arrow_up_float
+            )
+        }
+
         binding.btnDownloadModels.setOnClickListener {
             binding.btnDownloadModels.isEnabled = false
             lifecycleScope.launch {

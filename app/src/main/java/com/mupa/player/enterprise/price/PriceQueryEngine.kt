@@ -15,6 +15,7 @@ import com.mupa.player.enterprise.managers.DeviceCacheManager
 import com.mupa.player.enterprise.managers.SettingsManager
 import com.mupa.player.enterprise.network.TlsCompat
 import com.mupa.player.enterprise.storage.db.AppDatabase
+import com.mupa.player.enterprise.storage.db.MissingProductImageEntity
 import com.mupa.player.enterprise.storage.db.PriceCacheEntity
 import com.mupa.player.enterprise.storage.db.PriceQueryEventEntity
 import kotlinx.coroutines.CoroutineScope
@@ -98,6 +99,15 @@ class PriceQueryEngine(
         cachedFilial?.let { return it }
         val resolved = runCatching { DeviceCacheManager(context).load()?.filial }.getOrNull().orEmpty()
         cachedFilial = resolved
+        return resolved
+    }
+
+    @Volatile private var cachedCompanyId: String? = null
+
+    private suspend fun resolveCompanyId(): String? {
+        cachedCompanyId?.let { return it }
+        val resolved = runCatching { DeviceCacheManager(context).load()?.company }.getOrNull()?.trim()?.ifBlank { null }
+        cachedCompanyId = resolved
         return resolved
     }
 
@@ -984,7 +994,76 @@ class PriceQueryEngine(
                     dark = it.dark,
                 )
             }?.takeIf { it.signature != null || it.dark != null || it.light != null }
-        return@withContext if (mupaLocal != null) saveToCacheAndReturn(mupaLocal, theme) else null to null
+        if (mupaLocal != null) return@withContext saveToCacheAndReturn(mupaLocal, theme)
+
+        // Todas as fontes falharam: registra o EAN para um técnico resolver manualmente depois.
+        // Fire-and-forget — não afeta o retorno nem a velocidade da consulta de preço.
+        reportMissingImage(normalizedEan)
+        null to null
+    }
+
+    /** Registra localmente que [ean] está sem imagem em nenhuma fonte; sincronizado com o backend depois, em lote. */
+    private suspend fun reportMissingImage(ean: String) {
+        runCatching {
+            db.missingProductImageDao().insert(
+                MissingProductImageEntity(
+                    ean = ean,
+                    companyId = resolveCompanyId(),
+                    deviceId = deviceId,
+                    firstReportedAtEpochMs = System.currentTimeMillis(),
+                    uploadedAtEpochMs = null,
+                ),
+            )
+        }
+    }
+
+    /**
+     * Verifica, em lote, se alguma imagem antes ausente já foi cadastrada pelo backend (após um
+     * técnico resolver manualmente) e baixa/cacheia via [downloadProductImageIfNeeded] — mesmo
+     * caminho de sempre, sem duplicar lógica. Roda inteiramente em background: não é chamado do
+     * fluxo de consulta de preço, então nunca atrasa um scan.
+     */
+    suspend fun checkAndRecoverMissingImages(limit: Int = 25): Int = withContext(Dispatchers.IO) {
+        val token = BuildConfig.SUPABASE_TOKEN.trim()
+        if (token.isBlank()) return@withContext 0
+
+        val eans = runCatching { db.missingProductImageDao().getEansToRecheck(limit) }.getOrNull().orEmpty()
+        if (eans.isEmpty()) return@withContext 0
+
+        val eanFilter = eans.joinToString(",") { "\"$it\"" }
+        val url = "https://iurqddkuihjsmxubibao.supabase.co/rest/v1/product_images_missing" +
+            "?ean=in.($eanFilter)&resolved_at=not.is.null&select=ean,image_url"
+        val req = Request.Builder()
+            .url(url)
+            .header("apikey", token)
+            .header("Authorization", "Bearer $token")
+            .get()
+            .build()
+
+        val resolved = runCatching {
+            http.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@use null
+                JSONArray(resp.body?.string().orEmpty())
+            }
+        }.getOrNull() ?: return@withContext 0
+
+        var recovered = 0
+        val recoveredEans = mutableListOf<String>()
+        for (i in 0 until resolved.length()) {
+            val row = resolved.optJSONObject(i) ?: continue
+            val ean = row.optString("ean", "").trim()
+            val imageUrl = row.optString("image_url", "").trim()
+            if (ean.isBlank() || imageUrl.isBlank()) continue
+            val local = runCatching { downloadProductImageIfNeeded(ean = ean, rawUrl = imageUrl) }.getOrNull()
+            if (local != null) {
+                recoveredEans += ean
+                recovered++
+            }
+        }
+        if (recoveredEans.isNotEmpty()) {
+            runCatching { db.missingProductImageDao().deleteResolved(recoveredEans) }
+        }
+        recovered
     }
 
     private fun fetchProductImageMeta(ean: String, step: PriceStep?): ProductImageMeta? {

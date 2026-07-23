@@ -23,6 +23,7 @@ import com.mupa.player.enterprise.storage.db.AppDatabase
 import com.mupa.player.enterprise.storage.settingsDataStore
 import com.mupa.player.enterprise.audience.AudienceSyncManager
 import com.mupa.player.enterprise.price.PriceAnalyticsSyncManager
+import com.mupa.player.enterprise.price.MissingProductImageSyncManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -96,6 +97,11 @@ class SettingsActivity : ComponentActivity() {
             )
             binding.switchGertecScanner.isChecked =
                 runCatching { SettingsManager(applicationContext).getGertecScannerEnabled() }.getOrDefault(false)
+            binding.editHeartbeatIdleMinutes.setText(
+                runCatching { SettingsManager(applicationContext).getHeartbeatIdleMinutes() }
+                    .getOrDefault(SettingsManager.DEFAULT_HEARTBEAT_IDLE_MINUTES)
+                    .toString(),
+            )
             binding.btnTestFaceRecognition.visibility = if (settings?.devMode == true) View.VISIBLE else View.GONE
             
             // Read Maintenance Mode setting
@@ -140,6 +146,20 @@ class SettingsActivity : ComponentActivity() {
                 } else {
                     Toast.makeText(this@SettingsActivity, "Não foi possível carregar o cadastro atual.", Toast.LENGTH_SHORT).show()
                 }
+            }
+        }
+
+        binding.btnSaveHeartbeatIdleMinutes.setOnClickListener {
+            val minutes = binding.editHeartbeatIdleMinutes.text.toString().trim().toIntOrNull()
+            if (minutes == null) {
+                Toast.makeText(this, "Digite um número de minutos válido.", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            lifecycleScope.launch {
+                SettingsManager(applicationContext).setHeartbeatIdleMinutes(minutes)
+                val saved = SettingsManager(applicationContext).getHeartbeatIdleMinutes()
+                binding.editHeartbeatIdleMinutes.setText(saved.toString())
+                Toast.makeText(this@SettingsActivity, "Heartbeat: ociosidade de $saved min.", Toast.LENGTH_SHORT).show()
             }
         }
 
@@ -362,6 +382,30 @@ class SettingsActivity : ComponentActivity() {
                     Toast.makeText(this@SettingsActivity, "Consultas enviadas com sucesso!", Toast.LENGTH_SHORT).show()
                 } else {
                     binding.txtSyncProgress.text = "Falha ao enviar consultas de preços para o Supabase."
+                    Toast.makeText(this@SettingsActivity, "Falha no envio.", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+
+        binding.btnUploadMissingImages.setOnClickListener {
+            binding.txtSyncProgress.visibility = View.VISIBLE
+            binding.txtSyncProgress.text = "Verificando produtos sem imagem..."
+            lifecycleScope.launch {
+                val db = AppDatabase.get(applicationContext)
+                val count = db.missingProductImageDao().getPendingCount()
+                if (count == 0) {
+                    binding.txtSyncProgress.text = "Nenhum produto sem imagem pendente para envio."
+                    Toast.makeText(this@SettingsActivity, "Nenhum pendente.", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+
+                binding.txtSyncProgress.text = "Enviando $count produto(s) sem imagem para o Supabase..."
+                val success = MissingProductImageSyncManager(applicationContext).uploadPending()
+                if (success) {
+                    binding.txtSyncProgress.text = "Produtos sem imagem enviados com sucesso!"
+                    Toast.makeText(this@SettingsActivity, "Enviado com sucesso!", Toast.LENGTH_SHORT).show()
+                } else {
+                    binding.txtSyncProgress.text = "Falha ao enviar produtos sem imagem para o Supabase."
                     Toast.makeText(this@SettingsActivity, "Falha no envio.", Toast.LENGTH_SHORT).show()
                 }
             }

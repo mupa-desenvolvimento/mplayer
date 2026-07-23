@@ -5,6 +5,7 @@ import android.provider.Settings
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.mupa.player.enterprise.storage.settingsDataStore
 import kotlinx.coroutines.flow.Flow
@@ -38,6 +39,7 @@ class SettingsManager(private val context: Context) {
         val tcServerAddress = stringPreferencesKey("tc_server_address")
         val gertecScannerEnabled = booleanPreferencesKey("gertec_scanner_enabled")
         val imageSearchEnabled = booleanPreferencesKey("image_search_enabled")
+        val heartbeatIdleMinutes = intPreferencesKey("heartbeat_idle_minutes")
     }
 
     val settingsFlow: Flow<AppSettings> =
@@ -125,6 +127,16 @@ class SettingsManager(private val context: Context) {
         persistBoolean(Keys.imageSearchEnabled, LEGACY_KEY_IMAGE_SEARCH_ENABLED, enabled)
     }
 
+    /** Minutos de ociosidade (sem nenhum scan) antes de enviar um heartbeat. Faixa 30–120min. */
+    suspend fun setHeartbeatIdleMinutes(value: Int) {
+        val clamped = value.coerceIn(MIN_HEARTBEAT_IDLE_MINUTES, MAX_HEARTBEAT_IDLE_MINUTES)
+        context.settingsDataStore.edit { it[Keys.heartbeatIdleMinutes] = clamped }
+    }
+
+    suspend fun getHeartbeatIdleMinutes(): Int {
+        return context.settingsDataStore.data.first()[Keys.heartbeatIdleMinutes] ?: DEFAULT_HEARTBEAT_IDLE_MINUTES
+    }
+
     suspend fun getOrCreateDeviceUuid(): String {
         val current = context.settingsDataStore.data.first()[Keys.deviceUuid]
             ?: legacyPrefs.getString(LEGACY_KEY_DEVICE_UUID, null)
@@ -176,6 +188,10 @@ class SettingsManager(private val context: Context) {
         private const val LEGACY_KEY_IMAGE_SEARCH_ENABLED = "image_search_enabled"
 
         private const val ANDROID_ID_BUG = "9774d56d682e549c"
+
+        const val DEFAULT_HEARTBEAT_IDLE_MINUTES = 45
+        const val MIN_HEARTBEAT_IDLE_MINUTES = 30
+        const val MAX_HEARTBEAT_IDLE_MINUTES = 120
     }
 }
 

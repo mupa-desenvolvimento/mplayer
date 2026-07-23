@@ -28,10 +28,9 @@ import android.content.pm.PackageManager
 import android.speech.tts.TextToSpeech
 import android.text.SpannableStringBuilder
 import android.text.Spanned
-import android.text.style.RelativeSizeSpan
-import android.text.style.StyleSpan
 import android.text.style.StrikethroughSpan
 import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
@@ -84,6 +83,7 @@ import com.mupa.player.enterprise.player.TransitionConfig
 import com.mupa.player.enterprise.price.PriceConfig
 import com.mupa.player.enterprise.price.PriceConfigParser
 import com.mupa.player.enterprise.price.PriceAnalyticsSyncManager
+import com.mupa.player.enterprise.price.MissingProductImageSyncManager
 import com.mupa.player.enterprise.price.PriceOffer
 import com.mupa.player.enterprise.price.PriceProduct
 import com.mupa.player.enterprise.price.PricePack
@@ -93,6 +93,12 @@ import com.mupa.player.enterprise.price.LayoutConfig
 import com.mupa.player.enterprise.price.PriceSlot
 import com.mupa.player.enterprise.price.PriceStep
 import com.mupa.player.enterprise.price.ProductPriceSlot
+import com.mupa.player.enterprise.security.TotpPasswordGenerator
+import com.mupa.player.enterprise.monitoring.DeviceEventSyncManager
+import com.mupa.player.enterprise.price.AdvantageType
+import com.mupa.player.enterprise.price.OfferIntelligence
+import com.mupa.player.enterprise.price.SmartDescription
+import androidx.core.widget.TextViewCompat
 import android.widget.TextView
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -180,6 +186,15 @@ class PlayerActivity : ComponentActivity() {
     private var lastPlaylistItemsIds: List<String> = emptyList()
     private var lastScanEan: String = ""
     private var lastScanAtMs: Long = 0L
+
+    // Monitoramento proativo (heartbeat inteligente + falha repetida + retomada de conectividade).
+    // Ver MUPA_PLATFORM_DEVICE_EVENTS_CONTRACT.md.
+    private var consecutiveFailEan: String = ""
+    private var consecutiveFailCount: Int = 0
+    private var consecutiveFailReported: Boolean = false
+    private var offlineSinceEpochMs: Long? = null
+    private var lastMeaningfulEventEpochMs: Long = System.currentTimeMillis()
+    private var lastHeartbeatSentEpochMs: Long = System.currentTimeMillis()
     private val scanBuffer = StringBuilder()
     private var scanLastCharAtMs: Long = 0L
     private val scanKeyBuffer = StringBuilder()
@@ -217,9 +232,16 @@ class PlayerActivity : ComponentActivity() {
         cancelReturnToMedia()
         val gen = overlayGeneration
         Log.i("MPlayerScan", "schedule_return delay=${delayMs}ms reason=$reason gen=$gen")
-        val r = Runnable {
-            // Só fecha se ainda for o mesmo produto exibido (um scan mais novo invalida)
-            if (gen == overlayGeneration) {
+        val r = object : Runnable {
+            override fun run() {
+                // Só fecha se ainda for o mesmo produto exibido (um scan mais novo invalida)
+                if (gen != overlayGeneration) return
+                // Nunca volta para a mídia com o TTS ainda falando — espera terminar.
+                if (tts?.isSpeaking == true) {
+                    returnToMediaRunnable = this
+                    mainHandler.postDelayed(this, 400L)
+                    return
+                }
                 setPriceOverlayVisible(false)
             }
         }
@@ -290,7 +312,7 @@ class PlayerActivity : ComponentActivity() {
         binding = ActivityPlayerBinding.inflate(layoutInflater)
         setContentView(binding.root)
         initTts()
-        applyPriceTypography()
+        BrandTypography.applyBrandTypography(binding.priceResultRoot, this)
         binding.apkVersionWatermark.text = "v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
         demoRepo = DemoProductRepository(applicationContext)
         demoImageCache = DemoImageCache(applicationContext)
@@ -536,6 +558,53 @@ class PlayerActivity : ComponentActivity() {
                     runCatching { AudienceSyncManager(applicationContext).uploadPending() }
                     runCatching { PriceAnalyticsSyncManager(applicationContext).uploadPending() }
                     runCatching { MediaPlayLogsSyncManager(applicationContext).uploadPending() }
+                    runCatching { MissingProductImageSyncManager(applicationContext).uploadPending() }
+                    runCatching { DeviceEventSyncManager(applicationContext).uploadPending() }
+                }
+            }
+        }
+
+        // Monitoramento proativo (heartbeat inteligente, nunca fixo): tick leve a cada 1 minuto
+        // só pra decidir SE deve mandar algo — nunca manda no tick em si. Cobre: retomada de
+        // conectividade (com a duração da queda) e ociosidade prolongada (sem nenhum scan).
+        // Ver MUPA_PLATFORM_DEVICE_EVENTS_CONTRACT.md.
+        lifecycleScope.launch(Dispatchers.IO) {
+            while (true) {
+                delay(60 * 1000L)
+                val online = isOnline()
+                val now = System.currentTimeMillis()
+
+                if (online) {
+                    val since = offlineSinceEpochMs
+                    if (since != null) {
+                        offlineSinceEpochMs = null
+                        val offlineSeconds = ((now - since) / 1000L).toInt()
+                        reportDeviceEvent(eventType = "connectivity_restored", offlineDurationSeconds = offlineSeconds)
+                        reportDeviceEvent(eventType = "heartbeat", reason = "state_change")
+                        lastHeartbeatSentEpochMs = now
+                    }
+                } else if (offlineSinceEpochMs == null) {
+                    offlineSinceEpochMs = now
+                }
+
+                val idleMinutes = runCatching { SettingsManager(applicationContext).getHeartbeatIdleMinutes() }
+                    .getOrDefault(SettingsManager.DEFAULT_HEARTBEAT_IDLE_MINUTES)
+                val idleMillis = idleMinutes * 60_000L
+                val quietSinceEpochMs = maxOf(lastMeaningfulEventEpochMs, lastHeartbeatSentEpochMs)
+                if (online && now - quietSinceEpochMs >= idleMillis) {
+                    reportDeviceEvent(eventType = "heartbeat", reason = "idle_timeout")
+                    lastHeartbeatSentEpochMs = now
+                }
+            }
+        }
+
+        // Verifica, sem nunca atrasar uma consulta de preço, se alguma imagem antes ausente já
+        // foi cadastrada manualmente por um técnico — intervalo generoso pois a resolução é manual.
+        lifecycleScope.launch(Dispatchers.IO) {
+            while (true) {
+                delay(4 * 60 * 60 * 1000L) // every 4 hours
+                if (isOnline()) {
+                    runCatching { priceEngine?.checkAndRecoverMissingImages() }
                 }
             }
         }
@@ -816,8 +885,12 @@ class PlayerActivity : ComponentActivity() {
 
     private suspend fun refreshInBackground(): Boolean {
         if (!isOnline()) return false
-        runCatching {
+        val validation = runCatching {
             com.mupa.player.enterprise.services.DeviceValidationService(applicationContext).validateDevice(deviceId)
+        }.getOrNull()
+        if (validation is com.mupa.player.enterprise.services.DeviceValidationResult.Found && validation.heartbeatRequested) {
+            reportDeviceEvent(eventType = "heartbeat", reason = "requested")
+            lastHeartbeatSentEpochMs = System.currentTimeMillis()
         }
         val cache = runCatching { DeviceCacheManager(applicationContext).load() }.getOrNull()
         val licenseType = cache?.tipoDaLicenca?.trim()?.lowercase(Locale.US)
@@ -1242,6 +1315,42 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Grava localmente um evento de monitoramento (heartbeat, falha repetida do mesmo item ou
+     * retomada de conectividade) e, se online, tenta subir pro Supabase imediatamente (melhor
+     * esforço, sem bloquear quem chamou) — senão fica na fila pro próximo ciclo horário de
+     * `DeviceEventSyncManager`, junto com as outras sincronizações. Ver
+     * `MUPA_PLATFORM_DEVICE_EVENTS_CONTRACT.md`.
+     */
+    private fun reportDeviceEvent(
+        eventType: String,
+        reason: String? = null,
+        ean: String? = null,
+        failCount: Int? = null,
+        offlineDurationSeconds: Int? = null,
+    ) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val cache = runCatching { DeviceCacheManager(applicationContext).load() }.getOrNull()
+            val entity = com.mupa.player.enterprise.storage.db.DeviceEventEntity(
+                id = UUID.randomUUID().toString(),
+                deviceId = deviceId,
+                companyId = cache?.company?.trim()?.ifBlank { null },
+                filial = cache?.filial?.trim()?.ifBlank { null },
+                eventType = eventType,
+                reason = reason,
+                ean = ean,
+                failCount = failCount,
+                offlineDurationSeconds = offlineDurationSeconds,
+                createdAtEpochMs = System.currentTimeMillis(),
+                uploadedAtEpochMs = null,
+            )
+            runCatching { AppDatabase.get(applicationContext).deviceEventDao().insert(entity) }
+            if (isOnline()) {
+                runCatching { DeviceEventSyncManager(applicationContext).uploadPending() }
+            }
+        }
+    }
+
     private fun onBarcodeCaptured(raw: String) {
         val ean = raw.trim()
         if (ean.isBlank()) return
@@ -1289,11 +1398,20 @@ class PlayerActivity : ComponentActivity() {
                 return@launch
             }
 
+            // Código de barras específico por aparelho: "settings_{últimos 4 dígitos do device_id}".
+            // O próprio código já é o segredo (distribuído fisicamente por dispositivo), então
+            // abre direto, sem diálogo adicional.
+            if (deviceId.length >= 4 && ean.equals("settings_${deviceId.takeLast(4)}", ignoreCase = true)) {
+                startActivity(Intent(this@PlayerActivity, SettingsActivity::class.java))
+                return@launch
+            }
+
             val cmd = ean.trim().lowercase(Locale.US)
             if (cmd == "devon" || cmd == "devmode=1" || cmd == "devmode=true" || cmd == "demoon") {
                 runCatching { SettingsManager(applicationContext).setDevMode(true) }
                 devMode = true
                 updateDeviceWatermark()
+                reportDeviceEvent(eventType = "heartbeat", reason = "state_change")
                 Toast.makeText(this@PlayerActivity, "DEMO ativado", Toast.LENGTH_SHORT).show()
                 return@launch
             }
@@ -1301,6 +1419,7 @@ class PlayerActivity : ComponentActivity() {
                 runCatching { SettingsManager(applicationContext).setDevMode(false) }
                 devMode = false
                 updateDeviceWatermark()
+                reportDeviceEvent(eventType = "heartbeat", reason = "state_change")
                 Toast.makeText(this@PlayerActivity, "DEMO desativado", Toast.LENGTH_SHORT).show()
                 return@launch
             }
@@ -1486,6 +1605,23 @@ class PlayerActivity : ComponentActivity() {
                     )
                     true
                 }
+                // Fase 0 da migração para Layout Universal (prova de conceito): mesmos dados do
+                // test_zaf_full, só trocando o layout para validar o ScrollView com N slots.
+                "test_universal" -> {
+                    mockProduct = PriceProduct(
+                        id = "UNIV001", ean = "7891000315507", description = "CHOCOLATE LACTA AO LEITE 80G",
+                        price = 5.99, originalPrice = null, clubPrice = 2.19, priceClub = 2.19, priceWholesale = 2.09,
+                        offer = PriceOffer(enabled = true, title = "A PARTIR DE 27 UN", description = null, secondUnit = 2.09, type = "bulk"),
+                        priceSlots = listOf(
+                            ProductPriceSlot(label = "PREÇO/UN", value = 5.99, field = "price", isPromo = false, isClub = false),
+                            ProductPriceSlot(label = "CLIENTE CLUBE", value = 2.19, field = "price_club", isPromo = false, isClub = true),
+                            ProductPriceSlot(label = "A PARTIR DE 27 UN", value = 4.49, field = "price_wholesale", isPromo = false, isClub = false),
+                            ProductPriceSlot(label = "CLUBE 27 UN", value = 2.09, field = "price_club", isPromo = false, isClub = true),
+                        ),
+                        xmlLayoutType = "universal", packs = emptyList(), theme = null, offline = false
+                    )
+                    true
+                }
                 // ── Americanas ──────────────────────────────────────────────
                 // Só preço regular, sem promoção
                 "test_ame_normal" -> {
@@ -1544,18 +1680,41 @@ class PlayerActivity : ComponentActivity() {
 
             val engine = priceEngine ?: return@launch
             showPriceOverlayLoading(ean)
+            lastMeaningfulEventEpochMs = System.currentTimeMillis()
+
             val product = runCatching { engine.query(ean, cfg, isOnline()) }.getOrNull()
             if (product != null) {
+                consecutiveFailCount = 0
+                consecutiveFailReported = false
                 showPriceOverlayProduct(product)
                 val timeoutMs = if (product.clubPrice != null || product.priceClub != null) 30000L else 8000L
                 scheduleReturnToMedia(timeoutMs, "fallback")
             } else {
                 val offlineProduct = runCatching { engine.query(ean, cfg, isOnline = false) }.getOrNull()
                 if (offlineProduct != null) {
+                    consecutiveFailCount = 0
+                    consecutiveFailReported = false
                     showPriceOverlayProduct(offlineProduct.copy(offline = true))
                     val timeoutMs = if (offlineProduct.clubPrice != null || offlineProduct.priceClub != null) 30000L else 8000L
                     scheduleReturnToMedia(timeoutMs, "fallback")
                 } else {
+                    // Falha repetida do mesmo item (item 1 do monitoramento proativo): útil pra
+                    // apontar EAN com problema de cadastro/API, não pra "produto não existe" avulso.
+                    if (ean == consecutiveFailEan) {
+                        consecutiveFailCount++
+                    } else {
+                        consecutiveFailEan = ean
+                        consecutiveFailCount = 1
+                        consecutiveFailReported = false
+                    }
+                    if (consecutiveFailCount >= MAX_CONSECUTIVE_SCAN_FAILURES && !consecutiveFailReported) {
+                        consecutiveFailReported = true
+                        reportDeviceEvent(
+                            eventType = "repeated_scan_failure",
+                            ean = ean,
+                            failCount = consecutiveFailCount,
+                        )
+                    }
                     setPriceOverlayVisible(false)
                     speakNotFoundIfPossible(ean)
                 }
@@ -1658,53 +1817,127 @@ class PlayerActivity : ComponentActivity() {
             showAdminAccessDialog()
             true
         }
-        binding.apkVersionWatermark.setOnLongClickListener {
-            binding.deviceIdWatermark.performLongClick()
+
+        // Hold de 3s (não o long-click padrão de ~500ms) no texto da versão.
+        val holdRunnable = Runnable { showAdminAccessDialog() }
+        binding.apkVersionWatermark.setOnTouchListener { _, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> mainHandler.postDelayed(holdRunnable, 3000L)
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> mainHandler.removeCallbacks(holdRunnable)
+            }
             true
         }
     }
 
+    /**
+     * Diálogo de acesso ao Settings: pede a senha TOTP de 4 dígitos (válida por 1 minuto,
+     * ver [TotpPasswordGenerator] e `ARGOS_OPEN_SETTINGS_CONTRACT.md`). Usa um teclado numérico
+     * próprio (em vez do EditText padrão) para não abrir o teclado do Android, e mostra a
+     * data/hora atual para o técnico calcular a senha do minuto no Argos.
+     */
     private fun showAdminAccessDialog() {
-        lifecycleScope.launch {
-            val cache = DeviceCacheManager(applicationContext).load()
-            val targetCode = cache?.companyCode?.trim().orEmpty()
-            withContext(Dispatchers.Main) {
-                val container = android.widget.FrameLayout(this@PlayerActivity)
-                val params = android.widget.FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    leftMargin = 48
-                    rightMargin = 48
-                    topMargin = 24
-                    bottomMargin = 24
-                }
-                val input = EditText(this@PlayerActivity).apply {
-                    hint = "Código da Empresa"
-                    inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
-                    layoutParams = params
-                }
-                container.addView(input)
-                android.app.AlertDialog.Builder(this@PlayerActivity)
-                    .setTitle("Acesso Restrito")
-                    .setMessage("Insira o Código de Usuário da Empresa:")
-                    .setView(container)
-                    .setNegativeButton("Cancelar", null)
-                    .setPositiveButton("Confirmar") { _, _ ->
-                        val entered = input.text.toString().trim()
-                        val isCorrect = (targetCode.isNotBlank() && entered.equals(targetCode, ignoreCase = true)) ||
-                                        entered.equals("DEBUG", ignoreCase = true) ||
-                                        entered.equals("123ABC", ignoreCase = true) ||
-                                        targetCode.isBlank()
-                        if (isCorrect) {
-                            startActivity(Intent(this@PlayerActivity, SettingsActivity::class.java))
-                        } else {
-                            Toast.makeText(this@PlayerActivity, "Código inválido!", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                    .show()
+        val density = resources.displayMetrics.density
+        fun dp(value: Int) = (value * density).toInt()
+
+        val maxDigits = 4
+        val enteredDigits = StringBuilder()
+
+        val root = LinearLayout(this@PlayerActivity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(8), dp(24), dp(8))
+        }
+
+        val dateTimeLabel = TextView(this@PlayerActivity).apply {
+            text = "Data/hora do aparelho:"
+            textSize = 13f
+            gravity = android.view.Gravity.CENTER
+            setTextColor(Color.LTGRAY)
+        }
+        root.addView(dateTimeLabel)
+
+        val dateTimeView = TextView(this@PlayerActivity).apply {
+            textSize = 20f
+            gravity = android.view.Gravity.CENTER
+            typeface = android.graphics.Typeface.MONOSPACE
+            setTextColor(Color.WHITE)
+            setPadding(0, dp(4), 0, dp(8))
+        }
+        root.addView(dateTimeView)
+
+        val displayView = TextView(this@PlayerActivity).apply {
+            textSize = 32f
+            gravity = android.view.Gravity.CENTER
+            letterSpacing = 0.4f
+            typeface = android.graphics.Typeface.MONOSPACE
+            setPadding(0, dp(16), 0, dp(16))
+        }
+        root.addView(displayView)
+
+        fun refreshDisplay() {
+            displayView.text = (0 until maxDigits).joinToString("  ") { i ->
+                if (i < enteredDigits.length) enteredDigits[i].toString() else "_"
             }
         }
+        refreshDisplay()
+
+        val dateFormat = SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale("pt", "BR"))
+        val clockHandler = Handler(Looper.getMainLooper())
+        val clockRunnable = object : Runnable {
+            override fun run() {
+                dateTimeView.text = dateFormat.format(Date())
+                clockHandler.postDelayed(this, 1000L)
+            }
+        }
+        clockHandler.post(clockRunnable)
+
+        fun makeKey(label: String, onClick: () -> Unit) = android.widget.Button(this@PlayerActivity).apply {
+            text = label
+            textSize = 20f
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                setMargins(dp(4), dp(4), dp(4), dp(4))
+            }
+            setOnClickListener { onClick() }
+        }
+
+        val rows = listOf(
+            listOf("1", "2", "3"),
+            listOf("4", "5", "6"),
+            listOf("7", "8", "9"),
+            listOf("C", "0", "⌫"),
+        )
+        rows.forEach { rowLabels ->
+            val row = LinearLayout(this@PlayerActivity).apply { orientation = LinearLayout.HORIZONTAL }
+            rowLabels.forEach { label ->
+                row.addView(
+                    makeKey(label) {
+                        when (label) {
+                            "C" -> enteredDigits.setLength(0)
+                            "⌫" -> if (enteredDigits.isNotEmpty()) enteredDigits.setLength(enteredDigits.length - 1)
+                            else -> if (enteredDigits.length < maxDigits) enteredDigits.append(label)
+                        }
+                        refreshDisplay()
+                    }
+                )
+            }
+            root.addView(row)
+        }
+
+        val dialog = android.app.AlertDialog.Builder(this@PlayerActivity)
+            .setTitle("Acesso Restrito")
+            .setView(root)
+            .setNegativeButton("Cancelar", null)
+            .setPositiveButton("Confirmar") { _, _ ->
+                val entered = enteredDigits.toString()
+                val isCorrect = TotpPasswordGenerator.isValid(entered, BuildConfig.ARGOS_OTP_SECRET)
+                if (isCorrect) {
+                    startActivity(Intent(this@PlayerActivity, SettingsActivity::class.java))
+                } else {
+                    Toast.makeText(this@PlayerActivity, "Senha inválida!", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .create()
+        dialog.setOnDismissListener { clockHandler.removeCallbacks(clockRunnable) }
+        dialog.show()
     }
 
     private fun normalizeUrl(raw: String): String {
@@ -2061,6 +2294,8 @@ class PlayerActivity : ComponentActivity() {
                     applyPriceOverlayLayout()
 
                     val nameText = binding.priceResultRoot.findViewById<TextView>(R.id.priceNameText)
+                    val nameSecondLineText = binding.priceResultRoot.findViewById<TextView>(R.id.priceNameSecondLineText)
+                    val smartCaptionText = binding.priceResultRoot.findViewById<TextView>(R.id.priceSmartCaption)
                     val codeText = binding.priceResultRoot.findViewById<TextView>(R.id.priceCodeText)
                     val subtitleText = binding.priceResultRoot.findViewById<TextView>(R.id.priceSubtitleText)
                     val offlineBadge = binding.priceResultRoot.findViewById<TextView>(R.id.priceOfflineBadge)
@@ -2069,7 +2304,10 @@ class PlayerActivity : ComponentActivity() {
                     val packsContainer = binding.priceResultRoot.findViewById<ViewGroup>(R.id.pricePacksContainer)
                     val priceContainer = binding.priceResultRoot.findViewById<LinearLayout>(R.id.price_container)
 
-                    nameText?.text = buildModernName(product.description.orEmpty())
+                    if (nameText != null) {
+                        applyProductName(nameText, nameSecondLineText, product.description.orEmpty())
+                    }
+                    applySmartCaption(smartCaptionText, product.description)
                     codeText?.text = "Código: ${product.ean}"
 
                     if (product.offline) {
@@ -2097,7 +2335,7 @@ class PlayerActivity : ComponentActivity() {
                         subtitleText?.visibility = View.GONE
                     }
 
-                    renderOffer(product.offer, offerContainer, offerText)
+                    renderOffer(product, offerContainer, offerText)
                     renderPacks(product.packs, packsContainer)
 
                     val updatedProduct = product.copy(theme = finalTheme)
@@ -2113,6 +2351,8 @@ class PlayerActivity : ComponentActivity() {
                     } else if (priceContainer != null) {
                         populatePriceSlots(priceContainer, priceConfig?.layout, updatedProduct, parsedColor)
                     }
+
+                    BrandTypography.applyBrandTypography(binding.priceResultRoot, this@PlayerActivity)
 
                     if (prepared != null) {
                         applyOverlayColors(
@@ -2189,14 +2429,7 @@ class PlayerActivity : ComponentActivity() {
                     if (!slotsParaFala.isNullOrEmpty()) {
                         speakSlotsIfPossible(product.ean, slotsParaFala)
                     } else {
-                        speakPriceIfPossible(
-                            ean = product.ean,
-                            price = product.price,
-                            oldPrice = product.originalPrice,
-                            offer = product.offer,
-                            clubPrice = product.clubPrice,
-                            pricePromotional = product.pricePromotional
-                        )
+                        speakPriceIfPossible(product)
                     }
 
                     animateOverlayWidgets()
@@ -2344,6 +2577,8 @@ class PlayerActivity : ComponentActivity() {
 
                     // Find views from the dynamically inflated layout
                     val nameText = binding.priceResultRoot.findViewById<TextView>(R.id.priceNameText)
+                    val nameSecondLineText = binding.priceResultRoot.findViewById<TextView>(R.id.priceNameSecondLineText)
+                    val smartCaptionText = binding.priceResultRoot.findViewById<TextView>(R.id.priceSmartCaption)
                     val codeText = binding.priceResultRoot.findViewById<TextView>(R.id.priceCodeText)
                     val subtitleText = binding.priceResultRoot.findViewById<TextView>(R.id.priceSubtitleText)
                     val offlineBadge = binding.priceResultRoot.findViewById<TextView>(R.id.priceOfflineBadge)
@@ -2360,12 +2595,14 @@ class PlayerActivity : ComponentActivity() {
                         binding.priceLoadingContainer.visibility = View.GONE
                     }.start()
 
-                    nameText?.text = buildModernName(product.nome)
+                    if (nameText != null) {
+                        applyProductName(nameText, nameSecondLineText, product.nome)
+                    }
+                    applySmartCaption(smartCaptionText, product.nome)
                     subtitleText?.visibility = View.GONE
                     codeText?.text = "Código: ${product.ean}"
 
                     offlineBadge?.visibility = View.GONE
-                    renderOffer(null, offerContainer, offerText)
 
                     val demoPriceProduct = PriceProduct(
                         id = null,
@@ -2382,6 +2619,8 @@ class PlayerActivity : ComponentActivity() {
                         offline = false
                     )
 
+                    renderOffer(demoPriceProduct, offerContainer, offerText)
+
                     val accentHex = if (priceConfig?.layout?.colorMode == "solid" && !priceConfig?.layout?.solidColor.isNullOrEmpty()) {
                         priceConfig?.layout?.solidColor
                     } else {
@@ -2393,8 +2632,10 @@ class PlayerActivity : ComponentActivity() {
                         populatePriceSlots(priceContainer, priceConfig?.layout, demoPriceProduct, parsedColor)
                     }
 
+                    BrandTypography.applyBrandTypography(binding.priceResultRoot, this@PlayerActivity)
+
                     playBeep()
-                    speakPriceIfPossible(ean = product.ean, price = product.preco, oldPrice = product.precoAntigo, offer = null)
+                    speakPriceIfPossible(demoPriceProduct)
 
                     packsContainer?.removeAllViews()
                     packsContainer?.visibility = View.GONE
@@ -2577,7 +2818,9 @@ class PlayerActivity : ComponentActivity() {
         val nameTextColor = idealTextColor(dominant)
         root.findViewById<View>(R.id.priceNameBar)?.setBackgroundColor(dominant)
         root.findViewById<TextView>(R.id.priceNameText)?.setTextColor(nameTextColor)
+        root.findViewById<TextView>(R.id.priceNameSecondLineText)?.setTextColor(adjustAlpha(nameTextColor, 0.85f))
         root.findViewById<TextView>(R.id.priceSubtitleText)?.setTextColor(adjustAlpha(nameTextColor, 0.90f))
+        root.findViewById<TextView>(R.id.priceSmartCaption)?.setTextColor(adjustAlpha(nameTextColor, 0.75f))
 
         // Badges de oferta (LEVE 3 / PAGUE 2 etc.) sempre em vermelho
         val offerRed = Color.parseColor("#ef4444")
@@ -2811,84 +3054,76 @@ class PlayerActivity : ComponentActivity() {
         return Color.HSVToColor(hsv)
     }
 
-    private fun buildModernName(raw: String): CharSequence {
+    /**
+     * Divide a descrição em 1ª linha (até 3 primeiras palavras, Poppins Bold via
+     * [BrandTypography], nunca quebra em mais de 1 linha graças ao autosize) e 2ª linha
+     * (resto da descrição, Poppins Thin, complementar). A regra de quais palavras vão em
+     * cada linha é a mesma de sempre — só a tipografia/tamanho mudou.
+     */
+    private fun applyProductName(nameFirstLine: TextView, nameSecondLine: TextView?, raw: String) {
         val cleaned = raw.trim().replace("\\s+".toRegex(), " ")
-        if (cleaned.isBlank()) return ""
         val words = cleaned.split(" ").filter { it.isNotBlank() }
         val top = words.take(3).joinToString(" ").uppercase(Locale("pt", "BR"))
         val rest = words.drop(3).joinToString(" ").uppercase(Locale("pt", "BR"))
 
-        val b = SpannableStringBuilder()
-        val topStart = 0
-        b.append(top)
-        b.setSpan(StyleSpan(android.graphics.Typeface.BOLD), topStart, b.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-        b.setSpan(RelativeSizeSpan(1.16f), topStart, b.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-        if (rest.isNotBlank()) {
-            b.append("\n")
-            val restStart = b.length
-            b.append(rest)
-            b.setSpan(StyleSpan(android.graphics.Typeface.NORMAL), restStart, b.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-            b.setSpan(RelativeSizeSpan(0.74f), restStart, b.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-        }
-
         val totalChars = cleaned.length
-        val sizeSp =
+        val baseSizeSp =
             when {
                 totalChars <= 14 -> 44f
                 totalChars <= 20 -> 40f
                 totalChars <= 28 -> 34f
                 else -> 30f
             }
-        binding.priceNameText.setTextSize(TypedValue.COMPLEX_UNIT_SP, sizeSp)
-        return b
+
+        nameFirstLine.text = top
+        val maxSp = baseSizeSp * 0.70f
+        val minSp = 16f
+        TextViewCompat.setAutoSizeTextTypeUniformWithConfiguration(
+            nameFirstLine,
+            minSp.toInt(),
+            maxSp.toInt().coerceAtLeast(minSp.toInt()),
+            1,
+            TypedValue.COMPLEX_UNIT_SP,
+        )
+
+        // A margem negativa entre a 1ª e a 2ª linha só faz sentido quando a 2ª linha existe de
+        // verdade — sem ela, a margem negativa "corta" a própria 1ª linha (nada abaixo para
+        // compensar o espaço puxado para cima).
+        val hasSecondLine = nameSecondLine != null && rest.isNotBlank()
+        (nameFirstLine.layoutParams as? ViewGroup.MarginLayoutParams)?.let {
+            it.bottomMargin = if (hasSecondLine) -dpToPx(20) else 0
+            nameFirstLine.layoutParams = it
+        }
+
+        if (nameSecondLine != null) {
+            if (hasSecondLine) {
+                nameSecondLine.text = rest
+                nameSecondLine.setTextSize(TypedValue.COMPLEX_UNIT_SP, baseSizeSp * 0.60f)
+                nameSecondLine.visibility = View.VISIBLE
+            } else {
+                nameSecondLine.text = ""
+                nameSecondLine.visibility = View.GONE
+            }
+        }
     }
 
-    private fun renderOffer(offer: PriceOffer?) {
-        if (offer == null || !offer.enabled) {
-            binding.priceBadgesRow.visibility = View.GONE
-            binding.priceLeftBadgeText.visibility = View.GONE
-            binding.priceRightBadgeText.visibility = View.GONE
-            binding.priceOfferContainer.visibility = View.GONE
-            binding.priceSecondUnitContainer.visibility = View.GONE
-            return
-        }
-
-        val (badgeA, badgeB) = splitOfferBadges(offer.title?.trim().orEmpty())
-        binding.priceBadgesRow.visibility = View.VISIBLE
-        if (badgeA.isNotBlank()) {
-            binding.priceLeftBadgeText.text = badgeA
-            binding.priceLeftBadgeText.visibility = View.VISIBLE
+    /** Frase amigável complementar (item 4), montada só a partir do que já está em [description]. */
+    private fun applySmartCaption(captionView: TextView?, description: String?) {
+        if (captionView == null) return
+        val phrase = SmartDescription.parse(description).friendlyPhrase
+        if (phrase.isNullOrBlank()) {
+            captionView.text = ""
+            captionView.visibility = View.GONE
         } else {
-            binding.priceLeftBadgeText.visibility = View.GONE
-        }
-        if (!badgeB.isNullOrBlank()) {
-            binding.priceRightBadgeText.text = badgeB
-            binding.priceRightBadgeText.visibility = View.VISIBLE
-        } else {
-            binding.priceRightBadgeText.visibility = View.GONE
-        }
-
-        val desc = offer.description?.trim().orEmpty()
-        if (desc.isNotBlank()) {
-            binding.priceOfferText.text = desc
-            binding.priceOfferContainer.visibility = View.VISIBLE
-        } else {
-            binding.priceOfferContainer.visibility = View.GONE
-        }
-
-        val second = offer.secondUnit
-        if (second != null && second > 0.0) {
-            binding.priceSecondUnitValue.text = formatCurrency(second)
-            binding.priceSecondUnitContainer.visibility = View.VISIBLE
-        } else {
-            binding.priceSecondUnitContainer.visibility = View.GONE
+            captionView.text = phrase
+            captionView.visibility = View.VISIBLE
         }
     }
 
     private fun splitOfferBadges(title: String): Pair<String, String?> {
         val t = title.trim().uppercase(Locale("pt", "BR"))
         if (t.isBlank()) return "OFERTA" to null
-        val m = Regex("LEVE\\s+(\\d+)\\s+PAGUE\\s+(\\d+)").find(t)
+        val m = OfferIntelligence.LEVE_PAGUE_REGEX.find(t)
         if (m != null) {
             return "LEVE ${m.groupValues[1]}" to "PAGUE ${m.groupValues[2]}"
         }
@@ -2900,27 +3135,6 @@ class PlayerActivity : ComponentActivity() {
             parts.size >= 2 -> parts[0] to parts[1]
             else -> t to null
         }
-    }
-
-    private fun buildStyledDescription(description: String): CharSequence {
-        val cleaned = description.trim().replace("\\s+".toRegex(), " ")
-        if (cleaned.isBlank()) return ""
-        val parts = cleaned.split(" ")
-        val first = parts.take(3).joinToString(" ")
-        val rest = parts.drop(3).joinToString(" ")
-
-        val b = SpannableStringBuilder()
-        val start = 0
-        b.append(first)
-        b.setSpan(StyleSpan(android.graphics.Typeface.BOLD), start, b.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-        b.setSpan(RelativeSizeSpan(1.40f), start, b.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-        if (rest.isNotBlank()) {
-            b.append("\n")
-            val rStart = b.length
-            b.append(rest)
-            b.setSpan(RelativeSizeSpan(0.92f), rStart, b.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-        }
-        return b
     }
 
     private fun initTts() {
@@ -2991,72 +3205,22 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
-    private fun speakPriceIfPossible(
-        ean: String,
-        price: Double?,
-        oldPrice: Double?,
-        offer: com.mupa.player.enterprise.price.PriceOffer?,
-        clubPrice: Double? = null,
-        pricePromotional: Double? = null,
-    ) {
+    /**
+     * Fala a melhor mensagem para o produto (item 6): a mesma [OfferIntelligence] usada para o
+     * selo/explicação decide o texto, então nunca diverge do que está escrito na tela.
+     */
+    private fun speakPriceIfPossible(product: PriceProduct) {
         if (!ttsReady) return
 
-        var resolvedPrice = price
-        var resolvedOldPrice = oldPrice
-        var resolvedClubPrice = clubPrice
-
-        if (pricePromotional != null && pricePromotional > 0.0) {
-            resolvedOldPrice = oldPrice ?: price
-            resolvedPrice = pricePromotional
-        }
-
-        // Se preço promocional for maior ou igual ao preço normal de tabela, ignorar preço promocional
-        if (resolvedPrice != null && resolvedOldPrice != null && resolvedPrice >= resolvedOldPrice) {
-            resolvedPrice = resolvedOldPrice
-            resolvedOldPrice = null
-        }
-
-        // Se preço clube for maior ou igual ao preço de venda, ignorar o preço clube no TTS
-        if (resolvedClubPrice != null && resolvedPrice != null && resolvedClubPrice >= resolvedPrice) {
-            resolvedClubPrice = null
-        }
-
-        if (resolvedPrice == null || resolvedPrice <= 0.0) return
-
         val now = SystemClock.elapsedRealtime()
-        if (ean == lastSpokenEan && now - lastSpokenAtMs < 3500L) return
-        lastSpokenEan = ean
+        if (product.ean == lastSpokenEan && now - lastSpokenAtMs < 3500L) return
+
+        val textToSpeak = OfferIntelligence.analyze(product).ttsPhrase
+        if (textToSpeak.isBlank()) return
+
+        lastSpokenEan = product.ean
         lastSpokenAtMs = now
 
-        val spokenPrice = buildSpokenPrice(resolvedPrice)
-        val isOffer = (offer?.enabled == true) || (resolvedOldPrice != null && resolvedOldPrice > resolvedPrice)
-        val base =
-            if (isOffer) {
-                val old = resolvedOldPrice
-                if (old != null && old > resolvedPrice) {
-                     "Produto em oferta. De ${buildSpokenPrice(old)} por $spokenPrice."
-                } else {
-                     "Produto em oferta. $spokenPrice."
-                }
-            } else {
-                spokenPrice
-            }
-
-        val extra = StringBuilder()
-        if (resolvedClubPrice != null && resolvedClubPrice > 0.0) {
-            extra.append(" Preço exclusivo para cliente clube, ${buildSpokenPrice(resolvedClubPrice)}.")
-        }
-
-        if (offer != null && offer.enabled) {
-            val second = offer.secondUnit
-            if (second != null && second > 0.0) {
-                extra.append(" ${offer.title?.trim().orEmpty().ifBlank { "Oferta" }}. Valor total das duas unidades: ${buildSpokenPrice(second)}.")
-            } else {
-                offer.title?.trim()?.takeIf { it.isNotBlank() }?.let { extra.append(" $it.") }
-            }
-        }
-
-        val textToSpeak = base + extra.toString()
         val utteranceId = UUID.randomUUID().toString()
         if (Build.VERSION.SDK_INT >= 21) {
             tts?.speak(textToSpeak, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
@@ -3085,29 +3249,7 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
-    private fun buildSpokenPrice(value: Double): String {
-        val cents = (value * 100.0).roundToInt().coerceAtLeast(0)
-        val reais = cents / 100
-        val cent = cents % 100
-        val reaisStr = if (reais == 1) "real" else "reais"
-        return if (cent == 0) {
-            "$reais $reaisStr"
-        } else {
-            "$reais $reaisStr e $cent centavos"
-        }
-    }
-
-    private fun applyPriceTypography() {
-        val bebas = android.graphics.Typeface.create("Bebas Neue", android.graphics.Typeface.NORMAL)
-        val fallback = android.graphics.Typeface.create("sans-serif-condensed", android.graphics.Typeface.BOLD)
-        val tf = if (bebas == android.graphics.Typeface.DEFAULT) fallback else bebas
-        binding.priceCurrencyText.typeface = tf
-        binding.priceIntegerText.typeface = tf
-        binding.priceDecimalText.typeface = tf
-        binding.priceIntegerText.letterSpacing = 0.02f
-        binding.priceDecimalText.letterSpacing = 0.02f
-        binding.priceCurrencyText.letterSpacing = 0.02f
-    }
+    private fun buildSpokenPrice(value: Double): String = OfferIntelligence.buildSpokenPrice(value)
 
     private fun formatCurrency(value: Double): String {
         return String.format(Locale("pt", "BR"), "R$ %.2f", value)
@@ -3224,6 +3366,7 @@ class PlayerActivity : ComponentActivity() {
         val container = binding.priceResultRoot
         container.removeAllViews()
         val layoutResId = when (xmlLayoutType) {
+            "universal" -> R.layout.price_check_universal
             "split_inverted" -> R.layout.price_check_split_inverted
             "vertical_image_bottom" -> R.layout.price_check_vertical_image_bottom
             "vertical_image_top" -> R.layout.price_check_vertical_image_top
@@ -3574,7 +3717,7 @@ class PlayerActivity : ComponentActivity() {
             dpToPx(6),
         )
         val box = itemView.findViewById<View>(R.id.slotPriceBox)
-        box?.setPadding(dpToPx(14), dpToPx(7), dpToPx(14), dpToPx(7))
+        box?.setPadding(dpToPx(14), dpToPx(2), dpToPx(14), dpToPx(2))
         val label = itemView.findViewById<View>(R.id.slotLabel)
         (label?.layoutParams as? ViewGroup.MarginLayoutParams)?.let { it.bottomMargin = dpToPx(3) }
     }
@@ -3620,47 +3763,19 @@ class PlayerActivity : ComponentActivity() {
 
 
 
-    // Frases comerciais rotativas exibidas quando há oferta (item 3).
-    // Escolha aleatória, sem repetir a mesma frase consecutivamente.
-    private val frasesOferta = listOf(
-        "Produto em oferta. Aproveite!",
-        "Preço especial por tempo limitado!",
-        "Oferta imperdível. Garanta já!",
-        "Economize mais neste produto!",
-        "Promoção exclusiva para você!",
-        "Leve mais, pagando menos!",
-        "Desconto aplicado. Aproveite!",
-        "Oferta do dia. Não perca!",
-        "Preço baixo que vale a pena!",
-        "Seu bolso agradece essa oferta!",
-        "Uma excelente oportunidade de economia!",
-        "Oferta especial esperando por você!",
-        "Mais economia na sua compra!",
-        "Este produto está com preço reduzido!",
-        "Aproveite este desconto exclusivo!",
-        "Qualidade e economia em um só produto!",
-        "Oferta relâmpago. Aproveite agora!",
-        "Mais vantagens para a sua compra!",
-        "Bom preço para você economizar!",
-        "Um ótimo negócio para levar hoje!",
-    )
-    private var ultimaFraseOfertaIdx = -1
-
-    private fun proximaFraseOferta(): String {
-        if (frasesOferta.size <= 1) return frasesOferta.firstOrNull().orEmpty()
-        var idx: Int
-        do { idx = (frasesOferta.indices).random() } while (idx == ultimaFraseOfertaIdx)
-        ultimaFraseOfertaIdx = idx
-        return frasesOferta[idx]
-    }
-
-    private fun renderOffer(offer: PriceOffer?, offerContainer: View?, offerText: TextView?) {
+    /**
+     * Selo/explicação de oferta (itens 3 e 5): [OfferIntelligence] decide qual é a única
+     * vantagem a destacar. "LEVE X PAGUE Y" mantém os 2 chips tradicionais; qualquer outro
+     * tipo de vantagem usa só o chip esquerdo (nunca dois selos competindo).
+     */
+    private fun renderOffer(product: PriceProduct, offerContainer: View?, offerText: TextView?) {
         val badgesRow = binding.priceResultRoot.findViewById<View>(R.id.priceBadgesRow)
         val leftBadge = binding.priceResultRoot.findViewById<TextView>(R.id.priceLeftBadgeText)
         val rightBadge = binding.priceResultRoot.findViewById<TextView>(R.id.priceRightBadgeText)
         val secondUnitContainer = binding.priceResultRoot.findViewById<View>(R.id.priceSecondUnitContainer)
         val secondUnitValue = binding.priceResultRoot.findViewById<TextView>(R.id.priceSecondUnitValue)
 
+        val offer = product.offer
         if (offer == null || !offer.enabled) {
             badgesRow?.visibility = View.GONE
             leftBadge?.visibility = View.GONE
@@ -3670,29 +3785,42 @@ class PlayerActivity : ComponentActivity() {
             return
         }
 
+        val insight = OfferIntelligence.analyze(product)
         val offerRed = Color.parseColor("#ef4444")
-        val (badgeA, badgeB) = splitOfferBadges(offer.title?.trim().orEmpty())
         badgesRow?.visibility = View.VISIBLE
-        if (badgeA.isNotBlank()) {
-            leftBadge?.text = badgeA
+
+        if (insight.type == AdvantageType.LEVE_PAGUE) {
+            val (badgeA, badgeB) = splitOfferBadges(offer.title?.trim().orEmpty())
+            if (badgeA.isNotBlank()) {
+                leftBadge?.text = badgeA
+                leftBadge?.setTextColor(Color.WHITE)
+                leftBadge?.background = roundedBg(offerRed, radiusDp = 8f)
+                leftBadge?.visibility = View.VISIBLE
+            } else {
+                leftBadge?.visibility = View.GONE
+            }
+            if (!badgeB.isNullOrBlank()) {
+                rightBadge?.text = badgeB
+                rightBadge?.setTextColor(Color.WHITE)
+                rightBadge?.background = roundedBg(offerRed, radiusDp = 8f)
+                rightBadge?.visibility = View.VISIBLE
+            } else {
+                rightBadge?.visibility = View.GONE
+            }
+        } else if (insight.badgeText.isNotBlank()) {
+            leftBadge?.text = "${insight.badgeEmoji} ${insight.badgeText}".trim()
             leftBadge?.setTextColor(Color.WHITE)
             leftBadge?.background = roundedBg(offerRed, radiusDp = 8f)
             leftBadge?.visibility = View.VISIBLE
+            rightBadge?.visibility = View.GONE
         } else {
             leftBadge?.visibility = View.GONE
-        }
-        if (!badgeB.isNullOrBlank()) {
-            rightBadge?.text = badgeB
-            rightBadge?.setTextColor(Color.WHITE)
-            rightBadge?.background = roundedBg(offerRed, radiusDp = 8f)
-            rightBadge?.visibility = View.VISIBLE
-        } else {
             rightBadge?.visibility = View.GONE
         }
 
-        // Frase comercial rotativa (item 3): substitui a mensagem estática
-        if (offerText != null) {
-            offerText.text = proximaFraseOferta()
+        val explanation = insight.shortExplanation
+        if (offerText != null && !explanation.isNullOrBlank()) {
+            offerText.text = explanation
             offerContainer?.visibility = View.VISIBLE
         } else {
             offerContainer?.visibility = View.GONE
@@ -3881,6 +4009,7 @@ class PlayerActivity : ComponentActivity() {
     companion object {
         const val EXTRA_DEVICE_ID = "extra_device_id"
         const val ZAFFARI_TEST_MODE = false
+        const val MAX_CONSECUTIVE_SCAN_FAILURES = 5
     }
 }
 
