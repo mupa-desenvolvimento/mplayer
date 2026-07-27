@@ -32,12 +32,24 @@ class GertecScannerManager(
     private var codeScanner: CodeScanner? = null
     @Volatile private var started = false
 
-    // Retry: logo após religar o equipamento, o serviço do SDK Gertec pode ainda não estar
-    // pronto quando o player chama start() no onResume — sem retry, o leitor não volta a
-    // ativar sozinho depois do boot. Tentamos de novo com backoff até o SDK responder.
+    // Retry + verificação de ativação real.
+    //
+    // PROBLEMA DO BOOT: scanCode(Activity) é ASSÍNCRONO no GerSDK 1.0.4 — ele retorna na hora e
+    // só configura/abre a serial do leitor num coroutine em background, marcando isRunning()=true
+    // quando conclui. No boot (Argos -> MPlayer), o serviço do scanner (WindowScannerService) e a
+    // serial ainda estão subindo, então o scanCode() retorna SEM erro mas a config assíncrona
+    // falha e isRunning() fica false — leitor aceso, sem decodificar. Reabrir o app "resolvia"
+    // porque aí o serviço já estava pronto.
+    //
+    // Por isso não marcamos started só porque scanCode() não lançou: confirmamos com isRunning()
+    // (sinal nativo do SDK) após VERIFY_DELAY_MS e, se não estiver rodando, rearmamos até ativar.
     private val mainHandler = Handler(Looper.getMainLooper())
     private var retryRunnable: Runnable? = null
+    private var verifyRunnable: Runnable? = null
     private var retryAttempt = 0
+    // Evita armar duas vezes em paralelo (onResume pode chamar start() de novo durante a
+    // janela de verificação, quando started ainda é false).
+    @Volatile private var arming = false
     // Em terminais sem leitor compatível (ex.: i9100), o init falha sempre. Depois de esgotar
     // as tentativas, desiste até um stop() explícito — evita re-tentar a cada onResume.
     @Volatile private var gaveUp = false
@@ -49,6 +61,8 @@ class GertecScannerManager(
     companion object {
         private const val MAX_RETRIES = 15
         private const val RETRY_DELAY_MS = 2_000L
+        // Tempo para a config assíncrona do scanCode() concluir antes de checar isRunning().
+        private const val VERIFY_DELAY_MS = 3_000L
         private const val DUP_WINDOW_MS = 1_500L
 
         fun isGertecDevice(): Boolean {
@@ -68,60 +82,87 @@ class GertecScannerManager(
     }
 
     fun start(context: Context) {
-        if (started || gaveUp) return
+        if (started || arming || gaveUp) return
+        arming = true
         retryAttempt = 0
-        cancelRetry()
+        cancelPending()
         attemptStart(WeakReference(context))
     }
 
+    private fun buildCallback() = object : ScannerCallback {
+        override fun result(barcodeType: String?, data: String?) {
+            // Uma leitura real confirma que a sessão está viva.
+            started = true
+            arming = false
+            runCatching {
+                val code = data?.trim().orEmpty()
+                if (code.isBlank()) return@runCatching
+                // 1 EAN por vez: ignora repetição do mesmo código na janela de debounce.
+                val now = System.currentTimeMillis()
+                if (code == lastCode && now - lastCodeAtMs < DUP_WINDOW_MS) {
+                    return@runCatching
+                }
+                lastCode = code
+                lastCodeAtMs = now
+                Log.i("MPlayerScan", "gertec_sdk_scan type=$barcodeType data=$code")
+                onBarcode(code)
+            }.onFailure {
+                Log.w("MPlayerScan", "gertec_sdk_result_failed err=${it.message}")
+            }
+        }
+
+        override fun cancelled(causes: String?) {
+            Log.w("MPlayerScan", "gertec_sdk_cancelled causes=$causes")
+            started = false
+        }
+    }
+
     private fun attemptStart(ctxRef: WeakReference<Context>) {
-        if (started) return
-        val context = ctxRef.get() ?: return // Activity foi embora — para de tentar
-        val ok = runCatching {
-            val scanner = codeScanner ?: CodeScanner.getInstance(object : ScannerCallback {
-                override fun result(barcodeType: String?, data: String?) {
-                    runCatching {
-                        val code = data?.trim().orEmpty()
-                        if (code.isBlank()) return@runCatching
-                        // 1 EAN por vez: ignora repetição do mesmo código na janela de debounce.
-                        val now = System.currentTimeMillis()
-                        if (code == lastCode && now - lastCodeAtMs < DUP_WINDOW_MS) {
-                            return@runCatching
-                        }
-                        lastCode = code
-                        lastCodeAtMs = now
-                        Log.i("MPlayerScan", "gertec_sdk_scan type=$barcodeType data=$code")
-                        onBarcode(code)
-                    }.onFailure {
-                        Log.w("MPlayerScan", "gertec_sdk_result_failed err=${it.message}")
-                    }
-                }
+        if (started) { arming = false; return }
+        val context = ctxRef.get() ?: run { arming = false; return } // Activity foi embora
 
-                override fun cancelled(causes: String?) {
-                    Log.w("MPlayerScan", "gertec_sdk_cancelled causes=$causes")
-                    started = false
-                }
-            }).also { codeScanner = it }
-
-            // Modo CDC: entrega cada leitura pelo callback do SDK. Usamos o overload simples
-            // scanCode(Activity) — exatamente como o sample oficial do SK100
-            // (CodeScannerSKActivity), que é o caminho testado pela Gertec. Aceita 1D e 2D.
-            scanner.scanCode(context)
-            true
+        val scanner = runCatching {
+            val s = codeScanner ?: CodeScanner.getInstance(buildCallback()).also { codeScanner = it }
+            // Em RE-ARM (tentativa > 0) limpamos a sessão morta anterior antes de rearmar. Na
+            // PRIMEIRA vez NÃO chamamos stopService — fazer isso antes do 1º scanCode quebra a
+            // ativação inicial do SDK.
+            if (retryAttempt > 0) runCatching { s.stopService() }
+            // Modo CDC: entrega cada leitura pelo callback do SDK. Overload simples scanCode(Activity),
+            // igual ao sample oficial do SK100 (CodeScannerSKActivity). scanCode é assíncrono.
+            s.scanCode(context)
+            s
         }.getOrElse {
             Log.w("MPlayerScan", "gertec_sdk_start_failed try=${retryAttempt + 1} err=${it.javaClass.simpleName}:${it.message}")
             codeScanner = null // força recriar a instância na próxima tentativa
-            false
+            null
         }
 
-        if (ok) {
-            started = true
-            retryAttempt = 0
-            Log.i("MPlayerScan", "gertec_sdk_started device=${Build.DEVICE} model=${Build.MODEL}")
+        if (scanner == null) {
+            scheduleRetry(ctxRef)
             return
         }
 
-        // Falhou — reagenda (SDK pode não estar pronto logo após o boot).
+        // scanCode é assíncrono: só consideramos ativo quando isRunning() confirmar. Isso evita o
+        // "aceso mas não lê" do boot (config assíncrona ainda não concluiu / falhou).
+        val v = Runnable {
+            if (started) { arming = false; return@Runnable } // já confirmado por uma leitura
+            val running = runCatching { scanner.isRunning() }.getOrDefault(false)
+            if (running) {
+                started = true
+                arming = false
+                retryAttempt = 0
+                Log.i("MPlayerScan", "gertec_sdk_started device=${Build.DEVICE} model=${Build.MODEL} isRunning=true")
+            } else {
+                Log.w("MPlayerScan", "gertec_sdk_not_running try=${retryAttempt + 1} (boot: serviço/serial subindo) — rearmando")
+                codeScanner = null // recria a instância no rearm
+                scheduleRetry(ctxRef)
+            }
+        }
+        verifyRunnable = v
+        mainHandler.postDelayed(v, VERIFY_DELAY_MS)
+    }
+
+    private fun scheduleRetry(ctxRef: WeakReference<Context>) {
         if (retryAttempt < MAX_RETRIES) {
             retryAttempt++
             val r = Runnable { attemptStart(ctxRef) }
@@ -130,18 +171,22 @@ class GertecScannerManager(
             Log.i("MPlayerScan", "gertec_sdk_retry agendado em ${RETRY_DELAY_MS}ms (tentativa $retryAttempt/$MAX_RETRIES)")
         } else {
             gaveUp = true
+            arming = false
             Log.w("MPlayerScan", "gertec_sdk_start desistiu após $MAX_RETRIES tentativas (leitor incompatível?)")
         }
     }
 
-    private fun cancelRetry() {
+    private fun cancelPending() {
         retryRunnable?.let { mainHandler.removeCallbacks(it) }
         retryRunnable = null
+        verifyRunnable?.let { mainHandler.removeCallbacks(it) }
+        verifyRunnable = null
     }
 
     fun stop() {
-        cancelRetry()
+        cancelPending()
         gaveUp = false
+        arming = false
         runCatching {
             codeScanner?.stopService()
         }.onFailure {
