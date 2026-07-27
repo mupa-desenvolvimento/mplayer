@@ -103,6 +103,14 @@ class GertecScannerManager(
                 }
             }).also { codeScanner = it }
 
+            // Reset limpo antes de armar: se uma sessão anterior ficou meio-aberta (ex.: o app
+            // foi morto sem onDestroy), o engine UROVO fica preso segurando a /dev/ttyACM0 e os
+            // comandos de config (SCNMOD/KBWENU) dão timeout, travando a leitura no último código.
+            // Um stopService() antes do scanCode() libera a serial e garante sessão nova.
+            runCatching { scanner.stopService() }
+            lastCode = null
+            lastCodeAtMs = 0L
+
             // Modo CDC: entrega cada leitura pelo callback do SDK. Usamos o overload simples
             // scanCode(Activity) — exatamente como o sample oficial do SK100
             // (CodeScannerSKActivity), que é o caminho testado pela Gertec. Aceita 1D e 2D.
