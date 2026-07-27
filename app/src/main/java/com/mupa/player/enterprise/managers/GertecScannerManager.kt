@@ -48,9 +48,15 @@ class GertecScannerManager(
             val device = Build.DEVICE.orEmpty()
             val manufacturer = Build.MANUFACTURER.orEmpty()
             val model = Build.MODEL.orEmpty()
+            // O SK100 se reporta como manufacturer=UROVO, model/device=i9100 (o módulo de
+            // leitura é um UROVO tsg820 embarcado no terminal Gertec) — por isso incluímos UROVO
+            // e i9100 na heurística, além dos prefixos "SK"/"gertec".
             return device.contains("SK", ignoreCase = true) ||
                 model.startsWith("SK", ignoreCase = true) ||
-                manufacturer.contains("gertec", ignoreCase = true)
+                manufacturer.contains("gertec", ignoreCase = true) ||
+                manufacturer.contains("urovo", ignoreCase = true) ||
+                model.equals("i9100", ignoreCase = true) ||
+                device.equals("i9100", ignoreCase = true)
         }
     }
 
@@ -92,9 +98,16 @@ class GertecScannerManager(
                 beepEnabled = true
                 landscapeEnabled = true
             }
+            // Aceita 1D e 2D (EAN, Code128, ITF, QR, DataMatrix, PDF417 etc.).
+            // NÃO usar CodeScanner.ALL_CODE_TYPES: nesta versão do AAR esse campo NÃO é
+            // inicializado (fica null) e o SDK estoura NullPointerException no parâmetro "type".
+            // Combinamos SCAN_1D + SCAN_2D, que são as coleções realmente populadas.
+            val codeTypes = ArrayList<String>(CodeScanner.SCAN_1D.size + CodeScanner.SCAN_2D.size).apply {
+                addAll(CodeScanner.SCAN_1D)
+                addAll(CodeScanner.SCAN_2D)
+            }
             // O sample da Gertec passa a Activity diretamente — o SDK depende disso.
-            // ALL_CODE_TYPES: aceita 1D e 2D (EAN, Code128, QR, DataMatrix, PDF417 etc.).
-            scanner.scanCode(context, config, CodeScanner.ALL_CODE_TYPES)
+            scanner.scanCode(context, config, codeTypes)
             true
         }.getOrElse {
             Log.w("MPlayerScan", "gertec_sdk_start_failed try=${retryAttempt + 1} err=${it.javaClass.simpleName}:${it.message}")
