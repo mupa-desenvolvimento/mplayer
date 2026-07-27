@@ -7,19 +7,21 @@ import android.os.Looper
 import android.util.Log
 import java.lang.ref.WeakReference
 import br.com.gertec.gdk.codescanner.CodeScanner
-import br.com.gertec.gdk.codescanner.ScanConfig
-import br.com.gertec.gdk.codescanner.ScanMode
 import br.com.gertec.gdk.codescanner.ScannerCallback
 
 /**
  * Ativa o leitor de código de barras integrado dos terminais Gertec (SK100 etc.)
- * via SDK EasyLayer (GerSDK V1.0.4).
+ * via GerSDK V1.0.4 (EasyLayer Unificada Varejo).
  *
- * Modo CDC: o leitor é iniciado em modo CONTÍNUO ([ScanMode.MODE_CONTINUE_SCAN_CODE])
- * e cada código lido é entregue EXCLUSIVAMENTE pelo callback do SDK
- * ([ScannerCallback.result]) — não há wedge de teclado (HID). Isso evita captura
- * duplicada e leitura por foco de campo. O chamador (PlayerActivity) suprime a
- * captura por dispatchKeyEvent enquanto este leitor está ativo.
+ * Modo CDC: o leitor é iniciado com [CodeScanner.scanCode] passando a Activity —
+ * exatamente como o sample oficial do SK100 (CodeScannerSKActivity). Cada código
+ * lido é entregue EXCLUSIVAMENTE pelo callback do SDK ([ScannerCallback.result]) —
+ * não há wedge de teclado (HID). O chamador (PlayerActivity) suprime a captura por
+ * dispatchKeyEvent enquanto este leitor está ativo.
+ *
+ * "1 EAN por vez": o leitor entrega leituras continuamente, então filtramos leituras
+ * repetidas do MESMO código dentro de uma janela curta ([DUP_WINDOW_MS]) — assim cada
+ * item apresentado gera UMA captura, sem o "machine-gun" do mesmo EAN.
  *
  * Cada código chega em [onBarcode] na thread do SDK — o chamador decide o post
  * para a main thread.
@@ -40,9 +42,14 @@ class GertecScannerManager(
     // as tentativas, desiste até um stop() explícito — evita re-tentar a cada onResume.
     @Volatile private var gaveUp = false
 
+    // Debounce de duplicados: "1 EAN por vez". O mesmo código dentro desta janela é ignorado.
+    @Volatile private var lastCode: String? = null
+    @Volatile private var lastCodeAtMs: Long = 0L
+
     companion object {
         private const val MAX_RETRIES = 15
         private const val RETRY_DELAY_MS = 2_000L
+        private const val DUP_WINDOW_MS = 1_500L
 
         fun isGertecDevice(): Boolean {
             val device = Build.DEVICE.orEmpty()
@@ -75,10 +82,16 @@ class GertecScannerManager(
                 override fun result(barcodeType: String?, data: String?) {
                     runCatching {
                         val code = data?.trim().orEmpty()
-                        if (code.isNotBlank()) {
-                            Log.i("MPlayerScan", "gertec_sdk_scan type=$barcodeType data=$code")
-                            onBarcode(code)
+                        if (code.isBlank()) return@runCatching
+                        // 1 EAN por vez: ignora repetição do mesmo código na janela de debounce.
+                        val now = System.currentTimeMillis()
+                        if (code == lastCode && now - lastCodeAtMs < DUP_WINDOW_MS) {
+                            return@runCatching
                         }
+                        lastCode = code
+                        lastCodeAtMs = now
+                        Log.i("MPlayerScan", "gertec_sdk_scan type=$barcodeType data=$code")
+                        onBarcode(code)
                     }.onFailure {
                         Log.w("MPlayerScan", "gertec_sdk_result_failed err=${it.message}")
                     }
@@ -90,24 +103,12 @@ class GertecScannerManager(
                 }
             }).also { codeScanner = it }
 
-            // Modo CDC: leitor sempre ligado, entrega cada código pelo callback do SDK.
-            // MODE_CONTINUE_SCAN_CODE mantém o leitor ativo após cada leitura (não abre uma
-            // tela de captura por scan). Beep ligado dá feedback audível ao operador.
-            val config = ScanConfig().apply {
-                scanMode = ScanMode.MODE_CONTINUE_SCAN_CODE
-                beepEnabled = true
-                landscapeEnabled = true
-            }
-            // Aceita 1D e 2D (EAN, Code128, ITF, QR, DataMatrix, PDF417 etc.).
-            // NÃO usar CodeScanner.ALL_CODE_TYPES: nesta versão do AAR esse campo NÃO é
-            // inicializado (fica null) e o SDK estoura NullPointerException no parâmetro "type".
-            // Combinamos SCAN_1D + SCAN_2D, que são as coleções realmente populadas.
-            val codeTypes = ArrayList<String>(CodeScanner.SCAN_1D.size + CodeScanner.SCAN_2D.size).apply {
-                addAll(CodeScanner.SCAN_1D)
-                addAll(CodeScanner.SCAN_2D)
-            }
-            // O sample da Gertec passa a Activity diretamente — o SDK depende disso.
-            scanner.scanCode(context, config, codeTypes)
+            // Modo CDC: entrega cada leitura pelo callback do SDK. Usamos o overload simples
+            // scanCode(Activity) — exatamente como o sample oficial do SK100
+            // (CodeScannerSKActivity), que é o caminho testado pela Gertec. Aceita 1D e 2D.
+            // (Os overloads com ScanConfig/Collection estouravam no SK100 por causa do
+            // ALL_CODE_TYPES null e do init do engine UROVO; o simples é o suportado.)
+            scanner.scanCode(context)
             true
         }.getOrElse {
             Log.w("MPlayerScan", "gertec_sdk_start_failed try=${retryAttempt + 1} err=${it.javaClass.simpleName}:${it.message}")

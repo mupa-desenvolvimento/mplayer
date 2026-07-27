@@ -26,8 +26,8 @@ android {
         applicationId = "com.mupa.player.enterprise"
         minSdk = 21
         targetSdk = 34
-        versionCode = 56
-        versionName = "1.1.40"
+        versionCode = 57
+        versionName = "1.1.41"
 
         fun String.escapeForBuildConfig(): String = replace("\\", "\\\\").replace("\"", "\\\"")
 
@@ -151,8 +151,8 @@ android {
 }
 
 dependencies {
-    // SDK Gertec EasyLayer (scanner do SK100 e outros terminais Gertec)
-    implementation(files("libs/EasyLayerUnificadaVarejo_1_0_3.aar"))
+    // SDK Gertec EasyLayer / GerSDK (scanner do SK100 e outros terminais Gertec)
+    implementation(files("libs/GerSDK_v104.aar"))
 
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.core:core-splashscreen:1.0.1")
