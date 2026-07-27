@@ -144,7 +144,7 @@ class GertecScannerManager(
                 codeScanner = null // recria a instância no próximo ciclo
             }
             armIteration++
-            Log.i("MPlayerScan", "gertec_sdk_arm ciclo=$armIteration/$ARM_MAX_CYCLES device=${Build.DEVICE} model=${Build.MODEL}")
+            Log.i("MPlayerScan", "gertec_sdk_arm ciclo=$armIteration/$ARM_MAX_CYCLES")
             scheduleNextCycle(ctxRef)
         }
         verifyRunnable = doScan
