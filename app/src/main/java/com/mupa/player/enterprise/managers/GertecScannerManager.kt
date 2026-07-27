@@ -7,13 +7,22 @@ import android.os.Looper
 import android.util.Log
 import java.lang.ref.WeakReference
 import br.com.gertec.gdk.codescanner.CodeScanner
+import br.com.gertec.gdk.codescanner.ScanConfig
+import br.com.gertec.gdk.codescanner.ScanMode
 import br.com.gertec.gdk.codescanner.ScannerCallback
 
 /**
  * Ativa o leitor de código de barras integrado dos terminais Gertec (SK100 etc.)
- * via SDK EasyLayer. O leitor é iniciado em modo contínuo e cada código lido é
- * entregue no callback [onBarcode] (thread do SDK — o chamador decide o post
- * para a main thread).
+ * via SDK EasyLayer (GerSDK V1.0.4).
+ *
+ * Modo CDC: o leitor é iniciado em modo CONTÍNUO ([ScanMode.MODE_CONTINUE_SCAN_CODE])
+ * e cada código lido é entregue EXCLUSIVAMENTE pelo callback do SDK
+ * ([ScannerCallback.result]) — não há wedge de teclado (HID). Isso evita captura
+ * duplicada e leitura por foco de campo. O chamador (PlayerActivity) suprime a
+ * captura por dispatchKeyEvent enquanto este leitor está ativo.
+ *
+ * Cada código chega em [onBarcode] na thread do SDK — o chamador decide o post
+ * para a main thread.
  */
 class GertecScannerManager(
     private val onBarcode: (String) -> Unit,
@@ -75,8 +84,17 @@ class GertecScannerManager(
                 }
             }).also { codeScanner = it }
 
-            // O sample da Gertec passa a Activity diretamente — o SDK depende disso
-            scanner.scanCode(context)
+            // Modo CDC: leitor sempre ligado, entrega cada código pelo callback do SDK.
+            // MODE_CONTINUE_SCAN_CODE mantém o leitor ativo após cada leitura (não abre uma
+            // tela de captura por scan). Beep ligado dá feedback audível ao operador.
+            val config = ScanConfig().apply {
+                scanMode = ScanMode.MODE_CONTINUE_SCAN_CODE
+                beepEnabled = true
+                landscapeEnabled = true
+            }
+            // O sample da Gertec passa a Activity diretamente — o SDK depende disso.
+            // ALL_CODE_TYPES: aceita 1D e 2D (EAN, Code128, QR, DataMatrix, PDF417 etc.).
+            scanner.scanCode(context, config, CodeScanner.ALL_CODE_TYPES)
             true
         }.getOrElse {
             Log.w("MPlayerScan", "gertec_sdk_start_failed try=${retryAttempt + 1} err=${it.javaClass.simpleName}:${it.message}")

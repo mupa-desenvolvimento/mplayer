@@ -433,6 +433,11 @@ class PlayerActivity : ComponentActivity() {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        // Leitor Gertec em modo CDC: a captura é EXCLUSIVA pelo callback do SDK. Não
+        // acumulamos código por teclado (wedge/HID) pra não duplicar a leitura.
+        if (gertecScanner.isStarted()) {
+            return super.dispatchKeyEvent(event)
+        }
         if (event.action == KeyEvent.ACTION_DOWN) {
             val keyCode = event.keyCode
             val now = SystemClock.elapsedRealtime()
