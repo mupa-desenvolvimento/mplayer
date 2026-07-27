@@ -50,6 +50,13 @@ class GertecScannerManager(
         private const val MAX_RETRIES = 15
         private const val RETRY_DELAY_MS = 2_000L
         private const val DUP_WINDOW_MS = 1_500L
+        // Nº de tentativas esperando o nó serial USB (ttyACM) aparecer no boot antes do fallback.
+        private const val SERIAL_WAIT_RETRIES = 12
+        // Nós serial possíveis do leitor USB-CDC (Gertec SK100 / UROVO): /dev/ttyACM0..1.
+        private val SCANNER_SERIAL_NODES = arrayOf("/dev/ttyACM0", "/dev/ttyACM1")
+
+        private fun serialNodeReady(): Boolean =
+            SCANNER_SERIAL_NODES.any { runCatching { java.io.File(it).exists() }.getOrDefault(false) }
 
         fun isGertecDevice(): Boolean {
             val device = Build.DEVICE.orEmpty()
@@ -78,6 +85,14 @@ class GertecScannerManager(
         if (started) return
         val context = ctxRef.get() ?: return // Activity foi embora — para de tentar
         val ok = runCatching {
+            // Espera o nó serial do leitor USB (CDC) existir antes de armar. No boot, o MPlayer
+            // sobe antes do /dev/ttyACM0 enumerar; se armar cedo demais, a sessão nasce "morta"
+            // (aimer aceso, sem leitura) e só um restart do app resolvia. Aqui deixamos o loop de
+            // retry esperar o nó aparecer. Fallback: após SERIAL_WAIT_RETRIES tentativas seguimos
+            // mesmo assim (caso o nó tenha outro nome neste hardware).
+            if (isGertecDevice() && !serialNodeReady() && retryAttempt < SERIAL_WAIT_RETRIES) {
+                error("serial_not_ready ttyACM ausente (tentativa ${retryAttempt + 1})")
+            }
             val scanner = codeScanner ?: CodeScanner.getInstance(object : ScannerCallback {
                 override fun result(barcodeType: String?, data: String?) {
                     runCatching {
