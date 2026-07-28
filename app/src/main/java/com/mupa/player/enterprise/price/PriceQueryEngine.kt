@@ -64,6 +64,12 @@ class PriceQueryEngine(
     // retorno do preço para a UI - são "fire and forget".
     private val analyticsScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    companion object {
+        // Cache de imagem de produto: válido por 60 min. Passado isso, a imagem local ainda é
+        // exibida na hora (rápido), mas um novo download roda em background pra atualizar.
+        private const val IMAGE_CACHE_TTL_MS = 60L * 60L * 1000L
+    }
+
     // Pré-autentica em background para que o token esteja em cache antes do primeiro scan
     fun warmUpKompraoToken() {
         analyticsScope.launch {
@@ -926,8 +932,10 @@ class PriceQueryEngine(
         if (normalizedEan.isBlank()) return@withContext null to null
 
         val existing = localProductImagePathIfExists(normalizedEan)
-        if (existing != null) return@withContext existing to null
-        if (!isOnline) return@withContext null to null
+        // Cache 60 min: imagem fresca é servida direto; vencida, tenta rebaixar (cai no fluxo
+        // abaixo). Offline, serve a imagem que houver (fresca ou vencida) — melhor que nada.
+        if (existing != null && isProductImageFresh(normalizedEan)) return@withContext existing to null
+        if (!isOnline) return@withContext existing to null
 
         val cachedProduct = db.priceCacheDao().getByEan(normalizedEan)?.let { cache ->
             runCatching { parseProductFromCache(normalizedEan, cache) }.getOrNull()
@@ -983,9 +991,20 @@ class PriceQueryEngine(
         val vtexLocal = vtexUrl?.let { downloadProductImageIfNeeded(ean = normalizedEan, rawUrl = it) }
         if (vtexLocal != null) return@withContext saveToCacheAndReturn(vtexLocal, null)
 
+        // 2ª opção garantida: API de imagem da Mupa (srv-mupa). Tenta primeiro o step
+        // "lookup_image" do config (se houver) e, se ele não trouxer imagem, cai SEMPRE no
+        // srv-mupa hardcoded — assim o fallback da Mupa acontece independente do config.
         val step3 = config.steps.firstOrNull { it.type == "lookup_image" }
-        val meta = fetchProductImageMeta(ean = normalizedEan, step = step3)
-        val mupaLocal = meta?.imageUrl?.let { downloadProductImageIfNeeded(ean = normalizedEan, rawUrl = it) }
+        var meta = fetchProductImageMeta(ean = normalizedEan, step = step3)
+        var mupaLocal = meta?.imageUrl?.let { downloadProductImageIfNeeded(ean = normalizedEan, rawUrl = it) }
+        if (mupaLocal == null && step3 != null) {
+            val fallbackMeta = fetchProductImageMeta(ean = normalizedEan, step = null)
+            val fallbackLocal = fallbackMeta?.imageUrl?.let { downloadProductImageIfNeeded(ean = normalizedEan, rawUrl = it) }
+            if (fallbackLocal != null) {
+                meta = fallbackMeta
+                mupaLocal = fallbackLocal
+            }
+        }
         val theme =
             meta?.let {
                 PriceTheme(
@@ -1213,6 +1232,28 @@ class PriceQueryEngine(
         return any?.absolutePath
     }
 
+    /** Arquivo de imagem local do [ean], se existir (independente da idade). */
+    private fun localProductImageFile(ean: String): File? {
+        val normalized = ean.trim()
+        if (normalized.isBlank()) return null
+        val primary = File(productsDir(), "$normalized.webp")
+        if (primary.exists() && primary.length() > 0L) return primary
+        return productsDir().listFiles()
+            ?.firstOrNull { it.isFile && it.length() > 0L && it.nameWithoutExtension == normalized }
+    }
+
+    /** true se há imagem local do [ean] e ela ainda está dentro da janela de 60 min. */
+    private fun isProductImageFresh(ean: String): Boolean {
+        val f = localProductImageFile(ean) ?: return false
+        return System.currentTimeMillis() - f.lastModified() < IMAGE_CACHE_TTL_MS
+    }
+
+    /** true se há imagem local do [ean] mas ela já venceu (>60 min) — deve ser reatualizada. */
+    fun isProductImageStale(ean: String): Boolean {
+        val f = localProductImageFile(ean) ?: return false
+        return System.currentTimeMillis() - f.lastModified() >= IMAGE_CACHE_TTL_MS
+    }
+
     private fun normalizeCachedProduct(product: PriceProduct?): PriceProduct? {
         if (product == null) return null
         val sanitized = sanitizeLocalPathOrNull(product.image)
@@ -1228,12 +1269,22 @@ class PriceQueryEngine(
     ): String? {
         val url = normalizeExternalUrl(rawUrl).trim()
         if (url.isBlank()) return null
+        val now = System.currentTimeMillis()
         val optimizedTarget = File(productsDir(), "$ean.webp")
-        if (optimizedTarget.exists() && optimizedTarget.length() > 0L) return optimizedTarget.absolutePath
+        if (optimizedTarget.exists() && optimizedTarget.length() > 0L) {
+            // Cache 60 min: só reaproveita se ainda estiver fresco; vencido, apaga e rebaixa.
+            if (now - optimizedTarget.lastModified() < IMAGE_CACHE_TTL_MS) return optimizedTarget.absolutePath
+            runCatching { optimizedTarget.delete() }
+        }
 
-        val existing =
+        val existingAny =
             productsDir().listFiles()
                 ?.firstOrNull { it.isFile && it.length() > 0L && it.nameWithoutExtension == ean }
+        // Arquivo não-otimizado vencido também é descartado pra forçar download novo.
+        if (existingAny != null && now - existingAny.lastModified() >= IMAGE_CACHE_TTL_MS) {
+            runCatching { existingAny.delete() }
+        }
+        val existing = existingAny?.takeIf { it.exists() && it.length() > 0L }
         if (existing != null) {
             val bmp = runCatching { BitmapFactory.decodeFile(existing.absolutePath) }.getOrNull()
             if (bmp == null) return existing.absolutePath

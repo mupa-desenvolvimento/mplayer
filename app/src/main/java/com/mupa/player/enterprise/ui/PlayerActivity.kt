@@ -2230,8 +2230,11 @@ class PlayerActivity : ComponentActivity() {
                 // Renderiza o preço imediatamente com a imagem local (se houver);
                 // o download da imagem remota acontece em segundo plano depois.
                 // Respeita o toggle imageSearchEnabled (busca de imagem pode ser desligada).
+                // Também rebaixa quando a imagem local está VENCIDA (cache >60min): mostra a
+                // velha na hora (rápido) e atualiza com fade quando a nova chega.
                 val imageSearchEnabled = runCatching { SettingsManager(applicationContext).getSettings().imageSearchEnabled }.getOrElse { true }
-                val needsBackgroundImageFetch = localPath.isNullOrBlank() && imageSearchEnabled
+                val imageStale = !localPath.isNullOrBlank() && (engine?.isProductImageStale(expectedEan) == true)
+                val needsBackgroundImageFetch = imageSearchEnabled && (localPath.isNullOrBlank() || imageStale)
                 var finalImagePath: String? = localPath
                 val finalTheme: PriceTheme? = product.theme
 
