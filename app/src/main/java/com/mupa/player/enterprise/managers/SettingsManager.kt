@@ -116,11 +116,15 @@ class SettingsManager(private val context: Context) {
     }
 
     suspend fun setGertecScannerEnabled(enabled: Boolean) {
-        context.settingsDataStore.edit { it[Keys.gertecScannerEnabled] = enabled }
+        // Persiste no DataStore E no SharedPreferences (legacyPrefs). O DataStore pode ser
+        // resetado por corrupção em reboot abrupto (ReplaceFileCorruptionHandler -> vazio); o
+        // fallback no SharedPreferences garante que o leitor continue ativado após o boot.
+        persistBoolean(Keys.gertecScannerEnabled, LEGACY_KEY_GERTEC_SCANNER_ENABLED, enabled)
     }
 
     suspend fun getGertecScannerEnabled(): Boolean {
-        return context.settingsDataStore.data.first()[Keys.gertecScannerEnabled] ?: false
+        return context.settingsDataStore.data.first()[Keys.gertecScannerEnabled]
+            ?: legacyPrefs.getBoolean(LEGACY_KEY_GERTEC_SCANNER_ENABLED, false)
     }
 
     suspend fun setImageSearchEnabled(enabled: Boolean) {
@@ -186,6 +190,7 @@ class SettingsManager(private val context: Context) {
         private const val LEGACY_KEY_DEV_MODE = "dev_mode"
         private const val LEGACY_KEY_DEMO_MODE = "demo_mode"
         private const val LEGACY_KEY_IMAGE_SEARCH_ENABLED = "image_search_enabled"
+        private const val LEGACY_KEY_GERTEC_SCANNER_ENABLED = "gertec_scanner_enabled"
 
         private const val ANDROID_ID_BUG = "9774d56d682e549c"
 
