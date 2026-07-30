@@ -38,7 +38,7 @@ class MediaPlayLogsSyncManager(private val context: Context) {
             arr.put(
                 JSONObject()
                     .put("id", e.id)
-                    .put("device_id", e.deviceId)
+                    .put("device_id", e.deviceId) // Passing device serial as device_id string
                     .put("media_id", e.mediaId)
                     .put("duration", e.durationSeconds)
                     .put("played_at", df.format(Date(e.playedAtEpochMs))),
@@ -56,7 +56,16 @@ class MediaPlayLogsSyncManager(private val context: Context) {
 
         val ok =
             runCatching {
-                http.newCall(req).execute().use { it.isSuccessful }
+                http.newCall(req).execute().use { resp ->
+                    val success = resp.isSuccessful
+                    if (!success) {
+                        val body = resp.body?.string() ?: ""
+                        android.util.Log.e("MediaPlayLogsSync", "Upload failed code=${resp.code} body=$body")
+                    }
+                    success
+                }
+            }.onFailure {
+                android.util.Log.e("MediaPlayLogsSync", "Upload exception", it)
             }.getOrDefault(false)
 
         if (ok) {

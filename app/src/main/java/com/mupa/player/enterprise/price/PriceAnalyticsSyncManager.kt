@@ -27,17 +27,19 @@ class PriceAnalyticsSyncManager(private val context: Context) {
         val url = "https://iurqddkuihjsmxubibao.supabase.co/rest/v1/price_query_events"
         val arr = JSONArray()
         pending.forEach { e ->
-            arr.put(
-                JSONObject()
-                    .put("id", e.id)
-                    .put("device_id", e.deviceId)
-                    .put("filial", e.filial)
-                    .put("ean", e.ean)
-                    .put("created_at_epoch_ms", e.createdAtEpochMs)
-                    .put("response_time_ms", e.responseTimeMs)
-                    .put("from_cache", e.fromCache)
-                    .put("success", e.success),
-            )
+            val obj = JSONObject()
+                .put("id", e.id)
+                .put("device_id", e.deviceId)
+                .put("filial", e.filial)
+                .put("ean", e.ean)
+                .put("created_at_epoch_ms", e.createdAtEpochMs)
+                .put("response_time_ms", e.responseTimeMs)
+                .put("from_cache", e.fromCache)
+                .put("success", e.success)
+            if (!e.descricao.isNullOrBlank()) {
+                obj.put("descricao", e.descricao)
+            }
+            arr.put(obj)
         }
 
         val req = Request.Builder()

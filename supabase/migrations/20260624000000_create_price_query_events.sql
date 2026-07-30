@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS public.price_query_events (
     tenant_id UUID REFERENCES public.tenants(id) ON DELETE SET NULL,
     filial TEXT,
     ean TEXT NOT NULL,
+    descricao TEXT,
     created_at_epoch_ms BIGINT NOT NULL,
     response_time_ms BIGINT,
     from_cache BOOLEAN,
