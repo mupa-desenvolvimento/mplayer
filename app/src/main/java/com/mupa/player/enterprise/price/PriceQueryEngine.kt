@@ -67,7 +67,8 @@ class PriceQueryEngine(
         filial: String,
         responseTimeMs: Long,
         fromCache: Boolean,
-        success: Boolean
+        success: Boolean,
+        descricao: String? = null,
     ) {
         analyticsScope.launch {
             runCatching {
@@ -77,6 +78,7 @@ class PriceQueryEngine(
                         deviceId = deviceId,
                         filial = filial,
                         ean = ean,
+                        descricao = descricao,
                         createdAtEpochMs = System.currentTimeMillis(),
                         responseTimeMs = responseTimeMs,
                         fromCache = fromCache,
@@ -119,6 +121,7 @@ class PriceQueryEngine(
                 responseTimeMs = 0L,
                 fromCache = true,
                 success = product != null,
+                descricao = product?.description,
             )
             return@withContext product
         }
@@ -131,6 +134,7 @@ class PriceQueryEngine(
                 responseTimeMs = 0L,
                 fromCache = false,
                 success = product != null,
+                descricao = product?.description,
             )
             return@withContext product
         }
@@ -263,6 +267,7 @@ class PriceQueryEngine(
                 responseTimeMs = took,
                 fromCache = false,
                 success = product != null,
+                descricao = product?.description,
             )
         }
 
@@ -283,6 +288,7 @@ class PriceQueryEngine(
                 responseTimeMs = 0L,
                 fromCache = true,
                 success = product != null,
+                descricao = product?.description,
             )
             return product
         }
@@ -295,6 +301,7 @@ class PriceQueryEngine(
                 responseTimeMs = 0L,
                 fromCache = false,
                 success = product != null,
+                descricao = product?.description,
             )
             return product
         }
@@ -422,6 +429,7 @@ class PriceQueryEngine(
                 responseTimeMs = took,
                 fromCache = false,
                 success = product != null,
+                descricao = product?.description,
             )
         }
 
@@ -444,13 +452,13 @@ class PriceQueryEngine(
 
         if (fromCache) {
             val product = normalizeCachedProduct(parseProductFromCache(ean, cache))
-            insertEvent(ean = ean, filial = filial, responseTimeMs = 0L, fromCache = true, success = product != null)
+            insertEvent(ean = ean, filial = filial, responseTimeMs = 0L, fromCache = true, success = product != null, descricao = product?.description)
             return product
         }
 
         if (!isOnline) {
             val product = normalizeCachedProduct(parseProductFromCache(ean, cache))?.copy(offline = true)
-            insertEvent(ean = ean, filial = filial, responseTimeMs = 0L, fromCache = false, success = product != null)
+            insertEvent(ean = ean, filial = filial, responseTimeMs = 0L, fromCache = false, success = product != null, descricao = product?.description)
             return product
         }
 
@@ -513,7 +521,7 @@ class PriceQueryEngine(
             Log.w("MPlayerPrice", "query_zaffari_failed ean=$ean err=${t.javaClass.simpleName}:${t.message}")
         } finally {
             val took = System.currentTimeMillis() - startedAt
-            insertEvent(ean = ean, filial = filial, responseTimeMs = took, fromCache = false, success = product != null)
+            insertEvent(ean = ean, filial = filial, responseTimeMs = took, fromCache = false, success = product != null, descricao = product?.description)
         }
 
         return product
@@ -671,13 +679,13 @@ class PriceQueryEngine(
 
         if (fromCache) {
             val product = normalizeCachedProduct(parseProductFromCache(ean, cache))
-            insertEvent(ean = ean, filial = filial, responseTimeMs = 0L, fromCache = true, success = product != null)
+            insertEvent(ean = ean, filial = filial, responseTimeMs = 0L, fromCache = true, success = product != null, descricao = product?.description)
             return product
         }
 
         if (!isOnline) {
             val product = normalizeCachedProduct(parseProductFromCache(ean, cache))?.copy(offline = true)
-            insertEvent(ean = ean, filial = filial, responseTimeMs = 0L, fromCache = false, success = product != null)
+            insertEvent(ean = ean, filial = filial, responseTimeMs = 0L, fromCache = false, success = product != null, descricao = product?.description)
             return product
         }
 
@@ -734,7 +742,7 @@ class PriceQueryEngine(
             Log.w("MPlayerPrice", "query_americana_failed ean=$ean err=${t.javaClass.simpleName}:${t.message}")
         } finally {
             val took = System.currentTimeMillis() - startedAt
-            insertEvent(ean = ean, filial = filial, responseTimeMs = took, fromCache = false, success = product != null)
+            insertEvent(ean = ean, filial = filial, responseTimeMs = took, fromCache = false, success = product != null, descricao = product?.description)
         }
 
         return product

@@ -16,7 +16,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         PriceQueryEventEntity::class,
         MediaPlayLogEntity::class,
     ],
-    version = 6,
+    version = 7,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -43,11 +43,12 @@ abstract class AppDatabase : RoomDatabase() {
                     .addMigrations(MIGRATION_3_4)
                     .addMigrations(MIGRATION_4_5)
                     .addMigrations(MIGRATION_5_6)
+                    .addMigrations(MIGRATION_6_7)
                     .build()
                     .also { instance = it }
             }
         }
-
+        
         private val MIGRATION_1_2 =
             object : Migration(1, 2) {
                 override fun migrate(db: SupportSQLiteDatabase) {
@@ -146,6 +147,13 @@ abstract class AppDatabase : RoomDatabase() {
                     db.execSQL("CREATE INDEX IF NOT EXISTS index_media_play_logs_deviceId ON media_play_logs(deviceId)")
                     db.execSQL("CREATE INDEX IF NOT EXISTS index_media_play_logs_mediaId ON media_play_logs(mediaId)")
                     db.execSQL("CREATE INDEX IF NOT EXISTS index_media_play_logs_playedAtEpochMs ON media_play_logs(playedAtEpochMs)")
+                }
+            }
+
+        private val MIGRATION_6_7 =
+            object : Migration(6, 7) {
+                override fun migrate(db: SupportSQLiteDatabase) {
+                    db.execSQL("ALTER TABLE price_query_events ADD COLUMN descricao TEXT")
                 }
             }
     }

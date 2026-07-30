@@ -18,6 +18,7 @@ data class PriceQueryEventEntity(
     val deviceId: String,
     val filial: String,
     val ean: String,
+    val descricao: String? = null,
     val createdAtEpochMs: Long,
     val responseTimeMs: Long,
     val fromCache: Boolean,
