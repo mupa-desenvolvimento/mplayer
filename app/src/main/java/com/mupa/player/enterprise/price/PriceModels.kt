@@ -11,7 +11,8 @@ data class ProductPriceSlot(
     val value: Double,
     val field: String,
     val isPromo: Boolean,
-    val isClub: Boolean
+    val isClub: Boolean,
+    val fromValue: Double? = null  // preço "de" riscado, exibido dentro do próprio box
 )
 
 data class LayoutConfig(

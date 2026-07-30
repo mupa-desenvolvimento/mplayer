@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Espaçamento entre nome/badges/preço/oferta na tela de consulta de preço. -->
+    <dimen name="price_section_spacing_lg">22dp</dimen>
+    <dimen name="price_section_spacing_md">20dp</dimen>
+</resources>

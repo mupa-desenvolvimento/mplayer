@@ -11,7 +11,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 sealed class DeviceValidationResult {
-    data class Found(val cache: DeviceCache) : DeviceValidationResult()
+    data class Found(val cache: DeviceCache, val heartbeatRequested: Boolean = false) : DeviceValidationResult()
     data object NotFound : DeviceValidationResult()
     data object NotConfigured : DeviceValidationResult()
     data class Error(val message: String) : DeviceValidationResult()
@@ -37,10 +37,32 @@ class DeviceValidationService(private val context: Context) {
                 ?: return@runCatching DeviceValidationResult.NotFound
 
             cacheManager.save(parsed)
-            DeviceValidationResult.Found(parsed)
+            val heartbeatRequested = runCatching { parseHeartbeatRequested(responseText) }.getOrDefault(false)
+            DeviceValidationResult.Found(parsed, heartbeatRequested)
         }.getOrElse {
             DeviceValidationResult.Error(it.javaClass.simpleName)
         }
+    }
+
+    /**
+     * Heartbeat sob demanda (item 3 do monitoramento proativo): a plataforma marca
+     * `heartbeat_requested=true` na mesma resposta do RPC `get_dispositivo_por_serial` — sem
+     * canal novo, aproveita a chamada que já roda a cada 1h. Ver
+     * `MUPA_PLATFORM_DEVICE_EVENTS_CONTRACT.md`.
+     */
+    private fun parseHeartbeatRequested(json: String): Boolean {
+        val trimmed = json.trim()
+        if (trimmed.isBlank() || trimmed == "null") return false
+        val obj = when {
+            trimmed.startsWith("{") -> JSONObject(trimmed)
+            trimmed.startsWith("[") -> {
+                val arr = JSONArray(trimmed)
+                if (arr.length() == 0) return false
+                arr.optJSONObject(0) ?: return false
+            }
+            else -> return false
+        }
+        return obj.optBoolean("heartbeat_requested", false)
     }
 
     private fun parseDeviceResponse(json: String): DeviceCache? {

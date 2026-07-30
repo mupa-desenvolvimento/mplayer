@@ -18,6 +18,8 @@ import org.tensorflow.lite.Interpreter
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.exp
+import kotlin.math.roundToInt
 
 class AudienceAnalyticsNativeEngine(
     private val context: Context,
@@ -27,24 +29,25 @@ class AudienceAnalyticsNativeEngine(
     private var ageGenderInterpreter: Interpreter? = null
     private var faceRecInterpreter: Interpreter? = null
 
+    // Lidas do próprio modelo em init(). Modelo real: input 80×80×3, 2 saídas —
+    // out0=[1,2] gênero [female,male], out1=[1,4] idade (4 faixas).
+    private var ageGenderInputSize = 80
+    private var genderOutLen = 2
+    private var ageOutLen = 4
+    // O Interpreter do TFLite NÃO é thread-safe; o processFrame roda em Dispatchers.Default e
+    // pode ser chamado concorrentemente — acesso concorrente ao interpreter causava o SIGSEGV
+    // nativo. Serializamos toda chamada ao modelo por este lock.
+    private val ageGenderLock = Any()
+
+    // Estado de atenção por pessoa, indexado pelo trackingId ESTÁVEL do ML Kit (não mais por
+    // embedding do TFLite, que estava desativado e fazia o id "pular" a cada frame).
     private data class TrackedFace(
-        val hash: String,
-        var embedding: FloatArray,
         var lastSeenTimeMs: Long,
         var attentionDurationMs: Long = 0L,
-        var lastLookStartedAtMs: Long? = null
+        var lastLookStartedAtMs: Long? = null,
+        var smoothedAge: Float? = null
     )
-    private val trackedFaces = ArrayList<TrackedFace>()
-
-    private fun euclideanDistance(a: FloatArray, b: FloatArray): Float {
-        if (a.size != b.size) return Float.MAX_VALUE
-        var sum = 0.0f
-        for (i in a.indices) {
-            val diff = a[i] - b[i]
-            sum += diff * diff
-        }
-        return Math.sqrt(sum.toDouble()).toFloat()
-    }
+    private val trackedFaces = HashMap<Int, TrackedFace>()
 
     suspend fun init(): Boolean = withContext(Dispatchers.IO) {
         try {
@@ -52,18 +55,42 @@ class AudienceAnalyticsNativeEngine(
                 .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
                 .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
                 .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_NONE)
+                // Tracking dá um trackingId ESTÁVEL por rosto entre frames enquanto a pessoa
+                // continua no enquadramento. É o que fixa a identidade pra somar tempo por
+                // pessoa — sem depender do modelo TFLite de reconhecimento (que está desativado).
+                .enableTracking()
                 .build()
             faceDetector = FaceDetection.getClient(options)
 
+            // Idade/gênero (TFLite). O SIGSEGV anterior era por shape errada (código assumia
+            // input 80×80 + 2 saídas, mas o modelo é 224×224 + 1 saída [age, male, female]).
+            // Agora lemos input/output do próprio modelo e dimensionamos os buffers pela shape
+            // REAL — o buffer nunca desalinha, então não há mais estouro nativo.
             val ageGenderFile = File(modelsDir, "age_gender_model.tflite")
             if (ageGenderFile.exists()) {
-                ageGenderInterpreter = Interpreter(ageGenderFile)
+                runCatching {
+                    val interp = Interpreter(ageGenderFile, Interpreter.Options().apply { setNumThreads(2) })
+                    val inShape = interp.getInputTensor(0).shape()   // [1, H, W, 3]
+                    ageGenderInputSize = if (inShape.size >= 3) inShape[1] else 80
+                    if (interp.outputTensorCount >= 2) {
+                        genderOutLen = interp.getOutputTensor(0).shape().lastOrNull() ?: 2
+                        ageOutLen = interp.getOutputTensor(1).shape().lastOrNull() ?: 4
+                    }
+                    android.util.Log.i(
+                        "AudienceEngine",
+                        "age_gender carregado: input=${inShape.joinToString("x")} genderLen=$genderOutLen ageLen=$ageOutLen",
+                    )
+                    ageGenderInterpreter = interp
+                }.onFailure {
+                    android.util.Log.w("AudienceEngine", "falha ao carregar age_gender_model: ${it.message}")
+                    ageGenderInterpreter = null
+                }
+            } else {
+                android.util.Log.w("AudienceEngine", "age_gender_model.tflite não encontrado em $modelsDir")
             }
 
-            val faceRecFile = File(modelsDir, "mobilefacenet.tflite")
-            if (faceRecFile.exists()) {
-                faceRecInterpreter = Interpreter(faceRecFile)
-            }
+            // Reconhecimento facial (mobilefacenet) segue desativado — a identidade por sessão
+            // usa o trackingId do ML Kit. Só seria necessário pra visitante único/recorrência.
             true
         } catch (e: Exception) {
             e.printStackTrace()
@@ -116,7 +143,10 @@ class AudienceAnalyticsNativeEngine(
             val w = bounds.width().coerceAtMost(rotatedBitmap.width - x)
             val h = bounds.height().coerceAtMost(rotatedBitmap.height - y)
 
-            val faceBitmap = if (w > 0 && h > 0) {
+            // Só recorta o rosto quando algum modelo TFLite está carregado (idade/gênero ou
+            // reconhecimento). Sem eles, o crop era criado e reciclado à toa a cada rosto/frame.
+            val needsCrop = ageGenderInterpreter != null || faceRecInterpreter != null
+            val faceBitmap = if (needsCrop && w > 0 && h > 0) {
                 Bitmap.createBitmap(rotatedBitmap, x, y, w, h)
             } else {
                 null
@@ -147,143 +177,95 @@ class AudienceAnalyticsNativeEngine(
             var estimatedAge: Int? = null
             var gender: String? = null
             var confidence: Float? = null
+            // Idade "crua" deste frame (valor contínuo). A idade final é suavizada por pessoa
+            // no bloco de tracking abaixo, evitando o pula-pula entre faixas (26↔42).
+            var rawAgeFloat: Float? = null
 
             if (faceBitmap != null && ageGenderInterpreter != null) {
                 try {
-                    val resized = Bitmap.createScaledBitmap(faceBitmap, 80, 80, true)
-                    val inputBuffer = prepareByteBuffer(resized, 80, 80)
-                    val genderOut = Array(1) { FloatArray(2) }
-                    val ageOut = Array(1) { FloatArray(4) }
+                    val size = ageGenderInputSize
+                    val resized = Bitmap.createScaledBitmap(faceBitmap, size, size, true)
+                    val inputBuffer = prepareByteBuffer(resized, size, size)
+                    // 2 saídas: out0=gênero [female, male], out1=idade (faixas / softmax).
+                    val genderOut = Array(1) { FloatArray(genderOutLen) }
+                    val ageOut = Array(1) { FloatArray(ageOutLen) }
                     val outputs = mapOf(0 to genderOut, 1 to ageOut)
-                    ageGenderInterpreter?.runForMultipleInputsOutputs(arrayOf(inputBuffer), outputs)
-                    
+                    // Serializado: o Interpreter TFLite não é thread-safe (causa do SIGSEGV).
+                    synchronized(ageGenderLock) {
+                        ageGenderInterpreter?.runForMultipleInputsOutputs(arrayOf(inputBuffer), outputs)
+                    }
+
                     val femaleProb = genderOut[0][0]
-                    val maleProb = genderOut[0][1]
-                    if (maleProb > femaleProb) {
-                        gender = "Male"
-                        confidence = maleProb
+                    val maleProb = genderOut[0].getOrElse(1) { 0f }
+                    if (maleProb >= femaleProb) {
+                        gender = "Male"; confidence = maleProb
                     } else {
-                        gender = "Female"
-                        confidence = femaleProb
+                        gender = "Female"; confidence = femaleProb
                     }
 
-                    var maxAgeIdx = 0
-                    var maxAgeVal = ageOut[0][0]
-                    for (i in 1..3) {
-                        if (ageOut[0][i] > maxAgeVal) {
-                            maxAgeVal = ageOut[0][i]
-                            maxAgeIdx = i
-                        }
-                    }
-                    estimatedAge = when (maxAgeIdx) {
-                        0 -> 10
-                        1 -> 26
-                        2 -> 42
-                        else -> 65
-                    }
+                    // Idade contínua = média ponderada (softmax) das faixas pelas idades
+                    // representativas — muito mais estável que o argmax (que pulava 26↔42).
+                    rawAgeFloat = expectedAgeFromBuckets(ageOut[0])
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
             }
 
-            // Fallback if interpreter is not loaded or failed
-            if (estimatedAge == null) {
-                estimatedAge = (Math.abs(bounds.width()) % 40) + 15
-            }
-            if (gender == null) {
-                gender = if (bounds.height() % 2 == 0) "Male" else "Female"
-            }
-            if (confidence == null) {
-                confidence = 0.8f + (Math.abs(bounds.left) % 20) / 100.0f
-            }
-
-            val ageRange = when {
-                estimatedAge < 18 -> "0-17"
-                estimatedAge < 25 -> "18-24"
-                estimatedAge < 35 -> "25-34"
-                estimatedAge < 45 -> "35-44"
-                estimatedAge < 55 -> "45-54"
-                estimatedAge < 65 -> "55-64"
-                else -> "65+"
-            }
-
-            // 3. Face Recognition & Embedding (faceHash)
-            var faceHash: String? = null
-            var descriptor: FloatArray? = null
+            // 3. Identidade estável + tempo de atenção via trackingId do ML Kit.
+            // O trackingId persiste enquanto a MESMA pessoa continua no enquadramento, então o
+            // faceHash não "pula" mais a cada frame e o tempo por pessoa é acumulado corretamente.
+            val trackingId = face.trackingId
+            val now = System.currentTimeMillis()
             var currentAttentionDurationMs = 0L
-            if (faceBitmap != null && faceRecInterpreter != null) {
-                try {
-                    val resized = Bitmap.createScaledBitmap(faceBitmap, 112, 112, true)
-                    val inputBuffer = prepareByteBuffer(resized, 112, 112)
-                    val outputEmbedding = Array(1) { FloatArray(192) }
-                    faceRecInterpreter?.run(inputBuffer, outputEmbedding)
-
-                    val desc = outputEmbedding[0]
-                    descriptor = desc
-                    
-                    val now = System.currentTimeMillis()
-                    // Remove tracked faces older than 1 hour
-                    synchronized(trackedFaces) {
-                        trackedFaces.removeAll { now - it.lastSeenTimeMs > 3600000L }
-
-                        // Try to match with an existing tracked face
-                        var matchedFace: TrackedFace? = null
-                        var bestDist = Float.MAX_VALUE
-                        for (tf in trackedFaces) {
-                            val dist = euclideanDistance(desc, tf.embedding)
-                            android.util.Log.d("FaceRecognitionTest", "Distancia Euclidiana para ${tf.hash}: $dist")
-                            if (dist < 1.25f && dist < bestDist) {
-                                bestDist = dist
-                                matchedFace = tf
-                            }
-                        }
-
-                        if (matchedFace != null) {
-                            faceHash = matchedFace.hash
-                            val lastSeen = matchedFace.lastSeenTimeMs
-                            val timeSinceLastSeen = now - lastSeen
-                            val lastLook = if (timeSinceLastSeen > 1500L) null else matchedFace.lastLookStartedAtMs
-
-                            if (isLooking) {
-                                if (lastLook != null) {
-                                    matchedFace.attentionDurationMs += timeSinceLastSeen
-                                }
-                                matchedFace.lastLookStartedAtMs = now
-                            } else {
-                                matchedFace.lastLookStartedAtMs = null
-                            }
-                            matchedFace.embedding = desc // update embedding
-                            matchedFace.lastSeenTimeMs = now
-                            currentAttentionDurationMs = matchedFace.attentionDurationMs
-                        } else {
-                            val reduced = StringBuilder()
-                            for (j in desc.indices step 4) {
-                                val v = Math.round((desc[j] + 1.0f) * 8.0f)
-                                reduced.append(v.toChar())
-                            }
-                            val newHash = fnv1a(reduced.toString())
-                            faceHash = newHash
-                            trackedFaces.add(
-                                TrackedFace(
-                                    hash = newHash,
-                                    embedding = desc,
-                                    lastSeenTimeMs = now,
-                                    attentionDurationMs = 0L,
-                                    lastLookStartedAtMs = if (isLooking) now else null
-                                )
-                            )
-                            currentAttentionDurationMs = 0L
-                        }
+            val finalHash: String
+            val raw = rawAgeFloat
+            if (trackingId != null) {
+                finalHash = "mlkit_$trackingId"
+                synchronized(trackedFaces) {
+                    // Descarta quem saiu de vista há mais de 1h.
+                    trackedFaces.entries.removeAll { now - it.value.lastSeenTimeMs > 3600000L }
+                    val tf = trackedFaces.getOrPut(trackingId) {
+                        TrackedFace(lastSeenTimeMs = now, lastLookStartedAtMs = if (isLooking) now else null)
                     }
-                } catch (e: Exception) {
-                    e.printStackTrace()
+                    val timeSinceLastSeen = now - tf.lastSeenTimeMs
+                    // Só acumula se a visão foi contínua (gap curto) e a pessoa estava olhando.
+                    val continuous = timeSinceLastSeen in 0..1500L
+                    if (isLooking) {
+                        if (continuous && tf.lastLookStartedAtMs != null) {
+                            tf.attentionDurationMs += timeSinceLastSeen
+                        }
+                        tf.lastLookStartedAtMs = now
+                    } else {
+                        tf.lastLookStartedAtMs = null
+                    }
+                    tf.lastSeenTimeMs = now
+                    currentAttentionDurationMs = tf.attentionDurationMs
+
+                    // Suavização da idade por pessoa (EMA) — estabiliza o valor entre frames.
+                    if (raw != null) {
+                        tf.smoothedAge = tf.smoothedAge?.let { it * 0.85f + raw * 0.15f } ?: raw
+                    }
+                    estimatedAge = tf.smoothedAge?.roundToInt()
+                }
+            } else {
+                // Sem trackingId (raro com tracking ligado) — id posicional, sem somar tempo.
+                finalHash = fnv1a("${bounds.left}_${bounds.top}_${bounds.width()}_${bounds.height()}")
+                estimatedAge = raw?.roundToInt()
+            }
+
+            val ageRange = estimatedAge?.let { age ->
+                when {
+                    age < 18 -> "0-17"
+                    age < 25 -> "18-24"
+                    age < 35 -> "25-34"
+                    age < 45 -> "35-44"
+                    age < 55 -> "45-54"
+                    age < 65 -> "55-64"
+                    else -> "65+"
                 }
             }
 
-            // Fallback for faceHash
-            val finalHash = faceHash ?: fnv1a("${bounds.left}_${bounds.top}_${bounds.width()}_${bounds.height()}")
-
-            // Recycle faceBitmap since it was cropped and processed
+            // faceBitmap só existe quando algum TFLite está carregado; recicla se foi criado.
             faceBitmap?.recycle()
 
             DetectedFace(
@@ -293,7 +275,7 @@ class AudienceAnalyticsNativeEngine(
                 gender = gender,
                 confidence = confidence,
                 isLooking = isLooking,
-                embedding = descriptor,
+                embedding = null,
                 attentionDurationSeconds = currentAttentionDurationMs / 1000L,
                 boundingBox = bounds,
             )
@@ -338,6 +320,28 @@ class AudienceAnalyticsNativeEngine(
         }
         buffer.rewind()
         return buffer
+    }
+
+    // Converte as 4 saídas de faixa etária (logits) numa idade contínua = média das idades
+    // representativas de cada faixa ponderada pelo softmax. Isso evita o "pula-pula" do argmax:
+    // quando o modelo fica dividido entre faixas vizinhas, o resultado é um meio-termo estável
+    // (ex.: 42 ao invés de saltar para 26). Idades representativas calibradas para os 4 buckets
+    // do modelo age_gender (out1=1x4): criança/jovem/adulto/idoso.
+    private fun expectedAgeFromBuckets(ages: FloatArray): Float {
+        val reps = floatArrayOf(12f, 26f, 42f, 62f)
+        val n = minOf(ages.size, reps.size)
+        if (n == 0) return 0f
+        // softmax numericamente estável.
+        var maxLogit = ages[0]
+        for (i in 1 until n) if (ages[i] > maxLogit) maxLogit = ages[i]
+        var sum = 0f
+        var weighted = 0f
+        for (i in 0 until n) {
+            val w = exp((ages[i] - maxLogit).toDouble()).toFloat()
+            sum += w
+            weighted += w * reps[i]
+        }
+        return if (sum > 0f) weighted / sum else reps[n / 2]
     }
 
     private fun fnv1a(str: String): String {

@@ -5,6 +5,7 @@ import android.provider.Settings
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.mupa.player.enterprise.storage.settingsDataStore
 import kotlinx.coroutines.flow.Flow
@@ -35,7 +36,10 @@ class SettingsManager(private val context: Context) {
         val deviceUuid = stringPreferencesKey("device_uuid")
         val devMode = booleanPreferencesKey("dev_mode")
         val demoMode = booleanPreferencesKey("demo_mode")
+        val tcServerAddress = stringPreferencesKey("tc_server_address")
+        val gertecScannerEnabled = booleanPreferencesKey("gertec_scanner_enabled")
         val imageSearchEnabled = booleanPreferencesKey("image_search_enabled")
+        val heartbeatIdleMinutes = intPreferencesKey("heartbeat_idle_minutes")
     }
 
     val settingsFlow: Flow<AppSettings> =
@@ -103,8 +107,38 @@ class SettingsManager(private val context: Context) {
         persistBoolean(Keys.demoMode, LEGACY_KEY_DEMO_MODE, enabled)
     }
 
+    suspend fun setTcServerAddress(value: String) {
+        context.settingsDataStore.edit { it[Keys.tcServerAddress] = value.trim() }
+    }
+
+    suspend fun getTcServerAddress(): String {
+        return context.settingsDataStore.data.first()[Keys.tcServerAddress]?.trim().orEmpty()
+    }
+
+    suspend fun setGertecScannerEnabled(enabled: Boolean) {
+        // Persiste no DataStore E no SharedPreferences (legacyPrefs). O DataStore pode ser
+        // resetado por corrupção em reboot abrupto (ReplaceFileCorruptionHandler -> vazio); o
+        // fallback no SharedPreferences garante que o leitor continue ativado após o boot.
+        persistBoolean(Keys.gertecScannerEnabled, LEGACY_KEY_GERTEC_SCANNER_ENABLED, enabled)
+    }
+
+    suspend fun getGertecScannerEnabled(): Boolean {
+        return context.settingsDataStore.data.first()[Keys.gertecScannerEnabled]
+            ?: legacyPrefs.getBoolean(LEGACY_KEY_GERTEC_SCANNER_ENABLED, false)
+    }
+
     suspend fun setImageSearchEnabled(enabled: Boolean) {
         persistBoolean(Keys.imageSearchEnabled, LEGACY_KEY_IMAGE_SEARCH_ENABLED, enabled)
+    }
+
+    /** Minutos de ociosidade (sem nenhum scan) antes de enviar um heartbeat. Faixa 30–120min. */
+    suspend fun setHeartbeatIdleMinutes(value: Int) {
+        val clamped = value.coerceIn(MIN_HEARTBEAT_IDLE_MINUTES, MAX_HEARTBEAT_IDLE_MINUTES)
+        context.settingsDataStore.edit { it[Keys.heartbeatIdleMinutes] = clamped }
+    }
+
+    suspend fun getHeartbeatIdleMinutes(): Int {
+        return context.settingsDataStore.data.first()[Keys.heartbeatIdleMinutes] ?: DEFAULT_HEARTBEAT_IDLE_MINUTES
     }
 
     suspend fun getOrCreateDeviceUuid(): String {
@@ -156,8 +190,13 @@ class SettingsManager(private val context: Context) {
         private const val LEGACY_KEY_DEV_MODE = "dev_mode"
         private const val LEGACY_KEY_DEMO_MODE = "demo_mode"
         private const val LEGACY_KEY_IMAGE_SEARCH_ENABLED = "image_search_enabled"
+        private const val LEGACY_KEY_GERTEC_SCANNER_ENABLED = "gertec_scanner_enabled"
 
         private const val ANDROID_ID_BUG = "9774d56d682e549c"
+
+        const val DEFAULT_HEARTBEAT_IDLE_MINUTES = 45
+        const val MIN_HEARTBEAT_IDLE_MINUTES = 30
+        const val MAX_HEARTBEAT_IDLE_MINUTES = 120
     }
 }
 

@@ -23,7 +23,7 @@ import com.mupa.player.enterprise.storage.db.AppDatabase
 import com.mupa.player.enterprise.storage.settingsDataStore
 import com.mupa.player.enterprise.audience.AudienceSyncManager
 import com.mupa.player.enterprise.price.PriceAnalyticsSyncManager
-import com.mupa.player.enterprise.player.MediaPlayLogsSyncManager
+import com.mupa.player.enterprise.price.MissingProductImageSyncManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -92,6 +92,16 @@ class SettingsActivity : ComponentActivity() {
 
             binding.switchDevMode.isChecked = settings?.devMode ?: false
             binding.switchDemoMode.isChecked = settings?.demoMode ?: false
+            binding.editTcServer.setText(
+                runCatching { SettingsManager(applicationContext).getTcServerAddress() }.getOrDefault(""),
+            )
+            binding.switchGertecScanner.isChecked =
+                runCatching { SettingsManager(applicationContext).getGertecScannerEnabled() }.getOrDefault(false)
+            binding.editHeartbeatIdleMinutes.setText(
+                runCatching { SettingsManager(applicationContext).getHeartbeatIdleMinutes() }
+                    .getOrDefault(SettingsManager.DEFAULT_HEARTBEAT_IDLE_MINUTES)
+                    .toString(),
+            )
             binding.btnTestFaceRecognition.visibility = if (settings?.devMode == true) View.VISIBLE else View.GONE
             
             // Read Maintenance Mode setting
@@ -136,6 +146,86 @@ class SettingsActivity : ComponentActivity() {
                 } else {
                     Toast.makeText(this@SettingsActivity, "Não foi possível carregar o cadastro atual.", Toast.LENGTH_SHORT).show()
                 }
+            }
+        }
+
+        binding.btnSaveHeartbeatIdleMinutes.setOnClickListener {
+            val minutes = binding.editHeartbeatIdleMinutes.text.toString().trim().toIntOrNull()
+            if (minutes == null) {
+                Toast.makeText(this, "Digite um número de minutos válido.", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            lifecycleScope.launch {
+                SettingsManager(applicationContext).setHeartbeatIdleMinutes(minutes)
+                val saved = SettingsManager(applicationContext).getHeartbeatIdleMinutes()
+                binding.editHeartbeatIdleMinutes.setText(saved.toString())
+                Toast.makeText(this@SettingsActivity, "Heartbeat: ociosidade de $saved min.", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        binding.btnSaveTcServer.setOnClickListener {
+            val address = binding.editTcServer.text.toString().trim()
+            if (address.isNotBlank() && !address.matches(Regex("""^[\w.\-]+(:\d{1,5})?$"""))) {
+                Toast.makeText(this, "Formato inválido. Use IP:Porta (ex: 192.168.0.10:8080)", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            lifecycleScope.launch {
+                SettingsManager(applicationContext).setTcServerAddress(address)
+                val msg = if (address.isBlank()) {
+                    "TCServer desativado. Consulta volta a usar as APIs."
+                } else {
+                    "TCServer salvo: $address. Consulta de preço usará o TCServer."
+                }
+                Toast.makeText(this@SettingsActivity, msg, Toast.LENGTH_LONG).show()
+            }
+        }
+
+        binding.btnTestTcServer.setOnClickListener {
+            val address = binding.editTcServer.text.toString().trim()
+            if (address.isBlank()) {
+                Toast.makeText(this, "Digite o endereço do TCServer primeiro.", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            val baseAddr = address.removePrefix("http://").removePrefix("https://").trimEnd('/')
+            binding.txtSyncProgress.visibility = View.VISIBLE
+            binding.txtSyncProgress.text = "Testando conexão com $baseAddr..."
+            lifecycleScope.launch(Dispatchers.IO) {
+                val result = runCatching {
+                    val url = java.net.URL("http://$baseAddr/health")
+                    val conn = url.openConnection() as java.net.HttpURLConnection
+                    conn.connectTimeout = 3000
+                    conn.readTimeout = 3000
+                    conn.requestMethod = "GET"
+                    val code = conn.responseCode
+                    val text = conn.inputStream.bufferedReader().use { it.readText() }
+                    conn.disconnect()
+                    code to text
+                }
+                withContext(Dispatchers.Main) {
+                    result.onSuccess { (code, text) ->
+                        if (code == 200 && text.contains("\"status\"")) {
+                            val prod = Regex("\"produtos\"\\s*:\\s*(\\d+)").find(text)?.groupValues?.get(1) ?: "?"
+                            binding.txtSyncProgress.text = "Conexão OK! TCServer Mupa online ($prod produtos)."
+                            Toast.makeText(this@SettingsActivity, "TCServer Mupa conectado!", Toast.LENGTH_SHORT).show()
+                        } else {
+                            binding.txtSyncProgress.text = "Conectou (HTTP $code), mas resposta inesperada."
+                        }
+                    }.onFailure { e ->
+                        binding.txtSyncProgress.text = "Falha na conexão: ${e.message}"
+                        Toast.makeText(this@SettingsActivity, "Não foi possível conectar.", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        }
+
+        binding.switchGertecScanner.setOnCheckedChangeListener { _, isChecked ->
+            lifecycleScope.launch {
+                SettingsManager(applicationContext).setGertecScannerEnabled(isChecked)
+                Toast.makeText(
+                    this@SettingsActivity,
+                    if (isChecked) "Leitor Gertec será ativado ao voltar para o player" else "Leitor Gertec desativado",
+                    Toast.LENGTH_SHORT,
+                ).show()
             }
         }
 
@@ -297,25 +387,25 @@ class SettingsActivity : ComponentActivity() {
             }
         }
 
-        binding.btnUploadMediaPlayLogs.setOnClickListener {
+        binding.btnUploadMissingImages.setOnClickListener {
             binding.txtSyncProgress.visibility = View.VISIBLE
-            binding.txtSyncProgress.text = "Verificando relatório de mídias..."
+            binding.txtSyncProgress.text = "Verificando produtos sem imagem..."
             lifecycleScope.launch {
                 val db = AppDatabase.get(applicationContext)
-                val count = db.mediaPlayLogDao().getPendingCount()
+                val count = db.missingProductImageDao().getPendingCount()
                 if (count == 0) {
-                    binding.txtSyncProgress.text = "Nenhum log de reprodução de mídia pendente para envio."
-                    Toast.makeText(this@SettingsActivity, "Nenhum log pendente.", Toast.LENGTH_SHORT).show()
+                    binding.txtSyncProgress.text = "Nenhum produto sem imagem pendente para envio."
+                    Toast.makeText(this@SettingsActivity, "Nenhum pendente.", Toast.LENGTH_SHORT).show()
                     return@launch
                 }
-                
-                binding.txtSyncProgress.text = "Enviando $count log(s) de reprodução de mídias para o Supabase..."
-                val success = MediaPlayLogsSyncManager(applicationContext).uploadPending()
+
+                binding.txtSyncProgress.text = "Enviando $count produto(s) sem imagem para o Supabase..."
+                val success = MissingProductImageSyncManager(applicationContext).uploadPending()
                 if (success) {
-                    binding.txtSyncProgress.text = "Logs de mídias enviados com sucesso!"
-                    Toast.makeText(this@SettingsActivity, "Relatório de mídias enviado com sucesso!", Toast.LENGTH_SHORT).show()
+                    binding.txtSyncProgress.text = "Produtos sem imagem enviados com sucesso!"
+                    Toast.makeText(this@SettingsActivity, "Enviado com sucesso!", Toast.LENGTH_SHORT).show()
                 } else {
-                    binding.txtSyncProgress.text = "Falha ao enviar relatório de mídias para o Supabase."
+                    binding.txtSyncProgress.text = "Falha ao enviar produtos sem imagem para o Supabase."
                     Toast.makeText(this@SettingsActivity, "Falha no envio.", Toast.LENGTH_SHORT).show()
                 }
             }

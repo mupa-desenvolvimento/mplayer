@@ -26,17 +26,23 @@ android {
         applicationId = "com.mupa.player.enterprise"
         minSdk = 21
         targetSdk = 34
-        versionCode = 44
-        versionName = "1.2.4"
+        versionCode = 65
+        versionName = "1.1.49"
 
         fun String.escapeForBuildConfig(): String = replace("\\", "\\\\").replace("\"", "\\\"")
 
         val supabaseToken = (getConfig("SUPABASE_TOKEN") ?: "").trim()
+        val argosOtpSecret = (getConfig("ARGOS_OTP_SECRET") ?: "").trim()
 
         buildConfigField(
             "String",
             "SUPABASE_TOKEN",
             "\"${supabaseToken.escapeForBuildConfig()}\"",
+        )
+        buildConfigField(
+            "String",
+            "ARGOS_OTP_SECRET",
+            "\"${argosOtpSecret.escapeForBuildConfig()}\"",
         )
         buildConfigField(
             "String",
@@ -111,6 +117,10 @@ android {
             dimension = "api"
             minSdk = 24
         }
+        create("komprao") {
+            dimension = "api"
+            minSdk = 24
+        }
     }
 
     compileOptions {
@@ -141,6 +151,9 @@ android {
 }
 
 dependencies {
+    // SDK Gertec EasyLayer / GerSDK (scanner do SK100 e outros terminais Gertec)
+    implementation(files("libs/GerSDK_v104.aar"))
+
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.core:core-splashscreen:1.0.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
@@ -187,8 +200,6 @@ dependencies {
     // TensorFlow Lite
     implementation("org.tensorflow:tensorflow-lite:2.14.0")
     implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
-
-    add("modernImplementation", files("libs/EasyLayerUnificadaVarejo_1_0_3.aar"))
 
     // Unit testing dependencies
     testImplementation("junit:junit:4.13.2")

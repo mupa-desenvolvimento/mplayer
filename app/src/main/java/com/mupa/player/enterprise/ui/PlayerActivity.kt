@@ -9,9 +9,12 @@ import android.animation.ValueAnimator
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.os.Bundle
 import android.os.Process
+import android.speech.tts.UtteranceProgressListener
 import android.graphics.Color
 import android.graphics.RenderEffect
 import android.graphics.Shader
@@ -25,10 +28,9 @@ import android.content.pm.PackageManager
 import android.speech.tts.TextToSpeech
 import android.text.SpannableStringBuilder
 import android.text.Spanned
-import android.text.style.RelativeSizeSpan
-import android.text.style.StyleSpan
 import android.text.style.StrikethroughSpan
 import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
@@ -36,6 +38,10 @@ import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.view.animation.OvershootInterpolator
+import android.view.animation.DecelerateInterpolator
+import android.view.animation.AccelerateDecelerateInterpolator
+import androidx.constraintlayout.widget.ConstraintLayout
+import androidx.constraintlayout.widget.ConstraintSet
 import android.widget.Toast
 import android.widget.EditText
 import android.text.Editable
@@ -77,6 +83,7 @@ import com.mupa.player.enterprise.player.TransitionConfig
 import com.mupa.player.enterprise.price.PriceConfig
 import com.mupa.player.enterprise.price.PriceConfigParser
 import com.mupa.player.enterprise.price.PriceAnalyticsSyncManager
+import com.mupa.player.enterprise.price.MissingProductImageSyncManager
 import com.mupa.player.enterprise.price.PriceOffer
 import com.mupa.player.enterprise.price.PriceProduct
 import com.mupa.player.enterprise.price.PricePack
@@ -84,7 +91,14 @@ import com.mupa.player.enterprise.price.PriceTheme
 import com.mupa.player.enterprise.price.PriceQueryEngine
 import com.mupa.player.enterprise.price.LayoutConfig
 import com.mupa.player.enterprise.price.PriceSlot
+import com.mupa.player.enterprise.price.PriceStep
 import com.mupa.player.enterprise.price.ProductPriceSlot
+import com.mupa.player.enterprise.security.TotpPasswordGenerator
+import com.mupa.player.enterprise.monitoring.DeviceEventSyncManager
+import com.mupa.player.enterprise.price.AdvantageType
+import com.mupa.player.enterprise.price.OfferIntelligence
+import com.mupa.player.enterprise.price.SmartDescription
+import androidx.core.widget.TextViewCompat
 import android.widget.TextView
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -108,6 +122,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import kotlin.math.roundToInt
 import java.util.UUID
@@ -132,6 +148,32 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
+    // Scanner integrado Gertec (SK100 etc.): ativado automaticamente via SDK EasyLayer
+    private val gertecScanner by lazy {
+        com.mupa.player.enterprise.managers.GertecScannerManager { code ->
+            runOnUiThread { onBarcodeCaptured(code) }
+        }
+    }
+
+    // Scanner Meferi (MC45 etc.) em modo intent output: o MeWedge envia o código
+    // decodificado via broadcast MEF_ACTION em vez de digitar no input focado
+    private val meferiScanReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val extras = intent.extras ?: return
+            val barcode = extras.keySet()
+                .asSequence()
+                .mapNotNull { key -> extras.getString(key) ?: (extras.get(key) as? ByteArray)?.let { String(it) } }
+                .map { it.trim() }
+                .firstOrNull { it.length in 4..20 && it.all { ch -> ch.isDigit() } }
+            if (barcode != null) {
+                Log.i("MPlayerScan", "meferi_intent_scan barcode=$barcode")
+                onBarcodeCaptured(barcode)
+            } else {
+                Log.w("MPlayerScan", "meferi_intent_scan_no_barcode extras=${extras.keySet().joinToString()}")
+            }
+        }
+    }
+
     private lateinit var manifestManager: ManifestManager
     private var audienceManager: AudienceAnalyticsManager? = null
     private var audienceStarted = false
@@ -144,6 +186,15 @@ class PlayerActivity : ComponentActivity() {
     private var lastPlaylistItemsIds: List<String> = emptyList()
     private var lastScanEan: String = ""
     private var lastScanAtMs: Long = 0L
+
+    // Monitoramento proativo (heartbeat inteligente + falha repetida + retomada de conectividade).
+    // Ver MUPA_PLATFORM_DEVICE_EVENTS_CONTRACT.md.
+    private var consecutiveFailEan: String = ""
+    private var consecutiveFailCount: Int = 0
+    private var consecutiveFailReported: Boolean = false
+    private var offlineSinceEpochMs: Long? = null
+    private var lastMeaningfulEventEpochMs: Long = System.currentTimeMillis()
+    private var lastHeartbeatSentEpochMs: Long = System.currentTimeMillis()
     private val scanBuffer = StringBuilder()
     private var scanLastCharAtMs: Long = 0L
     private val scanKeyBuffer = StringBuilder()
@@ -165,8 +216,77 @@ class PlayerActivity : ComponentActivity() {
     private var lastSpokenAtMs: Long = 0L
     private var lastNotFoundEan: String = ""
     private var lastNotFoundAtMs: Long = 0L
+    private val mainHandler = Handler(Looper.getMainLooper())
+    // Timer único de retorno às mídias. A "geração" garante que só o timer do produto
+    // atualmente exibido possa fechar o overlay (um scan novo invalida o timer anterior).
+    private var overlayGeneration = 0
+    private var returnToMediaRunnable: Runnable? = null
+    // Mantido por compatibilidade com onDestroy/onPause; delega ao mecanismo unificado
+    private val ttsAutoDismissRunnable = Runnable { setPriceOverlayVisible(false) }
+
+    /**
+     * Agenda o retorno às mídias. Cancela qualquer timer anterior (fallback ou pós-TTS) e
+     * agenda um único fechamento. [reason] só para log.
+     */
+    private fun scheduleReturnToMedia(delayMs: Long, reason: String) {
+        cancelReturnToMedia()
+        val gen = overlayGeneration
+        Log.i("MPlayerScan", "schedule_return delay=${delayMs}ms reason=$reason gen=$gen")
+        val r = object : Runnable {
+            override fun run() {
+                // Só fecha se ainda for o mesmo produto exibido (um scan mais novo invalida)
+                if (gen != overlayGeneration) return
+                // Nunca volta para a mídia com o TTS ainda falando — espera terminar.
+                if (tts?.isSpeaking == true) {
+                    returnToMediaRunnable = this
+                    mainHandler.postDelayed(this, 400L)
+                    return
+                }
+                setPriceOverlayVisible(false)
+            }
+        }
+        returnToMediaRunnable = r
+        mainHandler.postDelayed(r, delayMs.coerceAtLeast(500L))
+    }
+
+    private fun cancelReturnToMedia() {
+        returnToMediaRunnable?.let { mainHandler.removeCallbacks(it) }
+        returnToMediaRunnable = null
+        mainHandler.removeCallbacks(ttsAutoDismissRunnable)
+        hideOverlayJob?.cancel()
+    }
 
     private val demoHttp: OkHttpClient by lazy { TlsCompat.newClient() }
+    // #region debug-point A:orientation-debug-reporter
+    private fun debugOrientationEvent(
+        hypothesisId: String,
+        location: String,
+        msg: String,
+        data: JSONObject = JSONObject(),
+    ) {
+        val body =
+            JSONObject()
+                .put("sessionId", "device-orientation-layout")
+                .put("runId", "pre-fix")
+                .put("hypothesisId", hypothesisId)
+                .put("location", location)
+                .put("msg", "[DEBUG] $msg")
+                .put("data", data)
+                .put("ts", System.currentTimeMillis())
+                .toString()
+                .toRequestBody("application/json; charset=utf-8".toMediaType())
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching {
+                demoHttp.newCall(
+                    Request.Builder()
+                        .url("http://127.0.0.1:7777/event")
+                        .post(body)
+                        .build(),
+                ).execute().use { }
+            }
+        }
+    }
+    // #endregion
     private val overlayImageLoader: ImageLoader by lazy { ImageLoader(applicationContext) }
 
     private val cameraPermissionLauncher =
@@ -192,16 +312,20 @@ class PlayerActivity : ComponentActivity() {
         binding = ActivityPlayerBinding.inflate(layoutInflater)
         setContentView(binding.root)
         initTts()
-        applyPriceTypography()
+        BrandTypography.applyBrandTypography(binding.priceResultRoot, this)
         binding.apkVersionWatermark.text = "v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
         demoRepo = DemoProductRepository(applicationContext)
         demoImageCache = DemoImageCache(applicationContext)
         setupDevModeToggle()
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(barcodeSimulationReceiver, IntentFilter("com.mupa.player.enterprise.SIMULATE_BARCODE"), RECEIVER_EXPORTED)
+            registerReceiver(meferiScanReceiver, IntentFilter("android.intent.action.MEF_ACTION"), RECEIVER_EXPORTED)
         } else {
             registerReceiver(barcodeSimulationReceiver, IntentFilter("com.mupa.player.enterprise.SIMULATE_BARCODE"))
+            registerReceiver(meferiScanReceiver, IntentFilter("android.intent.action.MEF_ACTION"))
         }
+
+        // Leitor integrado Gertec (SK100 etc.): ativado no onResume quando habilitado nas Configurações
 
         manifestManager = ManifestManager(applicationContext)
         playerEngine = PlayerEngine(
@@ -282,9 +406,24 @@ class PlayerActivity : ComponentActivity() {
         }
         binding.hiddenBarcodeInput.post { ensureBarcodeFocus() }
         lifecycleScope.launch {
+            val gertecEnabled = runCatching { SettingsManager(applicationContext).getGertecScannerEnabled() }.getOrDefault(false)
+            if (gertecEnabled && !gertecScanner.isStarted()) {
+                // post: garante que a janela já está montada antes do SDK iniciar
+                binding.root.post { gertecScanner.start(this@PlayerActivity) }
+            } else if (!gertecEnabled && gertecScanner.isStarted()) {
+                gertecScanner.stop()
+            }
             val settings = runCatching { SettingsManager(applicationContext).getSettings() }.getOrNull()
             devMode = settings?.devMode ?: false
             demoMode = settings?.demoMode ?: false
+            val hadTcServer = tcServerAddress.isNotBlank()
+            refreshTcServerAddress()
+            if (shouldForceTcServerIntegration()) {
+                ensureTcServerDefaultPriceConfigIfNeeded()
+            } else if (hadTcServer) {
+                // endereço foi removido nas configurações: volta para a config do manifesto
+                priceConfig = null
+            }
             updateDeviceWatermark()
             updateDevModeUI()
             val cache = runCatching { DeviceCacheManager(applicationContext).load() }.getOrNull()
@@ -294,6 +433,11 @@ class PlayerActivity : ComponentActivity() {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        // Leitor Gertec em modo CDC: a captura é EXCLUSIVA pelo callback do SDK. Não
+        // acumulamos código por teclado (wedge/HID) pra não duplicar a leitura.
+        if (gertecScanner.isStarted()) {
+            return super.dispatchKeyEvent(event)
+        }
         if (event.action == KeyEvent.ACTION_DOWN) {
             val keyCode = event.keyCode
             val now = SystemClock.elapsedRealtime()
@@ -346,7 +490,10 @@ class PlayerActivity : ComponentActivity() {
 
     override fun onDestroy() {
         runCatching { unregisterReceiver(barcodeSimulationReceiver) }
+        runCatching { unregisterReceiver(meferiScanReceiver) }
+        runCatching { gertecScanner.stop() }
         priceAnimator?.cancel()
+        mainHandler.removeCallbacks(ttsAutoDismissRunnable)
         tts?.stop()
         tts?.shutdown()
         tts = null
@@ -391,6 +538,11 @@ class PlayerActivity : ComponentActivity() {
         ensureAssaiDefaultPriceConfigIfNeeded()
         ensureAmericanasDefaultPriceConfigIfNeeded()
         ensureZaffariDefaultPriceConfigIfNeeded()
+        ensureKompraoDefaultPriceConfigIfNeeded()
+        lifecycleScope.launch {
+            refreshTcServerAddress()
+            ensureTcServerDefaultPriceConfigIfNeeded()
+        }
 
         ensureStoragePermissionIfNeeded()
         tryStartOfflinePlayback()
@@ -411,6 +563,53 @@ class PlayerActivity : ComponentActivity() {
                     runCatching { AudienceSyncManager(applicationContext).uploadPending() }
                     runCatching { PriceAnalyticsSyncManager(applicationContext).uploadPending() }
                     runCatching { MediaPlayLogsSyncManager(applicationContext).uploadPending() }
+                    runCatching { MissingProductImageSyncManager(applicationContext).uploadPending() }
+                    runCatching { DeviceEventSyncManager(applicationContext).uploadPending() }
+                }
+            }
+        }
+
+        // Monitoramento proativo (heartbeat inteligente, nunca fixo): tick leve a cada 1 minuto
+        // só pra decidir SE deve mandar algo — nunca manda no tick em si. Cobre: retomada de
+        // conectividade (com a duração da queda) e ociosidade prolongada (sem nenhum scan).
+        // Ver MUPA_PLATFORM_DEVICE_EVENTS_CONTRACT.md.
+        lifecycleScope.launch(Dispatchers.IO) {
+            while (true) {
+                delay(60 * 1000L)
+                val online = isOnline()
+                val now = System.currentTimeMillis()
+
+                if (online) {
+                    val since = offlineSinceEpochMs
+                    if (since != null) {
+                        offlineSinceEpochMs = null
+                        val offlineSeconds = ((now - since) / 1000L).toInt()
+                        reportDeviceEvent(eventType = "connectivity_restored", offlineDurationSeconds = offlineSeconds)
+                        reportDeviceEvent(eventType = "heartbeat", reason = "state_change")
+                        lastHeartbeatSentEpochMs = now
+                    }
+                } else if (offlineSinceEpochMs == null) {
+                    offlineSinceEpochMs = now
+                }
+
+                val idleMinutes = runCatching { SettingsManager(applicationContext).getHeartbeatIdleMinutes() }
+                    .getOrDefault(SettingsManager.DEFAULT_HEARTBEAT_IDLE_MINUTES)
+                val idleMillis = idleMinutes * 60_000L
+                val quietSinceEpochMs = maxOf(lastMeaningfulEventEpochMs, lastHeartbeatSentEpochMs)
+                if (online && now - quietSinceEpochMs >= idleMillis) {
+                    reportDeviceEvent(eventType = "heartbeat", reason = "idle_timeout")
+                    lastHeartbeatSentEpochMs = now
+                }
+            }
+        }
+
+        // Verifica, sem nunca atrasar uma consulta de preço, se alguma imagem antes ausente já
+        // foi cadastrada manualmente por um técnico — intervalo generoso pois a resolução é manual.
+        lifecycleScope.launch(Dispatchers.IO) {
+            while (true) {
+                delay(4 * 60 * 60 * 1000L) // every 4 hours
+                if (isOnline()) {
+                    runCatching { priceEngine?.checkAndRecoverMissingImages() }
                 }
             }
         }
@@ -691,8 +890,12 @@ class PlayerActivity : ComponentActivity() {
 
     private suspend fun refreshInBackground(): Boolean {
         if (!isOnline()) return false
-        runCatching {
+        val validation = runCatching {
             com.mupa.player.enterprise.services.DeviceValidationService(applicationContext).validateDevice(deviceId)
+        }.getOrNull()
+        if (validation is com.mupa.player.enterprise.services.DeviceValidationResult.Found && validation.heartbeatRequested) {
+            reportDeviceEvent(eventType = "heartbeat", reason = "requested")
+            lastHeartbeatSentEpochMs = System.currentTimeMillis()
         }
         val cache = runCatching { DeviceCacheManager(applicationContext).load() }.getOrNull()
         val licenseType = cache?.tipoDaLicenca?.trim()?.lowercase(Locale.US)
@@ -1117,6 +1320,42 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Grava localmente um evento de monitoramento (heartbeat, falha repetida do mesmo item ou
+     * retomada de conectividade) e, se online, tenta subir pro Supabase imediatamente (melhor
+     * esforço, sem bloquear quem chamou) — senão fica na fila pro próximo ciclo horário de
+     * `DeviceEventSyncManager`, junto com as outras sincronizações. Ver
+     * `MUPA_PLATFORM_DEVICE_EVENTS_CONTRACT.md`.
+     */
+    private fun reportDeviceEvent(
+        eventType: String,
+        reason: String? = null,
+        ean: String? = null,
+        failCount: Int? = null,
+        offlineDurationSeconds: Int? = null,
+    ) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val cache = runCatching { DeviceCacheManager(applicationContext).load() }.getOrNull()
+            val entity = com.mupa.player.enterprise.storage.db.DeviceEventEntity(
+                id = UUID.randomUUID().toString(),
+                deviceId = deviceId,
+                companyId = cache?.company?.trim()?.ifBlank { null },
+                filial = cache?.filial?.trim()?.ifBlank { null },
+                eventType = eventType,
+                reason = reason,
+                ean = ean,
+                failCount = failCount,
+                offlineDurationSeconds = offlineDurationSeconds,
+                createdAtEpochMs = System.currentTimeMillis(),
+                uploadedAtEpochMs = null,
+            )
+            runCatching { AppDatabase.get(applicationContext).deviceEventDao().insert(entity) }
+            if (isOnline()) {
+                runCatching { DeviceEventSyncManager(applicationContext).uploadPending() }
+            }
+        }
+    }
+
     private fun onBarcodeCaptured(raw: String) {
         val ean = raw.trim()
         if (ean.isBlank()) return
@@ -1164,11 +1403,20 @@ class PlayerActivity : ComponentActivity() {
                 return@launch
             }
 
+            // Código de barras específico por aparelho: "settings_{últimos 4 dígitos do device_id}".
+            // O próprio código já é o segredo (distribuído fisicamente por dispositivo), então
+            // abre direto, sem diálogo adicional.
+            if (deviceId.length >= 4 && ean.equals("settings_${deviceId.takeLast(4)}", ignoreCase = true)) {
+                startActivity(Intent(this@PlayerActivity, SettingsActivity::class.java))
+                return@launch
+            }
+
             val cmd = ean.trim().lowercase(Locale.US)
             if (cmd == "devon" || cmd == "devmode=1" || cmd == "devmode=true" || cmd == "demoon") {
                 runCatching { SettingsManager(applicationContext).setDevMode(true) }
                 devMode = true
                 updateDeviceWatermark()
+                reportDeviceEvent(eventType = "heartbeat", reason = "state_change")
                 Toast.makeText(this@PlayerActivity, "DEMO ativado", Toast.LENGTH_SHORT).show()
                 return@launch
             }
@@ -1176,6 +1424,7 @@ class PlayerActivity : ComponentActivity() {
                 runCatching { SettingsManager(applicationContext).setDevMode(false) }
                 devMode = false
                 updateDeviceWatermark()
+                reportDeviceEvent(eventType = "heartbeat", reason = "state_change")
                 Toast.makeText(this@PlayerActivity, "DEMO desativado", Toast.LENGTH_SHORT).show()
                 return@launch
             }
@@ -1207,12 +1456,16 @@ class PlayerActivity : ComponentActivity() {
 
             val cfg =
                 priceConfig ?: run {
-                    if (shouldForceAssaiIntegration()) {
+                    if (shouldForceTcServerIntegration()) {
+                        ensureTcServerDefaultPriceConfigIfNeeded()
+                    } else if (shouldForceAssaiIntegration()) {
                         ensureAssaiDefaultPriceConfigIfNeeded()
                     } else if (shouldForceAmericanasIntegration()) {
                         ensureAmericanasDefaultPriceConfigIfNeeded()
                     } else if (shouldForceZaffariIntegration()) {
                         ensureZaffariDefaultPriceConfigIfNeeded()
+                    } else if (shouldForceKompraoIntegration()) {
+                        ensureKompraoDefaultPriceConfigIfNeeded()
                     } else {
                         ensureDefaultSupabasePriceConfig()
                     }
@@ -1227,7 +1480,7 @@ class PlayerActivity : ComponentActivity() {
                 val remoteDemo = runCatching { fetchDemoProductFromSupabase(ean) }.getOrNull()
                 if (remoteDemo != null) {
                     showDemoProduct(remoteDemo)
-                    scheduleHidePriceOverlay(8000L)
+                    scheduleReturnToMedia(8000L, "fallback")
                     return@launch
                 }
             }
@@ -1235,7 +1488,7 @@ class PlayerActivity : ComponentActivity() {
             val demo = runCatching { demoRepo.getDemoProduct(ean) }.getOrNull()
             if (demo != null) {
                 showDemoProduct(demo)
-                scheduleHidePriceOverlay(8000L)
+                scheduleReturnToMedia(8000L, "fallback")
                 return@launch
             }
 
@@ -1357,6 +1610,23 @@ class PlayerActivity : ComponentActivity() {
                     )
                     true
                 }
+                // Fase 0 da migração para Layout Universal (prova de conceito): mesmos dados do
+                // test_zaf_full, só trocando o layout para validar o ScrollView com N slots.
+                "test_universal" -> {
+                    mockProduct = PriceProduct(
+                        id = "UNIV001", ean = "7891000315507", description = "CHOCOLATE LACTA AO LEITE 80G",
+                        price = 5.99, originalPrice = null, clubPrice = 2.19, priceClub = 2.19, priceWholesale = 2.09,
+                        offer = PriceOffer(enabled = true, title = "A PARTIR DE 27 UN", description = null, secondUnit = 2.09, type = "bulk"),
+                        priceSlots = listOf(
+                            ProductPriceSlot(label = "PREÇO/UN", value = 5.99, field = "price", isPromo = false, isClub = false),
+                            ProductPriceSlot(label = "CLIENTE CLUBE", value = 2.19, field = "price_club", isPromo = false, isClub = true),
+                            ProductPriceSlot(label = "A PARTIR DE 27 UN", value = 4.49, field = "price_wholesale", isPromo = false, isClub = false),
+                            ProductPriceSlot(label = "CLUBE 27 UN", value = 2.09, field = "price_club", isPromo = false, isClub = true),
+                        ),
+                        xmlLayoutType = "universal", packs = emptyList(), theme = null, offline = false
+                    )
+                    true
+                }
                 // ── Americanas ──────────────────────────────────────────────
                 // Só preço regular, sem promoção
                 "test_ame_normal" -> {
@@ -1409,22 +1679,47 @@ class PlayerActivity : ComponentActivity() {
 
             if (isMock && mockProduct != null) {
                 showPriceOverlayProduct(mockProduct)
-                scheduleHidePriceOverlay(8000L)
+                scheduleReturnToMedia(8000L, "fallback")
                 return@launch
             }
 
             val engine = priceEngine ?: return@launch
             showPriceOverlayLoading(ean)
+            lastMeaningfulEventEpochMs = System.currentTimeMillis()
+
             val product = runCatching { engine.query(ean, cfg, isOnline()) }.getOrNull()
             if (product != null) {
+                consecutiveFailCount = 0
+                consecutiveFailReported = false
                 showPriceOverlayProduct(product)
-                scheduleHidePriceOverlay(computePriceDisplayTimeoutMs(cfg.timeoutMs))
+                val timeoutMs = if (product.clubPrice != null || product.priceClub != null) 30000L else 8000L
+                scheduleReturnToMedia(timeoutMs, "fallback")
             } else {
                 val offlineProduct = runCatching { engine.query(ean, cfg, isOnline = false) }.getOrNull()
                 if (offlineProduct != null) {
+                    consecutiveFailCount = 0
+                    consecutiveFailReported = false
                     showPriceOverlayProduct(offlineProduct.copy(offline = true))
-                    scheduleHidePriceOverlay(computePriceDisplayTimeoutMs(cfg.timeoutMs))
+                    val timeoutMs = if (offlineProduct.clubPrice != null || offlineProduct.priceClub != null) 30000L else 8000L
+                    scheduleReturnToMedia(timeoutMs, "fallback")
                 } else {
+                    // Falha repetida do mesmo item (item 1 do monitoramento proativo): útil pra
+                    // apontar EAN com problema de cadastro/API, não pra "produto não existe" avulso.
+                    if (ean == consecutiveFailEan) {
+                        consecutiveFailCount++
+                    } else {
+                        consecutiveFailEan = ean
+                        consecutiveFailCount = 1
+                        consecutiveFailReported = false
+                    }
+                    if (consecutiveFailCount >= MAX_CONSECUTIVE_SCAN_FAILURES && !consecutiveFailReported) {
+                        consecutiveFailReported = true
+                        reportDeviceEvent(
+                            eventType = "repeated_scan_failure",
+                            ean = ean,
+                            failCount = consecutiveFailCount,
+                        )
+                    }
                     setPriceOverlayVisible(false)
                     speakNotFoundIfPossible(ean)
                 }
@@ -1527,53 +1822,127 @@ class PlayerActivity : ComponentActivity() {
             showAdminAccessDialog()
             true
         }
-        binding.apkVersionWatermark.setOnLongClickListener {
-            binding.deviceIdWatermark.performLongClick()
+
+        // Hold de 3s (não o long-click padrão de ~500ms) no texto da versão.
+        val holdRunnable = Runnable { showAdminAccessDialog() }
+        binding.apkVersionWatermark.setOnTouchListener { _, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> mainHandler.postDelayed(holdRunnable, 3000L)
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> mainHandler.removeCallbacks(holdRunnable)
+            }
             true
         }
     }
 
+    /**
+     * Diálogo de acesso ao Settings: pede a senha TOTP de 4 dígitos (válida por 1 minuto,
+     * ver [TotpPasswordGenerator] e `ARGOS_OPEN_SETTINGS_CONTRACT.md`). Usa um teclado numérico
+     * próprio (em vez do EditText padrão) para não abrir o teclado do Android, e mostra a
+     * data/hora atual para o técnico calcular a senha do minuto no Argos.
+     */
     private fun showAdminAccessDialog() {
-        lifecycleScope.launch {
-            val cache = DeviceCacheManager(applicationContext).load()
-            val targetCode = cache?.companyCode?.trim().orEmpty()
-            withContext(Dispatchers.Main) {
-                val container = android.widget.FrameLayout(this@PlayerActivity)
-                val params = android.widget.FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    leftMargin = 48
-                    rightMargin = 48
-                    topMargin = 24
-                    bottomMargin = 24
-                }
-                val input = EditText(this@PlayerActivity).apply {
-                    hint = "Código da Empresa"
-                    inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
-                    layoutParams = params
-                }
-                container.addView(input)
-                android.app.AlertDialog.Builder(this@PlayerActivity)
-                    .setTitle("Acesso Restrito")
-                    .setMessage("Insira o Código de Usuário da Empresa:")
-                    .setView(container)
-                    .setNegativeButton("Cancelar", null)
-                    .setPositiveButton("Confirmar") { _, _ ->
-                        val entered = input.text.toString().trim()
-                        val isCorrect = (targetCode.isNotBlank() && entered.equals(targetCode, ignoreCase = true)) ||
-                                        entered.equals("DEBUG", ignoreCase = true) ||
-                                        entered.equals("123ABC", ignoreCase = true) ||
-                                        targetCode.isBlank()
-                        if (isCorrect) {
-                            startActivity(Intent(this@PlayerActivity, SettingsActivity::class.java))
-                        } else {
-                            Toast.makeText(this@PlayerActivity, "Código inválido!", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                    .show()
+        val density = resources.displayMetrics.density
+        fun dp(value: Int) = (value * density).toInt()
+
+        val maxDigits = 4
+        val enteredDigits = StringBuilder()
+
+        val root = LinearLayout(this@PlayerActivity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(8), dp(24), dp(8))
+        }
+
+        val dateTimeLabel = TextView(this@PlayerActivity).apply {
+            text = "Data/hora do aparelho:"
+            textSize = 13f
+            gravity = android.view.Gravity.CENTER
+            setTextColor(Color.LTGRAY)
+        }
+        root.addView(dateTimeLabel)
+
+        val dateTimeView = TextView(this@PlayerActivity).apply {
+            textSize = 20f
+            gravity = android.view.Gravity.CENTER
+            typeface = android.graphics.Typeface.MONOSPACE
+            setTextColor(Color.WHITE)
+            setPadding(0, dp(4), 0, dp(8))
+        }
+        root.addView(dateTimeView)
+
+        val displayView = TextView(this@PlayerActivity).apply {
+            textSize = 32f
+            gravity = android.view.Gravity.CENTER
+            letterSpacing = 0.4f
+            typeface = android.graphics.Typeface.MONOSPACE
+            setPadding(0, dp(16), 0, dp(16))
+        }
+        root.addView(displayView)
+
+        fun refreshDisplay() {
+            displayView.text = (0 until maxDigits).joinToString("  ") { i ->
+                if (i < enteredDigits.length) enteredDigits[i].toString() else "_"
             }
         }
+        refreshDisplay()
+
+        val dateFormat = SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale("pt", "BR"))
+        val clockHandler = Handler(Looper.getMainLooper())
+        val clockRunnable = object : Runnable {
+            override fun run() {
+                dateTimeView.text = dateFormat.format(Date())
+                clockHandler.postDelayed(this, 1000L)
+            }
+        }
+        clockHandler.post(clockRunnable)
+
+        fun makeKey(label: String, onClick: () -> Unit) = android.widget.Button(this@PlayerActivity).apply {
+            text = label
+            textSize = 20f
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                setMargins(dp(4), dp(4), dp(4), dp(4))
+            }
+            setOnClickListener { onClick() }
+        }
+
+        val rows = listOf(
+            listOf("1", "2", "3"),
+            listOf("4", "5", "6"),
+            listOf("7", "8", "9"),
+            listOf("C", "0", "⌫"),
+        )
+        rows.forEach { rowLabels ->
+            val row = LinearLayout(this@PlayerActivity).apply { orientation = LinearLayout.HORIZONTAL }
+            rowLabels.forEach { label ->
+                row.addView(
+                    makeKey(label) {
+                        when (label) {
+                            "C" -> enteredDigits.setLength(0)
+                            "⌫" -> if (enteredDigits.isNotEmpty()) enteredDigits.setLength(enteredDigits.length - 1)
+                            else -> if (enteredDigits.length < maxDigits) enteredDigits.append(label)
+                        }
+                        refreshDisplay()
+                    }
+                )
+            }
+            root.addView(row)
+        }
+
+        val dialog = android.app.AlertDialog.Builder(this@PlayerActivity)
+            .setTitle("Acesso Restrito")
+            .setView(root)
+            .setNegativeButton("Cancelar", null)
+            .setPositiveButton("Confirmar") { _, _ ->
+                val entered = enteredDigits.toString()
+                val isCorrect = TotpPasswordGenerator.isValid(entered, BuildConfig.ARGOS_OTP_SECRET)
+                if (isCorrect) {
+                    startActivity(Intent(this@PlayerActivity, SettingsActivity::class.java))
+                } else {
+                    Toast.makeText(this@PlayerActivity, "Senha inválida!", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .create()
+        dialog.setOnDismissListener { clockHandler.removeCallbacks(clockRunnable) }
+        dialog.show()
     }
 
     private fun normalizeUrl(raw: String): String {
@@ -1585,6 +1954,11 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private fun applyPriceConfigFromManifestJson(manifestJson: String) {
+        if (shouldForceTcServerIntegration()) {
+            ensureTcServerDefaultPriceConfigIfNeeded()
+            Log.i("MPlayerPrice", "price_config_applied forced_integration=integra-tcserver")
+            return
+        }
         val json = manifestManager.parsePriceConfigJson(manifestJson) ?: return
         val cfg = runCatching { PriceConfigParser.parse(json) }.getOrNull() ?: return
         if (shouldForceAssaiIntegration()) {
@@ -1598,8 +1972,13 @@ class PlayerActivity : ComponentActivity() {
             return
         }
         if (shouldForceZaffariIntegration()) {
-            priceConfig = cfg.copy(integration = "integra-zaffari")
+            ensureZaffariDefaultPriceConfigIfNeeded()
             Log.i("MPlayerPrice", "price_config_applied forced_integration=integra-zaffari companyId=$companyId")
+            return
+        }
+        if (shouldForceKompraoIntegration()) {
+            ensureKompraoDefaultPriceConfigIfNeeded()
+            Log.i("MPlayerPrice", "price_config_applied forced_integration=integra-komprao companyId=$companyId")
             return
         }
         priceConfig = cfg
@@ -1649,15 +2028,67 @@ class PlayerActivity : ComponentActivity() {
         return id.equals("fd55dbdd-63da-442e-aa99-5575c0496622", ignoreCase = true)
     }
 
+    private fun shouldForceKompraoIntegration(): Boolean {
+        if (com.mupa.player.enterprise.BuildConfig.FLAVOR == "komprao") return true
+        val id = companyId?.trim().orEmpty()
+        return id.equals("54fc2743-5194-48b1-a002-ab42a45b834c", ignoreCase = true)
+    }
+
+    // TCServer Gertec: configurado manualmente em Configurações; quando presente,
+    // tem prioridade sobre qualquer outra integração
+    @Volatile private var tcServerAddress: String = ""
+
+    private suspend fun refreshTcServerAddress() {
+        tcServerAddress = runCatching {
+            SettingsManager(applicationContext).getTcServerAddress()
+        }.getOrDefault("")
+    }
+
+    private fun shouldForceTcServerIntegration(): Boolean = tcServerAddress.isNotBlank()
+
+    private fun ensureTcServerDefaultPriceConfigIfNeeded() {
+        if (!shouldForceTcServerIntegration()) return
+        priceConfig = PriceConfig(
+            integration = "integra-tcserver",
+            timeoutMs = 8000L,
+            // Sem cache: o TCServer é local/rápido e o preço pode mudar a qualquer momento
+            cacheMinutes = 0,
+            steps = emptyList(),
+            analyticsUploadUrl = null,
+        )
+        Log.i("MPlayerPrice", "price_config_default_tcserver_applied address=$tcServerAddress")
+    }
+
+    private fun ensureKompraoDefaultPriceConfigIfNeeded() {
+        if (!shouldForceKompraoIntegration()) return
+        priceConfig = PriceConfig(
+            integration = "integra-komprao",
+            timeoutMs = 9000L,
+            cacheMinutes = 5,
+            steps = emptyList(),
+            analyticsUploadUrl = null,
+        )
+        Log.i("MPlayerPrice", "price_config_default_komprao_applied companyId=$companyId")
+        priceEngine?.warmUpKompraoToken()
+    }
+
     private fun ensureZaffariDefaultPriceConfigIfNeeded() {
-        if (!shouldForceZaffariIntegration()) return
-        if (priceConfig != null) return
+        if (!shouldForceZaffariIntegration() && !ZAFFARI_TEST_MODE) return
         priceConfig =
             PriceConfig(
                 integration = "integra-zaffari",
                 timeoutMs = 9000L,
-                cacheMinutes = 10,
-                steps = emptyList(),
+                cacheMinutes = 5,
+                steps = listOf(
+                    PriceStep(
+                        type = "authenticate",
+                        url = "https://zaffariexpress.com.br/api/login/login",
+                        method = "POST",
+                        headers = mapOf("Content-Type" to "application/json"),
+                        body = """{"usuario":"mupa","password":"7hDD${'$'}%k*WJrY%4sQQY9G"}""",
+                        mapping = mapOf("access_token" to "token"),
+                    ),
+                ),
                 analyticsUploadUrl = null,
             )
         Log.i("MPlayerPrice", "price_config_default_zaffari_applied companyId=$companyId")
@@ -1731,6 +2162,9 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private fun showPriceOverlayLoading(ean: String) {
+        // Novo scan: invalida o timer de retorno anterior e cancela agendamentos pendentes
+        overlayGeneration++
+        cancelReturnToMedia()
         setPriceOverlayVisible(true)
         overlayEan = ean
         overlayRenderJob?.cancel()
@@ -1740,7 +2174,7 @@ class PlayerActivity : ComponentActivity() {
         binding.priceLoadingContainer.alpha = 0f
         binding.priceLoadingContainer.scaleX = 0.95f
         binding.priceLoadingContainer.scaleY = 0.95f
-        binding.priceLoadingContainer.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(220).start()
+        binding.priceLoadingContainer.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(140).start()
 
         binding.priceNameText.text = "CONSULTANDO..."
         binding.priceSubtitleText.visibility = View.GONE
@@ -1767,6 +2201,20 @@ class PlayerActivity : ComponentActivity() {
         val expectedEan = product.ean
         overlayRenderJob =
             lifecycleScope.launch {
+                // #region debug-point B:overlay-render-start
+                debugOrientationEvent(
+                    hypothesisId = "B",
+                    location = "PlayerActivity.showPriceOverlayProduct:start",
+                    msg = "overlay render job started",
+                    data =
+                        JSONObject()
+                            .put("expectedEan", expectedEan)
+                            .put("productLayoutType", product.xmlLayoutType)
+                            .put("overlayVisible", binding.priceOverlay.visibility == View.VISIBLE)
+                            .put("loadingVisible", binding.priceLoadingContainer.visibility == View.VISIBLE)
+                            .put("orientation", resources.configuration.orientation),
+                )
+                // #endregion
                 val engine = priceEngine
                 val cfg = priceConfig
 
@@ -1779,34 +2227,36 @@ class PlayerActivity : ComponentActivity() {
 
                 val localPath = localFromProduct ?: engine?.getLocalProductImagePathIfExists(expectedEan)
 
-                var finalImagePath: String? = null
-                var finalTheme: PriceTheme? = product.theme
-
+                // Renderiza o preço imediatamente com a imagem local (se houver);
+                // o download da imagem remota acontece em segundo plano depois.
+                // Respeita o toggle imageSearchEnabled (busca de imagem pode ser desligada).
+                // Também rebaixa quando a imagem local está VENCIDA (cache >60min): mostra a
+                // velha na hora (rápido) e atualiza com fade quando a nova chega.
                 val imageSearchEnabled = runCatching { SettingsManager(applicationContext).getSettings().imageSearchEnabled }.getOrElse { true }
-
-                if (localPath.isNullOrBlank()) {
-                    if (engine != null && cfg != null && imageSearchEnabled) {
-                        val (downloadedPath, theme) =
-                            runCatching {
-                                engine.preloadProductImageAndTheme(
-                                    ean = expectedEan,
-                                    config = cfg,
-                                    isOnline = isOnline(),
-                                )
-                            }.getOrNull() ?: (null to null)
-
-                        finalImagePath = downloadedPath
-                        if (theme != null) {
-                            finalTheme = theme
-                        }
-                    }
-                } else {
-                    finalImagePath = localPath
-                }
+                val imageStale = !localPath.isNullOrBlank() && (engine?.isProductImageStale(expectedEan) == true)
+                val needsBackgroundImageFetch = imageSearchEnabled && (localPath.isNullOrBlank() || imageStale)
+                var finalImagePath: String? = localPath
+                val finalTheme: PriceTheme? = product.theme
 
                 if (finalImagePath.isNullOrBlank()) {
                     finalImagePath = runCatching { engine?.getDefaultProductImagePath() }.getOrNull()
                 }
+
+                // #region debug-point C:overlay-image-prepared
+                debugOrientationEvent(
+                    hypothesisId = "C",
+                    location = "PlayerActivity.showPriceOverlayProduct:image",
+                    msg = "overlay image/theme preflight finished",
+                    data =
+                        JSONObject()
+                            .put("expectedEan", expectedEan)
+                            .put("localPathExists", !localPath.isNullOrBlank())
+                            .put("finalImagePathExists", !finalImagePath.isNullOrBlank())
+                            .put("needsBackgroundImageFetch", needsBackgroundImageFetch)
+                            .put("enginePresent", engine != null)
+                            .put("cfgPresent", cfg != null),
+                )
+                // #endregion
 
                 val prepared =
                     if (!finalImagePath.isNullOrBlank()) {
@@ -1815,13 +2265,45 @@ class PlayerActivity : ComponentActivity() {
                         null
                     }
 
+                // #region debug-point D:before-main-thread-bind
+                debugOrientationEvent(
+                    hypothesisId = "D",
+                    location = "PlayerActivity.showPriceOverlayProduct:pre-main",
+                    msg = "prepared overlay before main-thread bind",
+                    data =
+                        JSONObject()
+                            .put("expectedEan", expectedEan)
+                            .put("preparedPresent", prepared != null)
+                            .put("overlayVisible", binding.priceOverlay.visibility == View.VISIBLE)
+                            .put("loadingVisible", binding.priceLoadingContainer.visibility == View.VISIBLE),
+                )
+                // #endregion
+
                 withContext(Dispatchers.Main) {
-                    if (overlayEan != expectedEan || binding.priceOverlay.visibility != View.VISIBLE) return@withContext
+                    // #region debug-point E:main-thread-guard
+                    if (overlayEan != expectedEan || binding.priceOverlay.visibility != View.VISIBLE) {
+                        debugOrientationEvent(
+                            hypothesisId = "E",
+                            location = "PlayerActivity.showPriceOverlayProduct:guard",
+                            msg = "main-thread bind aborted by guard",
+                            data =
+                                JSONObject()
+                                    .put("expectedEan", expectedEan)
+                                    .put("overlayEan", overlayEan)
+                                    .put("overlayVisible", binding.priceOverlay.visibility == View.VISIBLE),
+                        )
+                        return@withContext
+                    }
+                    // #endregion
 
                     val layoutType = product.xmlLayoutType ?: priceConfig?.layout?.xmlLayoutType ?: "split"
                     inflateLayoutForProduct(layoutType)
+                    // Adapta imediatamente à orientação atual (portrait/landscape)
+                    applyPriceOverlayLayout()
 
                     val nameText = binding.priceResultRoot.findViewById<TextView>(R.id.priceNameText)
+                    val nameSecondLineText = binding.priceResultRoot.findViewById<TextView>(R.id.priceNameSecondLineText)
+                    val smartCaptionText = binding.priceResultRoot.findViewById<TextView>(R.id.priceSmartCaption)
                     val codeText = binding.priceResultRoot.findViewById<TextView>(R.id.priceCodeText)
                     val subtitleText = binding.priceResultRoot.findViewById<TextView>(R.id.priceSubtitleText)
                     val offlineBadge = binding.priceResultRoot.findViewById<TextView>(R.id.priceOfflineBadge)
@@ -1830,7 +2312,10 @@ class PlayerActivity : ComponentActivity() {
                     val packsContainer = binding.priceResultRoot.findViewById<ViewGroup>(R.id.pricePacksContainer)
                     val priceContainer = binding.priceResultRoot.findViewById<LinearLayout>(R.id.price_container)
 
-                    nameText?.text = buildModernName(product.description.orEmpty())
+                    if (nameText != null) {
+                        applyProductName(nameText, nameSecondLineText, product.description.orEmpty())
+                    }
+                    applySmartCaption(smartCaptionText, product.description)
                     codeText?.text = "Código: ${product.ean}"
 
                     if (product.offline) {
@@ -1858,7 +2343,7 @@ class PlayerActivity : ComponentActivity() {
                         subtitleText?.visibility = View.GONE
                     }
 
-                    renderOffer(product.offer, offerContainer, offerText)
+                    renderOffer(product, offerContainer, offerText)
                     renderPacks(product.packs, packsContainer)
 
                     val updatedProduct = product.copy(theme = finalTheme)
@@ -1874,6 +2359,8 @@ class PlayerActivity : ComponentActivity() {
                     } else if (priceContainer != null) {
                         populatePriceSlots(priceContainer, priceConfig?.layout, updatedProduct, parsedColor)
                     }
+
+                    BrandTypography.applyBrandTypography(binding.priceResultRoot, this@PlayerActivity)
 
                     if (prepared != null) {
                         applyOverlayColors(
@@ -1898,7 +2385,7 @@ class PlayerActivity : ComponentActivity() {
                     if (binding.priceLoadingContainer.visibility == View.VISIBLE) {
                         binding.priceLoadingContainer.animate()
                             .alpha(0f)
-                            .setDuration(250)
+                            .setDuration(120)
                             .withEndAction {
                                 binding.priceLoadingContainer.visibility = View.GONE
                             }
@@ -1909,23 +2396,132 @@ class PlayerActivity : ComponentActivity() {
 
                     binding.priceResultRoot.animate()
                         .alpha(1f)
-                        .setDuration(300)
+                        .setDuration(220)
                         .start()
+
+                    // #region debug-point F:bind-complete
+                    debugOrientationEvent(
+                        hypothesisId = "F",
+                        location = "PlayerActivity.showPriceOverlayProduct:bound",
+                        msg = "overlay main-thread bind completed",
+                        data =
+                            JSONObject()
+                                .put("expectedEan", expectedEan)
+                                .put("layoutType", layoutType)
+                                .put("resultVisible", binding.priceResultRoot.visibility == View.VISIBLE)
+                                .put("loadingVisible", binding.priceLoadingContainer.visibility == View.VISIBLE)
+                                .put("orientation", resources.configuration.orientation),
+                    )
+                    binding.priceOverlay.postDelayed({
+                        debugOrientationEvent(
+                            hypothesisId = "F",
+                            location = "PlayerActivity.showPriceOverlayProduct:bound+500ms",
+                            msg = "overlay state 500ms after bind",
+                            data =
+                                JSONObject()
+                                    .put("expectedEan", expectedEan)
+                                    .put("resultVisible", binding.priceResultRoot.visibility == View.VISIBLE)
+                                    .put("resultAlpha", binding.priceResultRoot.alpha.toDouble())
+                                    .put("loadingVisible", binding.priceLoadingContainer.visibility == View.VISIBLE)
+                                    .put("loadingAlpha", binding.priceLoadingContainer.alpha.toDouble())
+                                    .put("orientation", resources.configuration.orientation),
+                        )
+                    }, 500L)
+                    // #endregion
 
                     playBeep()
 
-                    speakPriceIfPossible(
-                        ean = product.ean,
-                        price = product.price,
-                        oldPrice = product.originalPrice,
-                        offer = product.offer,
-                        clubPrice = product.clubPrice,
-                        pricePromotional = product.pricePromotional
-                    )
+                    // Quando a integração traz slots com rótulo próprio (ex: Komprão, cuja API
+                    // já devolve a label pronta), a fala é montada a partir desses rótulos.
+                    val slotsParaFala = product.priceSlots
+                    if (!slotsParaFala.isNullOrEmpty()) {
+                        speakSlotsIfPossible(product.ean, slotsParaFala)
+                    } else {
+                        speakPriceIfPossible(product)
+                    }
 
                     animateOverlayWidgets()
+                    playShineSweep()
+
+                    // Entrada escalonada dos boxes de preço (multi_price)
+                    if (priceContainer != null && layoutType !in specificLayouts) {
+                        for (i in 0 until priceContainer.childCount) {
+                            val child = priceContainer.getChildAt(i)
+                            child.animate().cancel()
+                            child.alpha = 0f
+                            child.translationY = 34f
+                            child.scaleX = 0.92f
+                            child.scaleY = 0.92f
+                            child.animate()
+                                .alpha(1f)
+                                .translationY(0f)
+                                .scaleX(1f)
+                                .scaleY(1f)
+                                .setDuration(320)
+                                .setStartDelay((140 + i * 110).toLong())
+                                .setInterpolator(OvershootInterpolator(1.15f))
+                                .start()
+                        }
+                    }
+                }
+
+                // Download da imagem do produto em segundo plano: salva na pasta local
+                // e atualiza a tela com fade se o produto ainda estiver visível
+                if (needsBackgroundImageFetch && engine != null && cfg != null) {
+                    launch(Dispatchers.IO) {
+                        val (downloadedPath, lateTheme) =
+                            runCatching {
+                                engine.preloadProductImageAndTheme(
+                                    ean = expectedEan,
+                                    config = cfg,
+                                    isOnline = isOnline(),
+                                )
+                            }.getOrNull() ?: (null to null)
+                        if (downloadedPath.isNullOrBlank()) return@launch
+
+                        val preparedLate = prepareOverlayFromImage(url = downloadedPath, theme = lateTheme ?: product.theme)
+
+                        withContext(Dispatchers.Main) {
+                            if (overlayEan != expectedEan || binding.priceOverlay.visibility != View.VISIBLE) return@withContext
+                            if (preparedLate != null) {
+                                applyOverlayColors(
+                                    dominant = preparedLate.dominant,
+                                    dark = preparedLate.dark,
+                                    light = preparedLate.light,
+                                    vibrant = preparedLate.secondary,
+                                    text = preparedLate.text,
+                                )
+                            }
+                            val imgView = binding.priceResultRoot.findViewById<ImageView>(R.id.priceProductImage)
+                            preparedLate?.drawable?.let { d ->
+                                imgView?.apply {
+                                    animate().cancel()
+                                    alpha = 0f
+                                    scaleX = 0.96f
+                                    scaleY = 0.96f
+                                    setImageDrawable(d)
+                                    animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(320).start()
+                                }
+                            }
+                        }
+                    }
                 }
             }
+        // #region debug-point G:overlay-render-completion
+        overlayRenderJob?.invokeOnCompletion { throwable ->
+            debugOrientationEvent(
+                hypothesisId = "G",
+                location = "PlayerActivity.showPriceOverlayProduct:completion",
+                msg = "overlay render job finished",
+                data =
+                    JSONObject()
+                        .put("expectedEan", expectedEan)
+                        .put("cancelled", throwable is kotlinx.coroutines.CancellationException)
+                        .put("throwable", throwable?.javaClass?.simpleName ?: "")
+                        .put("message", throwable?.message ?: ""),
+            )
+        }
+        // #endregion
     }
 
     private fun renderPacks(packs: List<PricePack>) {
@@ -1989,6 +2585,8 @@ class PlayerActivity : ComponentActivity() {
 
                     // Find views from the dynamically inflated layout
                     val nameText = binding.priceResultRoot.findViewById<TextView>(R.id.priceNameText)
+                    val nameSecondLineText = binding.priceResultRoot.findViewById<TextView>(R.id.priceNameSecondLineText)
+                    val smartCaptionText = binding.priceResultRoot.findViewById<TextView>(R.id.priceSmartCaption)
                     val codeText = binding.priceResultRoot.findViewById<TextView>(R.id.priceCodeText)
                     val subtitleText = binding.priceResultRoot.findViewById<TextView>(R.id.priceSubtitleText)
                     val offlineBadge = binding.priceResultRoot.findViewById<TextView>(R.id.priceOfflineBadge)
@@ -2005,12 +2603,14 @@ class PlayerActivity : ComponentActivity() {
                         binding.priceLoadingContainer.visibility = View.GONE
                     }.start()
 
-                    nameText?.text = buildModernName(product.nome)
+                    if (nameText != null) {
+                        applyProductName(nameText, nameSecondLineText, product.nome)
+                    }
+                    applySmartCaption(smartCaptionText, product.nome)
                     subtitleText?.visibility = View.GONE
                     codeText?.text = "Código: ${product.ean}"
 
                     offlineBadge?.visibility = View.GONE
-                    renderOffer(null, offerContainer, offerText)
 
                     val demoPriceProduct = PriceProduct(
                         id = null,
@@ -2027,6 +2627,8 @@ class PlayerActivity : ComponentActivity() {
                         offline = false
                     )
 
+                    renderOffer(demoPriceProduct, offerContainer, offerText)
+
                     val accentHex = if (priceConfig?.layout?.colorMode == "solid" && !priceConfig?.layout?.solidColor.isNullOrEmpty()) {
                         priceConfig?.layout?.solidColor
                     } else {
@@ -2038,8 +2640,10 @@ class PlayerActivity : ComponentActivity() {
                         populatePriceSlots(priceContainer, priceConfig?.layout, demoPriceProduct, parsedColor)
                     }
 
+                    BrandTypography.applyBrandTypography(binding.priceResultRoot, this@PlayerActivity)
+
                     playBeep()
-                    speakPriceIfPossible(ean = product.ean, price = product.preco, oldPrice = product.precoAntigo, offer = null)
+                    speakPriceIfPossible(demoPriceProduct)
 
                     packsContainer?.removeAllViews()
                     packsContainer?.visibility = View.GONE
@@ -2071,6 +2675,7 @@ class PlayerActivity : ComponentActivity() {
                 binding.priceOverlay.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(220).start()
             }
         } else {
+            cancelReturnToMedia()
             if (binding.priceOverlay.visibility == View.VISIBLE) {
                 setPlayerBlur(false)
                 binding.priceOverlay.animate().alpha(0f).setDuration(180).withEndAction {
@@ -2221,19 +2826,19 @@ class PlayerActivity : ComponentActivity() {
         val nameTextColor = idealTextColor(dominant)
         root.findViewById<View>(R.id.priceNameBar)?.setBackgroundColor(dominant)
         root.findViewById<TextView>(R.id.priceNameText)?.setTextColor(nameTextColor)
+        root.findViewById<TextView>(R.id.priceNameSecondLineText)?.setTextColor(adjustAlpha(nameTextColor, 0.85f))
         root.findViewById<TextView>(R.id.priceSubtitleText)?.setTextColor(adjustAlpha(nameTextColor, 0.90f))
+        root.findViewById<TextView>(R.id.priceSmartCaption)?.setTextColor(adjustAlpha(nameTextColor, 0.75f))
 
-        val badgeAColor = makeHueAccent(vibrant, 6f)
-        val badgeBColor = makeHueAccent(vibrant, 210f)
-        val badgeAText = idealTextColor(badgeAColor)
-        val badgeBText = idealTextColor(badgeBColor)
+        // Badges de oferta (LEVE 3 / PAGUE 2 etc.) sempre em vermelho
+        val offerRed = Color.parseColor("#ef4444")
         root.findViewById<View>(R.id.priceLeftBadgeText)?.let {
-            it.background = rectBg(badgeAColor, alpha = 1f)
-            (it as? TextView)?.setTextColor(badgeAText)
+            it.background = roundedBg(offerRed, radiusDp = 8f)
+            (it as? TextView)?.setTextColor(Color.WHITE)
         }
         root.findViewById<View>(R.id.priceRightBadgeText)?.let {
-            it.background = rectBg(badgeBColor, alpha = 1f)
-            (it as? TextView)?.setTextColor(badgeBText)
+            it.background = roundedBg(offerRed, radiusDp = 8f)
+            (it as? TextView)?.setTextColor(Color.WHITE)
         }
 
         root.findViewById<View>(R.id.priceOfflineBadge)?.let {
@@ -2275,44 +2880,64 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private fun applyPriceOverlayLayout() {
-        val set = androidx.constraintlayout.widget.ConstraintSet()
-        set.clone(binding.priceResultRoot)
-        
-        val guideId = if (binding.priceResultRoot.findViewById<View>(R.id.priceLandscapeSplitGuide) != null) {
-            set.create(R.id.priceLandscapeSplitGuide, androidx.constraintlayout.widget.ConstraintSet.HORIZONTAL_GUIDELINE)
-            R.id.priceLandscapeSplitGuide
-        } else {
-            R.id.priceImageSplitGuide
+        // Reposiciona os painéis de qualquer layout de consulta (split, de_por, multi_price…)
+        // conforme a orientação, manipulando os LayoutParams diretamente (mais confiável que
+        // ConstraintSet neste caso). Retrato = imagem em cima + infos embaixo; paisagem = lado a lado.
+        val root = binding.priceResultRoot
+        val left = root.findViewById<View>(R.id.priceLeftPanel) ?: return
+        val right = root.findViewById<View>(R.id.priceRightPanel) ?: return
+        val guide = root.findViewById<androidx.constraintlayout.widget.Guideline>(R.id.priceLandscapeSplitGuide) ?: return
+
+        val lp = left.layoutParams as? ConstraintLayout.LayoutParams ?: return
+        val rp = right.layoutParams as? ConstraintLayout.LayoutParams ?: return
+        val gp = guide.layoutParams as? ConstraintLayout.LayoutParams ?: return
+
+        val parent = ConstraintLayout.LayoutParams.PARENT_ID
+        val unset = ConstraintLayout.LayoutParams.UNSET
+        val match = 0 // MATCH_CONSTRAINT
+        val isPortrait = resources.displayMetrics.heightPixels >= resources.displayMetrics.widthPixels
+
+        // Zera todas as âncoras dos dois painéis para reconstruir sem sobras
+        for (p in listOf(lp, rp)) {
+            p.topToTop = unset; p.topToBottom = unset
+            p.bottomToBottom = unset; p.bottomToTop = unset
+            p.startToStart = unset; p.startToEnd = unset
+            p.endToEnd = unset; p.endToStart = unset
         }
 
-        // Define a divisão: parte superior (imagem) com 45% da altura
-        set.setGuidelinePercent(guideId, 0.45f)
+        if (isPortrait) {
+            gp.orientation = ConstraintLayout.LayoutParams.HORIZONTAL
+            guide.setGuidelinePercent(0.38f)
 
-        // Configura o painel direito (imagem) na parte superior (acima da guia)
-        set.clear(R.id.priceRightPanel)
-        set.constrainWidth(R.id.priceRightPanel, androidx.constraintlayout.widget.ConstraintSet.MATCH_CONSTRAINT)
-        set.constrainHeight(R.id.priceRightPanel, androidx.constraintlayout.widget.ConstraintSet.MATCH_CONSTRAINT)
-        set.connect(R.id.priceRightPanel, androidx.constraintlayout.widget.ConstraintSet.TOP, androidx.constraintlayout.widget.ConstraintSet.PARENT_ID, androidx.constraintlayout.widget.ConstraintSet.TOP)
-        set.connect(R.id.priceRightPanel, androidx.constraintlayout.widget.ConstraintSet.BOTTOM, guideId, androidx.constraintlayout.widget.ConstraintSet.TOP)
-        set.connect(R.id.priceRightPanel, androidx.constraintlayout.widget.ConstraintSet.START, androidx.constraintlayout.widget.ConstraintSet.PARENT_ID, androidx.constraintlayout.widget.ConstraintSet.START)
-        set.connect(R.id.priceRightPanel, androidx.constraintlayout.widget.ConstraintSet.END, androidx.constraintlayout.widget.ConstraintSet.PARENT_ID, androidx.constraintlayout.widget.ConstraintSet.END)
+            // Imagem (right) EM CIMA
+            rp.width = match; rp.height = match
+            rp.topToTop = parent; rp.startToStart = parent; rp.endToEnd = parent
+            rp.bottomToBottom = R.id.priceLandscapeSplitGuide
 
-        // Configura o painel esquerdo (informações e preço) na parte inferior (abaixo da guia)
-        set.clear(R.id.priceLeftPanel)
-        set.constrainWidth(R.id.priceLeftPanel, androidx.constraintlayout.widget.ConstraintSet.MATCH_CONSTRAINT)
-        set.constrainHeight(R.id.priceLeftPanel, androidx.constraintlayout.widget.ConstraintSet.MATCH_CONSTRAINT)
-        set.connect(R.id.priceLeftPanel, androidx.constraintlayout.widget.ConstraintSet.TOP, guideId, androidx.constraintlayout.widget.ConstraintSet.BOTTOM)
-        set.connect(R.id.priceLeftPanel, androidx.constraintlayout.widget.ConstraintSet.BOTTOM, androidx.constraintlayout.widget.ConstraintSet.PARENT_ID, androidx.constraintlayout.widget.ConstraintSet.BOTTOM)
-        set.connect(R.id.priceLeftPanel, androidx.constraintlayout.widget.ConstraintSet.START, androidx.constraintlayout.widget.ConstraintSet.PARENT_ID, androidx.constraintlayout.widget.ConstraintSet.START)
-        set.connect(R.id.priceLeftPanel, androidx.constraintlayout.widget.ConstraintSet.END, androidx.constraintlayout.widget.ConstraintSet.PARENT_ID, androidx.constraintlayout.widget.ConstraintSet.END)
+            // Infos (left) EMBAIXO
+            lp.width = match; lp.height = match
+            lp.topToTop = R.id.priceLandscapeSplitGuide
+            lp.bottomToBottom = parent; lp.startToStart = parent; lp.endToEnd = parent
+        } else {
+            gp.orientation = ConstraintLayout.LayoutParams.VERTICAL
+            guide.setGuidelinePercent(0.45f)
 
-        // Ajusta tamanhos de texto caso os TextViews estejam na hierarquia ativa
-        val root = binding.priceResultRoot
-        root.findViewById<TextView>(R.id.priceCurrencyText)?.setTextSize(TypedValue.COMPLEX_UNIT_SP, 28f)
-        root.findViewById<TextView>(R.id.priceIntegerText)?.setTextSize(TypedValue.COMPLEX_UNIT_SP, 92f)
-        root.findViewById<TextView>(R.id.priceDecimalText)?.setTextSize(TypedValue.COMPLEX_UNIT_SP, 44f)
+            // Infos (left) à ESQUERDA
+            lp.width = match; lp.height = match
+            lp.topToTop = parent; lp.bottomToBottom = parent; lp.startToStart = parent
+            lp.endToStart = R.id.priceLandscapeSplitGuide
 
-        set.applyTo(binding.priceResultRoot)
+            // Imagem (right) à DIREITA
+            rp.width = match; rp.height = match
+            rp.topToTop = parent; rp.bottomToBottom = parent; rp.endToEnd = parent
+            rp.startToEnd = R.id.priceLandscapeSplitGuide
+        }
+
+        guide.layoutParams = gp
+        left.layoutParams = lp
+        right.layoutParams = rp
+        Log.i("MPlayerLayout", "applyPriceOverlayLayout isPortrait=$isPortrait")
+        root.requestLayout()
     }
 
     private fun renderPrice(value: Double?, animate: Boolean) {
@@ -2437,84 +3062,76 @@ class PlayerActivity : ComponentActivity() {
         return Color.HSVToColor(hsv)
     }
 
-    private fun buildModernName(raw: String): CharSequence {
+    /**
+     * Divide a descrição em 1ª linha (até 3 primeiras palavras, Poppins Bold via
+     * [BrandTypography], nunca quebra em mais de 1 linha graças ao autosize) e 2ª linha
+     * (resto da descrição, Poppins Thin, complementar). A regra de quais palavras vão em
+     * cada linha é a mesma de sempre — só a tipografia/tamanho mudou.
+     */
+    private fun applyProductName(nameFirstLine: TextView, nameSecondLine: TextView?, raw: String) {
         val cleaned = raw.trim().replace("\\s+".toRegex(), " ")
-        if (cleaned.isBlank()) return ""
         val words = cleaned.split(" ").filter { it.isNotBlank() }
         val top = words.take(3).joinToString(" ").uppercase(Locale("pt", "BR"))
         val rest = words.drop(3).joinToString(" ").uppercase(Locale("pt", "BR"))
 
-        val b = SpannableStringBuilder()
-        val topStart = 0
-        b.append(top)
-        b.setSpan(StyleSpan(android.graphics.Typeface.BOLD), topStart, b.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-        b.setSpan(RelativeSizeSpan(1.16f), topStart, b.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-        if (rest.isNotBlank()) {
-            b.append("\n")
-            val restStart = b.length
-            b.append(rest)
-            b.setSpan(StyleSpan(android.graphics.Typeface.NORMAL), restStart, b.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-            b.setSpan(RelativeSizeSpan(0.74f), restStart, b.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-        }
-
         val totalChars = cleaned.length
-        val sizeSp =
+        val baseSizeSp =
             when {
                 totalChars <= 14 -> 44f
                 totalChars <= 20 -> 40f
                 totalChars <= 28 -> 34f
                 else -> 30f
             }
-        binding.priceNameText.setTextSize(TypedValue.COMPLEX_UNIT_SP, sizeSp)
-        return b
+
+        nameFirstLine.text = top
+        val maxSp = baseSizeSp * 0.70f
+        val minSp = 16f
+        TextViewCompat.setAutoSizeTextTypeUniformWithConfiguration(
+            nameFirstLine,
+            minSp.toInt(),
+            maxSp.toInt().coerceAtLeast(minSp.toInt()),
+            1,
+            TypedValue.COMPLEX_UNIT_SP,
+        )
+
+        // A margem negativa entre a 1ª e a 2ª linha só faz sentido quando a 2ª linha existe de
+        // verdade — sem ela, a margem negativa "corta" a própria 1ª linha (nada abaixo para
+        // compensar o espaço puxado para cima).
+        val hasSecondLine = nameSecondLine != null && rest.isNotBlank()
+        (nameFirstLine.layoutParams as? ViewGroup.MarginLayoutParams)?.let {
+            it.bottomMargin = if (hasSecondLine) -dpToPx(20) else 0
+            nameFirstLine.layoutParams = it
+        }
+
+        if (nameSecondLine != null) {
+            if (hasSecondLine) {
+                nameSecondLine.text = rest
+                nameSecondLine.setTextSize(TypedValue.COMPLEX_UNIT_SP, baseSizeSp * 0.60f)
+                nameSecondLine.visibility = View.VISIBLE
+            } else {
+                nameSecondLine.text = ""
+                nameSecondLine.visibility = View.GONE
+            }
+        }
     }
 
-    private fun renderOffer(offer: PriceOffer?) {
-        if (offer == null || !offer.enabled) {
-            binding.priceBadgesRow.visibility = View.GONE
-            binding.priceLeftBadgeText.visibility = View.GONE
-            binding.priceRightBadgeText.visibility = View.GONE
-            binding.priceOfferContainer.visibility = View.GONE
-            binding.priceSecondUnitContainer.visibility = View.GONE
-            return
-        }
-
-        val (badgeA, badgeB) = splitOfferBadges(offer.title?.trim().orEmpty())
-        binding.priceBadgesRow.visibility = View.VISIBLE
-        if (badgeA.isNotBlank()) {
-            binding.priceLeftBadgeText.text = badgeA
-            binding.priceLeftBadgeText.visibility = View.VISIBLE
+    /** Frase amigável complementar (item 4), montada só a partir do que já está em [description]. */
+    private fun applySmartCaption(captionView: TextView?, description: String?) {
+        if (captionView == null) return
+        val phrase = SmartDescription.parse(description).friendlyPhrase
+        if (phrase.isNullOrBlank()) {
+            captionView.text = ""
+            captionView.visibility = View.GONE
         } else {
-            binding.priceLeftBadgeText.visibility = View.GONE
-        }
-        if (!badgeB.isNullOrBlank()) {
-            binding.priceRightBadgeText.text = badgeB
-            binding.priceRightBadgeText.visibility = View.VISIBLE
-        } else {
-            binding.priceRightBadgeText.visibility = View.GONE
-        }
-
-        val desc = offer.description?.trim().orEmpty()
-        if (desc.isNotBlank()) {
-            binding.priceOfferText.text = desc
-            binding.priceOfferContainer.visibility = View.VISIBLE
-        } else {
-            binding.priceOfferContainer.visibility = View.GONE
-        }
-
-        val second = offer.secondUnit
-        if (second != null && second > 0.0) {
-            binding.priceSecondUnitValue.text = formatCurrency(second)
-            binding.priceSecondUnitContainer.visibility = View.VISIBLE
-        } else {
-            binding.priceSecondUnitContainer.visibility = View.GONE
+            captionView.text = phrase
+            captionView.visibility = View.VISIBLE
         }
     }
 
     private fun splitOfferBadges(title: String): Pair<String, String?> {
         val t = title.trim().uppercase(Locale("pt", "BR"))
         if (t.isBlank()) return "OFERTA" to null
-        val m = Regex("LEVE\\s+(\\d+)\\s+PAGUE\\s+(\\d+)").find(t)
+        val m = OfferIntelligence.LEVE_PAGUE_REGEX.find(t)
         if (m != null) {
             return "LEVE ${m.groupValues[1]}" to "PAGUE ${m.groupValues[2]}"
         }
@@ -2526,27 +3143,6 @@ class PlayerActivity : ComponentActivity() {
             parts.size >= 2 -> parts[0] to parts[1]
             else -> t to null
         }
-    }
-
-    private fun buildStyledDescription(description: String): CharSequence {
-        val cleaned = description.trim().replace("\\s+".toRegex(), " ")
-        if (cleaned.isBlank()) return ""
-        val parts = cleaned.split(" ")
-        val first = parts.take(3).joinToString(" ")
-        val rest = parts.drop(3).joinToString(" ")
-
-        val b = SpannableStringBuilder()
-        val start = 0
-        b.append(first)
-        b.setSpan(StyleSpan(android.graphics.Typeface.BOLD), start, b.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-        b.setSpan(RelativeSizeSpan(1.40f), start, b.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-        if (rest.isNotBlank()) {
-            b.append("\n")
-            val rStart = b.length
-            b.append(rest)
-            b.setSpan(RelativeSizeSpan(0.92f), rStart, b.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-        }
-        return b
     }
 
     private fun initTts() {
@@ -2562,77 +3158,77 @@ class PlayerActivity : ComponentActivity() {
                     } else {
                         tts?.setSpeechRate(1.02f)
                         tts?.setPitch(1.0f)
+                        tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                            override fun onStart(utteranceId: String?) {}
+                            override fun onDone(utteranceId: String?) {
+                                mainHandler.post { scheduleReturnToMedia(2000L, "tts_done") }
+                            }
+                            @Deprecated("Deprecated in Java")
+                            override fun onError(utteranceId: String?) {}
+                        })
                     }
                 }
             }
     }
 
-    private fun speakPriceIfPossible(
-        ean: String,
-        price: Double?,
-        oldPrice: Double?,
-        offer: com.mupa.player.enterprise.price.PriceOffer?,
-        clubPrice: Double? = null,
-        pricePromotional: Double? = null,
-    ) {
+    /**
+     * Fala o preço usando os rótulos que a própria integração devolveu (ex: Komprão, cuja API
+     * já manda a label pronta em prices[].label, com {{a_partir_de_x}} já interpolado).
+     *
+     * Regra: preço normal → fala só o valor. Ofertas → fala o rótulo + o valor.
+     * Ex: "7 reais e 19 centavos. A partir de 3 unidades, a unidade sai por 6 reais e 79 centavos."
+     */
+    private fun speakSlotsIfPossible(ean: String, slots: List<ProductPriceSlot>) {
         if (!ttsReady) return
-
-        var resolvedPrice = price
-        var resolvedOldPrice = oldPrice
-        var resolvedClubPrice = clubPrice
-
-        if (pricePromotional != null && pricePromotional > 0.0) {
-            resolvedOldPrice = oldPrice ?: price
-            resolvedPrice = pricePromotional
-        }
-
-        // Se preço promocional for maior ou igual ao preço normal de tabela, ignorar preço promocional
-        if (resolvedPrice != null && resolvedOldPrice != null && resolvedPrice >= resolvedOldPrice) {
-            resolvedPrice = resolvedOldPrice
-            resolvedOldPrice = null
-        }
-
-        // Se preço clube for maior ou igual ao preço de venda, ignorar o preço clube no TTS
-        if (resolvedClubPrice != null && resolvedPrice != null && resolvedClubPrice >= resolvedPrice) {
-            resolvedClubPrice = null
-        }
-
-        if (resolvedPrice == null || resolvedPrice <= 0.0) return
+        val validos = slots.filter { it.value > 0.0 }
+        if (validos.isEmpty()) return
 
         val now = SystemClock.elapsedRealtime()
         if (ean == lastSpokenEan && now - lastSpokenAtMs < 3500L) return
         lastSpokenEan = ean
         lastSpokenAtMs = now
 
-        val spokenPrice = buildSpokenPrice(resolvedPrice)
-        val isOffer = (offer?.enabled == true) || (resolvedOldPrice != null && resolvedOldPrice > resolvedPrice)
-        val base =
-            if (isOffer) {
-                val old = resolvedOldPrice
-                if (old != null && old > resolvedPrice) {
-                     "Produto em oferta. De ${buildSpokenPrice(old)} por $spokenPrice."
-                } else {
-                     "Produto em oferta. $spokenPrice."
-                }
+        val fala = StringBuilder()
+        for (slot in validos) {
+            val valor = buildSpokenPrice(slot.value)
+            val ehOferta = slot.isPromo || slot.isClub
+            if (ehOferta) {
+                val rotulo = slot.label.trim().trimEnd(':', '.').trim()
+                if (rotulo.isNotBlank()) fala.append("$rotulo, ")
+                fala.append("$valor. ")
             } else {
-                spokenPrice
-            }
-
-        val extra = StringBuilder()
-        if (resolvedClubPrice != null && resolvedClubPrice > 0.0) {
-            extra.append(" Preço exclusivo para cliente clube, ${buildSpokenPrice(resolvedClubPrice)}.")
-        }
-
-        if (offer != null && offer.enabled) {
-            val second = offer.secondUnit
-            if (second != null && second > 0.0) {
-                extra.append(" ${offer.title?.trim().orEmpty().ifBlank { "Oferta" }}. Valor total das duas unidades: ${buildSpokenPrice(second)}.")
-            } else {
-                offer.title?.trim()?.takeIf { it.isNotBlank() }?.let { extra.append(" $it.") }
+                // Preço normal: fala apenas o valor
+                fala.append("$valor. ")
             }
         }
 
-        val textToSpeak = base + extra.toString()
+        val texto = fala.toString().trim()
+        if (texto.isBlank()) return
+        val utteranceId = UUID.randomUUID().toString()
+        if (Build.VERSION.SDK_INT >= 21) {
+            tts?.speak(texto, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+        } else {
+            @Suppress("DEPRECATION")
+            tts?.speak(texto, TextToSpeech.QUEUE_FLUSH, null)
+        }
+    }
+
+    /**
+     * Fala a melhor mensagem para o produto (item 6): a mesma [OfferIntelligence] usada para o
+     * selo/explicação decide o texto, então nunca diverge do que está escrito na tela.
+     */
+    private fun speakPriceIfPossible(product: PriceProduct) {
+        if (!ttsReady) return
+
+        val now = SystemClock.elapsedRealtime()
+        if (product.ean == lastSpokenEan && now - lastSpokenAtMs < 3500L) return
+
+        val textToSpeak = OfferIntelligence.analyze(product).ttsPhrase
+        if (textToSpeak.isBlank()) return
+
+        lastSpokenEan = product.ean
+        lastSpokenAtMs = now
+
         val utteranceId = UUID.randomUUID().toString()
         if (Build.VERSION.SDK_INT >= 21) {
             tts?.speak(textToSpeak, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
@@ -2661,29 +3257,7 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
-    private fun buildSpokenPrice(value: Double): String {
-        val cents = (value * 100.0).roundToInt().coerceAtLeast(0)
-        val reais = cents / 100
-        val cent = cents % 100
-        val reaisStr = if (reais == 1) "real" else "reais"
-        return if (cent == 0) {
-            "$reais $reaisStr"
-        } else {
-            "$reais $reaisStr e $cent centavos"
-        }
-    }
-
-    private fun applyPriceTypography() {
-        val bebas = android.graphics.Typeface.create("Bebas Neue", android.graphics.Typeface.NORMAL)
-        val fallback = android.graphics.Typeface.create("sans-serif-condensed", android.graphics.Typeface.BOLD)
-        val tf = if (bebas == android.graphics.Typeface.DEFAULT) fallback else bebas
-        binding.priceCurrencyText.typeface = tf
-        binding.priceIntegerText.typeface = tf
-        binding.priceDecimalText.typeface = tf
-        binding.priceIntegerText.letterSpacing = 0.02f
-        binding.priceDecimalText.letterSpacing = 0.02f
-        binding.priceCurrencyText.letterSpacing = 0.02f
-    }
+    private fun buildSpokenPrice(value: Double): String = OfferIntelligence.buildSpokenPrice(value)
 
     private fun formatCurrency(value: Double): String {
         return String.format(Locale("pt", "BR"), "R$ %.2f", value)
@@ -2800,6 +3374,7 @@ class PlayerActivity : ComponentActivity() {
         val container = binding.priceResultRoot
         container.removeAllViews()
         val layoutResId = when (xmlLayoutType) {
+            "universal" -> R.layout.price_check_universal
             "split_inverted" -> R.layout.price_check_split_inverted
             "vertical_image_bottom" -> R.layout.price_check_vertical_image_bottom
             "vertical_image_top" -> R.layout.price_check_vertical_image_top
@@ -2822,6 +3397,97 @@ class PlayerActivity : ComponentActivity() {
         imgView?.setImageDrawable(null)
     }
 
+    /**
+     * Anima a "contagem" do valor: os dígitos sobem de 0 até o preço final em ~600ms com
+     * desaceleração. [slotIndex] escalona o início para os boxes contarem em sequência.
+     */
+    private fun animatePriceCount(
+        integerTv: TextView,
+        decimalTv: TextView,
+        targetValue: Double,
+        slotIndex: Int,
+    ) {
+        integerTv.animate().cancel()
+        (integerTv.getTag(R.id.slotIntegerPrice) as? ValueAnimator)?.cancel()
+
+        // Estado inicial: zerado
+        integerTv.text = "0"
+        decimalTv.text = ",00"
+
+        val animator = ValueAnimator.ofFloat(0f, targetValue.toFloat()).apply {
+            duration = 1000L
+            startDelay = (160 + slotIndex * 90).toLong()
+            interpolator = DecelerateInterpolator(1.6f)
+            addUpdateListener { va ->
+                val current = (va.animatedValue as Float).toDouble()
+                val formatted = String.format(Locale.US, "%.2f", current)
+                val parts = formatted.split(".")
+                integerTv.text = parts[0]
+                decimalTv.text = ",${parts[1]}"
+            }
+            addListener(object : android.animation.AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: android.animation.Animator) {
+                    // Garante o valor exato no final (evita erro de ponto flutuante)
+                    val formatted = String.format(Locale.US, "%.2f", targetValue)
+                    val parts = formatted.split(".")
+                    integerTv.text = parts[0]
+                    decimalTv.text = ",${parts[1]}"
+                    // Pequeno "pulso" ao travar no valor final
+                    integerTv.animate().scaleX(1.08f).scaleY(1.08f).setDuration(90)
+                        .withEndAction {
+                            integerTv.animate().scaleX(1f).scaleY(1f).setDuration(110).start()
+                        }.start()
+                }
+            })
+        }
+        integerTv.setTag(R.id.slotIntegerPrice, animator)
+        animator.start()
+    }
+
+    /** Varre uma faixa de luz diagonal, suave e elegante: vai e volta com easing cadenciado. */
+    private fun playShineSweep() {
+        val shine = binding.priceShine
+        shine.animate().cancel()
+        val parentWidth = (shine.parent as? View)?.width ?: binding.priceOverlay.width
+        if (parentWidth <= 0) return
+
+        val startX = -shine.width.toFloat() - 140f
+        val endX = parentWidth.toFloat() + 140f
+
+        // Easing suave estilo "ease-in-out" (cubic-bezier 0.4, 0.0, 0.2, 1)
+        val smooth = androidx.core.view.animation.PathInterpolatorCompat.create(0.4f, 0f, 0.2f, 1f)
+
+        shine.translationX = startX
+        shine.alpha = 0f
+        shine.visibility = View.VISIBLE
+        shine.animate()
+            .alpha(1f)
+            .setDuration(320)
+            .setInterpolator(DecelerateInterpolator())
+            .withEndAction {
+                // Ida: esquerda → direita (1300ms, bem cadenciada)
+                shine.animate()
+                    .translationX(endX)
+                    .setDuration(1300)
+                    .setInterpolator(smooth)
+                    .withEndAction {
+                        // Volta: direita → esquerda (1300ms)
+                        shine.animate()
+                            .translationX(startX)
+                            .setDuration(1300)
+                            .setInterpolator(smooth)
+                            .withEndAction {
+                                shine.animate().alpha(0f).setDuration(320)
+                                    .withEndAction { shine.visibility = View.GONE }
+                                    .start()
+                            }
+                            .start()
+                    }
+                    .start()
+            }
+            .start()
+    }
+
     private fun populatePriceSlots(
         container: LinearLayout,
         layoutConfig: LayoutConfig?,
@@ -2833,10 +3499,12 @@ class PlayerActivity : ComponentActivity() {
 
         val productSlots = product.priceSlots
         if (!productSlots.isNullOrEmpty()) {
-            val normalPrice = product.price
+            val primarySlot = productSlots.firstOrNull { !it.isPromo && !it.isClub && (it.field == "price" || it.label.contains("NORMAL", true)) }
+            val basePriceForDeduplication = primarySlot?.value ?: product.price
+            
             val validSlots = productSlots.filter { slot ->
                 if (slot.value <= 0.0) return@filter false
-                if (normalPrice != null && slot.value == normalPrice) {
+                if (basePriceForDeduplication != null && slot.value == basePriceForDeduplication) {
                     val isSecondary = slot.isPromo || slot.isClub || 
                                      slot.field == "price_wholesale" || 
                                      slot.field == "priceWholesale" ||
@@ -2865,19 +3533,25 @@ class PlayerActivity : ComponentActivity() {
                 val isBest = bestValue != null && slot.value == bestValue
                 styleSlotBox(itemView, labelTextView, currencyTextView, integerTextView, decimalTextView, isBest = isBest, isClub = slot.isClub, isPromo = slot.isPromo, accentColor = accentColor)
 
-                val formatted = String.format(Locale.US, "%.2f", slot.value)
-                val parts = formatted.split(".")
-                integerTextView.text = parts[0]
-                decimalTextView.text = ",${parts[1]}"
+                animatePriceCount(integerTextView, decimalTextView, slot.value, container.childCount)
 
                 emphasizePriceSlot(
                     labelTextView, currencyTextView, integerTextView, decimalTextView,
                     isBest = isBest,
                     compact = compact,
+                    value = slot.value,
                 )
                 applyCompactSpacing(itemView, compact)
 
-                fromPriceTextView.visibility = View.GONE
+                // "de" riscado dentro do próprio box (ex: De/Por, promoção)
+                val fromV = slot.fromValue
+                if (fromV != null && fromV > slot.value) {
+                    fromPriceTextView.text = "De: ${formatCurrency(fromV)}"
+                    fromPriceTextView.paintFlags = fromPriceTextView.paintFlags or Paint.STRIKE_THRU_TEXT_FLAG
+                    fromPriceTextView.visibility = View.VISIBLE
+                } else {
+                    fromPriceTextView.visibility = View.GONE
+                }
 
                 container.addView(itemView)
             }
@@ -2942,15 +3616,13 @@ class PlayerActivity : ComponentActivity() {
             val isBest = bestValue != null && priceValue == bestValue
             styleSlotBox(itemView, labelTextView, currencyTextView, integerTextView, decimalTextView, isBest = isBest, isClub = isClub, isPromo = isPromo, accentColor = accentColor)
 
-            val formatted = String.format(Locale.US, "%.2f", priceValue)
-            val parts = formatted.split(".")
-            integerTextView.text = parts[0]
-            decimalTextView.text = ",${parts[1]}"
+            animatePriceCount(integerTextView, decimalTextView, priceValue, container.childCount)
 
             emphasizePriceSlot(
                 labelTextView, currencyTextView, integerTextView, decimalTextView,
                 isBest = bestValue != null && priceValue == bestValue,
                 compact = compact,
+                value = priceValue,
             )
             applyCompactSpacing(itemView, compact)
 
@@ -2988,7 +3660,7 @@ class PlayerActivity : ComponentActivity() {
             isClub -> Color.parseColor("#10b981")
             isPromo -> Color.parseColor("#ef4444")
             isBest -> accentColor
-            else -> Color.parseColor("#FFFFFF")
+            else -> Color.parseColor("#1E6FC4")
         }
         val textColor = idealTextColor(boxColor)
 
@@ -2996,6 +3668,9 @@ class PlayerActivity : ComponentActivity() {
         integer.setTextColor(textColor)
         decimal.setTextColor(textColor)
         currency?.setTextColor(textColor)
+        // Label lateral "Preço por un." e info à direita ficam DENTRO da caixa → cor de contraste
+        itemView.findViewById<TextView>(R.id.slotUnitLabel)?.setTextColor(adjustAlpha(textColor, 0.85f))
+        itemView.findViewById<TextView>(R.id.slotFromPrice)?.setTextColor(adjustAlpha(textColor, 0.85f))
         // O rótulo fica sobre o painel escuro (fora da caixa), não sobre a caixa de preço.
         label.setTextColor(Color.WHITE)
     }
@@ -3011,21 +3686,32 @@ class PlayerActivity : ComponentActivity() {
         decimal: TextView,
         isBest: Boolean,
         compact: Boolean = false,
+        value: Double = 0.0,
     ) {
-        // Com 3+ tipos de preço na tela, reduz um pouco os tamanhos pra caber tudo sem cortar
-        // nem precisar rolar.
+        // Preços bem maiores para leitura a distância (item 1). O melhor preço é o
+        // maior destaque da tela; com 3+ tipos, reduz um pouco (compact) pra caber sem rolar.
+        // Tamanhos do preço aumentados +25% para leitura a distância.
+        // O fator abaixo encolhe a fonte conforme a parte inteira cresce (ex.: "10,29",
+        // "199,90") para o valor caber numa única linha e manter a harmonia do box.
+        val digits = kotlin.math.abs(value.toInt()).toString().length
+        val fit = when {
+            digits <= 1 -> 1.0f
+            digits == 2 -> 0.82f
+            digits == 3 -> 0.66f
+            else -> 0.55f
+        }
         if (isBest) {
-            label.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 13f else 14f)
+            label.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 15f else 18f)
             label.alpha = 1f
-            currency?.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 19f else 22f)
-            integer.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 44f else 54f)
-            decimal.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 24f else 30f)
+            currency?.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 33f else 43f) * fit)
+            integer.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 83f else 110f) * fit)
+            decimal.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 45f else 58f) * fit)
         } else {
-            label.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 11f else 12f)
-            label.alpha = 0.75f
-            currency?.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 13f else 15f)
-            integer.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 30f else 36f)
-            decimal.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 17f else 20f)
+            label.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 12f else 14f)
+            label.alpha = 0.85f
+            currency?.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 23f else 28f) * fit)
+            integer.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 50f else 65f) * fit)
+            decimal.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 28f else 35f) * fit)
         }
     }
 
@@ -3039,7 +3725,7 @@ class PlayerActivity : ComponentActivity() {
             dpToPx(6),
         )
         val box = itemView.findViewById<View>(R.id.slotPriceBox)
-        box?.setPadding(dpToPx(14), dpToPx(7), dpToPx(14), dpToPx(7))
+        box?.setPadding(dpToPx(14), dpToPx(2), dpToPx(14), dpToPx(2))
         val label = itemView.findViewById<View>(R.id.slotLabel)
         (label?.layoutParams as? ViewGroup.MarginLayoutParams)?.let { it.bottomMargin = dpToPx(3) }
     }
@@ -3085,13 +3771,19 @@ class PlayerActivity : ComponentActivity() {
 
 
 
-    private fun renderOffer(offer: PriceOffer?, offerContainer: View?, offerText: TextView?) {
+    /**
+     * Selo/explicação de oferta (itens 3 e 5): [OfferIntelligence] decide qual é a única
+     * vantagem a destacar. "LEVE X PAGUE Y" mantém os 2 chips tradicionais; qualquer outro
+     * tipo de vantagem usa só o chip esquerdo (nunca dois selos competindo).
+     */
+    private fun renderOffer(product: PriceProduct, offerContainer: View?, offerText: TextView?) {
         val badgesRow = binding.priceResultRoot.findViewById<View>(R.id.priceBadgesRow)
         val leftBadge = binding.priceResultRoot.findViewById<TextView>(R.id.priceLeftBadgeText)
         val rightBadge = binding.priceResultRoot.findViewById<TextView>(R.id.priceRightBadgeText)
         val secondUnitContainer = binding.priceResultRoot.findViewById<View>(R.id.priceSecondUnitContainer)
         val secondUnitValue = binding.priceResultRoot.findViewById<TextView>(R.id.priceSecondUnitValue)
 
+        val offer = product.offer
         if (offer == null || !offer.enabled) {
             badgesRow?.visibility = View.GONE
             leftBadge?.visibility = View.GONE
@@ -3101,24 +3793,42 @@ class PlayerActivity : ComponentActivity() {
             return
         }
 
-        val (badgeA, badgeB) = splitOfferBadges(offer.title?.trim().orEmpty())
+        val insight = OfferIntelligence.analyze(product)
+        val offerRed = Color.parseColor("#ef4444")
         badgesRow?.visibility = View.VISIBLE
-        if (badgeA.isNotBlank()) {
-            leftBadge?.text = badgeA
+
+        if (insight.type == AdvantageType.LEVE_PAGUE) {
+            val (badgeA, badgeB) = splitOfferBadges(offer.title?.trim().orEmpty())
+            if (badgeA.isNotBlank()) {
+                leftBadge?.text = badgeA
+                leftBadge?.setTextColor(Color.WHITE)
+                leftBadge?.background = roundedBg(offerRed, radiusDp = 8f)
+                leftBadge?.visibility = View.VISIBLE
+            } else {
+                leftBadge?.visibility = View.GONE
+            }
+            if (!badgeB.isNullOrBlank()) {
+                rightBadge?.text = badgeB
+                rightBadge?.setTextColor(Color.WHITE)
+                rightBadge?.background = roundedBg(offerRed, radiusDp = 8f)
+                rightBadge?.visibility = View.VISIBLE
+            } else {
+                rightBadge?.visibility = View.GONE
+            }
+        } else if (insight.badgeText.isNotBlank()) {
+            leftBadge?.text = "${insight.badgeEmoji} ${insight.badgeText}".trim()
+            leftBadge?.setTextColor(Color.WHITE)
+            leftBadge?.background = roundedBg(offerRed, radiusDp = 8f)
             leftBadge?.visibility = View.VISIBLE
+            rightBadge?.visibility = View.GONE
         } else {
             leftBadge?.visibility = View.GONE
-        }
-        if (!badgeB.isNullOrBlank()) {
-            rightBadge?.text = badgeB
-            rightBadge?.visibility = View.VISIBLE
-        } else {
             rightBadge?.visibility = View.GONE
         }
 
-        val desc = offer.description?.trim().orEmpty()
-        if (desc.isNotBlank() && offerText != null) {
-            offerText.text = desc
+        val explanation = insight.shortExplanation
+        if (offerText != null && !explanation.isNullOrBlank()) {
+            offerText.text = explanation
             offerContainer?.visibility = View.VISIBLE
         } else {
             offerContainer?.visibility = View.GONE
@@ -3306,6 +4016,8 @@ class PlayerActivity : ComponentActivity() {
 
     companion object {
         const val EXTRA_DEVICE_ID = "extra_device_id"
+        const val ZAFFARI_TEST_MODE = false
+        const val MAX_CONSECUTIVE_SCAN_FAILURES = 5
     }
 }
 

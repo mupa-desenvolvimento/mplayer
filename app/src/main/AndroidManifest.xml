@@ -20,6 +20,14 @@
         android:name="com.mupa.player.enterprise.permission.SET_DEV_MODE"
         android:protectionLevel="signature" />
 
+    <!-- normal (não signature): Argos é um app/keystore separado do MPlayer, não pode usar
+         permissão signature-level. O Argos já é Device Owner com controle total do aparelho,
+         então confiar num broadcast dele pra abrir uma tela de configurações é consistente
+         com o nível de confiança que ele já tem. -->
+    <permission
+        android:name="com.mupa.player.enterprise.permission.OPEN_SETTINGS"
+        android:protectionLevel="normal" />
+
     <uses-feature
         android:name="android.hardware.camera.front"
         android:required="false" />
@@ -55,6 +63,7 @@
             android:exported="false"
             android:launchMode="singleTask"
             android:screenOrientation="fullUser"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|navigation"
             android:theme="@style/Theme.MupaPlayerEnterprise" />
 
         <activity
@@ -74,7 +83,6 @@
         <activity
             android:name=".ui.FaceRecognitionTestActivity"
             android:exported="true"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize"
             android:screenOrientation="fullUser"
             android:theme="@style/Theme.MupaPlayerEnterprise" />
 
@@ -84,6 +92,15 @@
             android:permission="com.mupa.player.enterprise.permission.SET_DEV_MODE">
             <intent-filter>
                 <action android:name="com.mupa.player.enterprise.ACTION_SET_DEV_MODE" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".ui.OpenSettingsReceiver"
+            android:exported="true"
+            android:permission="com.mupa.player.enterprise.permission.OPEN_SETTINGS">
+            <intent-filter>
+                <action android:name="com.mupa.player.enterprise.ACTION_OPEN_SETTINGS" />
             </intent-filter>
         </receiver>
 

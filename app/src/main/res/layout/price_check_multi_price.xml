@@ -16,7 +16,7 @@
         android:id="@+id/priceLeftPanel"
         android:layout_width="0dp"
         android:layout_height="match_parent"
-        android:background="#111827"
+        android:background="@drawable/bg_price_panel"
         android:padding="22dp"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toStartOf="@id/priceLandscapeSplitGuide"
@@ -27,7 +27,12 @@
             android:id="@+id/priceNameBar"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:padding="12dp"
+            android:layout_marginTop="10dp"
+            android:background="@drawable/bg_price_name_bar"
+            android:paddingStart="16dp"
+            android:paddingEnd="16dp"
+            android:paddingTop="14dp"
+            android:paddingBottom="14dp"
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toTopOf="parent">
@@ -42,22 +47,50 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:includeFontPadding="false"
-                    android:maxLines="3"
+                    android:maxLines="1"
+                    android:ellipsize="end"
                     android:text="PRODUTO"
                     android:textAllCaps="false"
                     android:textColor="#FFFFFF"
-                    android:textSize="28sp"
-                    android:textStyle="bold" />
+                    android:textSize="32sp"
+                    android:letterSpacing="0.01"
+                    android:layout_marginBottom="-20dp" />
+
+                <com.google.android.material.textview.MaterialTextView
+                    android:id="@+id/priceNameSecondLineText"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="0dp"
+                    android:includeFontPadding="false"
+                    android:maxLines="2"
+                    android:ellipsize="end"
+                    android:text=""
+                    android:textAllCaps="false"
+                    android:textColor="#FFFFFF"
+                    android:textSize="19sp"
+                    android:visibility="gone"
+                    android:layout_marginBottom="-5dp" />
 
                 <com.google.android.material.textview.MaterialTextView
                     android:id="@+id/priceSubtitleText"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
+                    android:layout_marginTop="0dp"
                     android:includeFontPadding="false"
                     android:text="SUBTITULO"
                     android:textColor="#E6FFFFFF"
                     android:textSize="14sp"
+                    android:visibility="gone" />
+
+                <com.google.android.material.textview.MaterialTextView
+                    android:id="@+id/priceSmartCaption"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="0dp"
+                    android:includeFontPadding="false"
+                    android:text=""
+                    android:textColor="#B3FFFFFF"
+                    android:textSize="13sp"
                     android:visibility="gone" />
             </LinearLayout>
         </FrameLayout>
@@ -66,7 +99,7 @@
             android:id="@+id/priceBadgesRow"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
+            android:layout_marginTop="@dimen/price_section_spacing_md"
             android:gravity="center_vertical"
             android:orientation="horizontal"
             app:layout_constraintEnd_toEndOf="parent"
@@ -122,7 +155,7 @@
         <ScrollView
             android:layout_width="0dp"
             android:layout_height="0dp"
-            android:layout_marginTop="12dp"
+            android:layout_marginTop="@dimen/price_section_spacing_md"
             android:layout_marginBottom="8dp"
             app:layout_constraintBottom_toTopOf="@id/priceCodeText"
             app:layout_constraintEnd_toEndOf="parent"

@@ -40,6 +40,7 @@
             android:id="@+id/priceNameBar"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
             android:padding="18dp"
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintStart_toStartOf="parent"
@@ -55,21 +56,47 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:includeFontPadding="false"
-                    android:maxLines="3"
+                    android:maxLines="1"
+                    android:ellipsize="end"
                     android:text="PRODUTO"
                     android:textColor="#FFFFFF"
                     android:textSize="36sp"
-                    android:textStyle="bold" />
+                    android:layout_marginBottom="-20dp" />
+
+                <com.google.android.material.textview.MaterialTextView
+                    android:id="@+id/priceNameSecondLineText"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="0dp"
+                    android:includeFontPadding="false"
+                    android:maxLines="2"
+                    android:ellipsize="end"
+                    android:text=""
+                    android:textColor="#FFFFFF"
+                    android:textSize="21sp"
+                    android:visibility="gone"
+                    android:layout_marginBottom="-5dp" />
 
                 <com.google.android.material.textview.MaterialTextView
                     android:id="@+id/priceSubtitleText"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
+                    android:layout_marginTop="0dp"
                     android:includeFontPadding="false"
                     android:text="SUBTITULO"
                     android:textColor="#E6FFFFFF"
                     android:textSize="16sp"
+                    android:visibility="gone" />
+
+                <com.google.android.material.textview.MaterialTextView
+                    android:id="@+id/priceSmartCaption"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="0dp"
+                    android:includeFontPadding="false"
+                    android:text=""
+                    android:textColor="#B3FFFFFF"
+                    android:textSize="13sp"
                     android:visibility="gone" />
             </LinearLayout>
         </FrameLayout>
@@ -78,7 +105,7 @@
             android:id="@+id/priceBadgesRow"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_marginTop="14dp"
+            android:layout_marginTop="@dimen/price_section_spacing_md"
             android:gravity="center_vertical"
             android:orientation="horizontal"
             app:layout_constraintEnd_toEndOf="parent"
@@ -134,7 +161,7 @@
             android:id="@+id/price_container"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_marginTop="20dp"
+            android:layout_marginTop="@dimen/price_section_spacing_lg"
             android:orientation="vertical"
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintStart_toStartOf="parent"
@@ -144,7 +171,7 @@
             android:id="@+id/priceOfferContainer"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
+            android:layout_marginTop="@dimen/price_section_spacing_md"
             android:orientation="vertical"
             android:padding="16dp"
             android:visibility="gone"

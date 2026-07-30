@@ -12,8 +12,10 @@ import android.os.Build
 import android.util.Log
 import com.mupa.player.enterprise.BuildConfig
 import com.mupa.player.enterprise.managers.DeviceCacheManager
+import com.mupa.player.enterprise.managers.SettingsManager
 import com.mupa.player.enterprise.network.TlsCompat
 import com.mupa.player.enterprise.storage.db.AppDatabase
+import com.mupa.player.enterprise.storage.db.MissingProductImageEntity
 import com.mupa.player.enterprise.storage.db.PriceCacheEntity
 import com.mupa.player.enterprise.storage.db.PriceQueryEventEntity
 import kotlinx.coroutines.CoroutineScope
@@ -30,6 +32,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.util.Locale
 import java.util.UUID
 
 class PriceQueryEngine(
@@ -47,11 +50,54 @@ class PriceQueryEngine(
         .writeTimeout(4, TimeUnit.SECONDS)
         .callTimeout(7, TimeUnit.SECONDS)
         .build()
+
+    // Client com callTimeout maior para integrações que fazem 2 requests sequenciais (auth + price)
+    private val httpMultiStep = TlsCompat.apply(OkHttpClient.Builder())
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(8, TimeUnit.SECONDS)
+        .writeTimeout(5, TimeUnit.SECONDS)
+        .callTimeout(0, TimeUnit.SECONDS)
+        .build()
     private val sessionState = JSONObject()
 
     // Escopo separado para gravações de analytics (insertEvent) que não devem atrasar o
     // retorno do preço para a UI - são "fire and forget".
     private val analyticsScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    companion object {
+        // Cache de imagem de produto: válido por 60 min. Passado isso, a imagem local ainda é
+        // exibida na hora (rápido), mas um novo download roda em background pra atualizar.
+        private const val IMAGE_CACHE_TTL_MS = 60L * 60L * 1000L
+    }
+
+    // Pré-autentica em background para que o token esteja em cache antes do primeiro scan
+    fun warmUpKompraoToken() {
+        analyticsScope.launch {
+            runCatching {
+                val now = System.currentTimeMillis()
+                val cached = sessionState.optString("komprao_access_token", "")
+                val cachedAt = sessionState.optLong("komprao_access_token_at", 0L)
+                if (cached.isNotBlank() && (now - cachedAt) < 50 * 60 * 1000L) return@launch
+                val authBody = """{"username":"MUPA.APP","password":"vRTz834/"}"""
+                val authReq = Request.Builder()
+                    .url("https://apionway.superkoch.com.br/on-way/auth/login")
+                    .header("Content-Type", "application/json")
+                    .post(authBody.toRequestBody("application/json".toMediaType()))
+                    .build()
+                val authJson = httpMultiStep.newCall(authReq).execute().use { r ->
+                    JSONObject(r.body?.string().orEmpty())
+                }
+                val token = authJson.optJSONObject("data")?.optString("token", "").orEmpty()
+                if (token.isNotBlank()) {
+                    sessionState.put("komprao_access_token", token)
+                    sessionState.put("komprao_access_token_at", now)
+                    Log.i("MPlayerPrice", "komprao_token_warmup_ok")
+                }
+            }.onFailure {
+                Log.w("MPlayerPrice", "komprao_token_warmup_failed err=${it.message}")
+            }
+        }
+    }
 
     @Volatile private var cachedFilial: String? = null
 
@@ -59,6 +105,15 @@ class PriceQueryEngine(
         cachedFilial?.let { return it }
         val resolved = runCatching { DeviceCacheManager(context).load()?.filial }.getOrNull().orEmpty()
         cachedFilial = resolved
+        return resolved
+    }
+
+    @Volatile private var cachedCompanyId: String? = null
+
+    private suspend fun resolveCompanyId(): String? {
+        cachedCompanyId?.let { return it }
+        val resolved = runCatching { DeviceCacheManager(context).load()?.company }.getOrNull()?.trim()?.ifBlank { null }
+        cachedCompanyId = resolved
         return resolved
     }
 
@@ -167,6 +222,28 @@ class PriceQueryEngine(
                     Log.w(
                         "MPlayerPrice",
                         "query_failed integration=integra-zaffari ean=$normalizedEan err=${it.javaClass.simpleName}:${it.message}",
+                    )
+                }
+                .getOrNull()
+        }
+
+        if (config.integration == "integra-komprao") {
+            return@withContext runCatching { queryKomprao(normalizedEan, config, isOnline, filial) }
+                .onFailure {
+                    Log.w(
+                        "MPlayerPrice",
+                        "query_failed integration=integra-komprao ean=$normalizedEan err=${it.javaClass.simpleName}:${it.message}",
+                    )
+                }
+                .getOrNull()
+        }
+
+        if (config.integration == "integra-tcserver") {
+            return@withContext runCatching { queryTcServer(normalizedEan, config, filial) }
+                .onFailure {
+                    Log.w(
+                        "MPlayerPrice",
+                        "query_failed integration=integra-tcserver ean=$normalizedEan err=${it.javaClass.simpleName}:${it.message}",
                     )
                 }
                 .getOrNull()
@@ -528,7 +605,8 @@ class PriceQueryEngine(
     }
 
     private fun fetchZaffariPrice(ean: String, loja: String, bearerToken: String): JSONObject {
-        val url = "https://zaffariexpress.com.br/api/v1/consultapreco/precos?loja=$loja&ean=$ean"
+        val resolvedLoja = loja.ifBlank { "47" }
+        val url = "https://zaffariexpress.com.br/api/v1/consultapreco/precos?loja=$resolvedLoja&ean=$ean"
         val reqBuilder = Request.Builder().url(url)
         if (bearerToken.isNotBlank()) {
             reqBuilder.header("Authorization", "Bearer $bearerToken")
@@ -557,20 +635,39 @@ class PriceQueryEngine(
         val precoPropClube = field("preco_prop_clube")?.takeIf { pc -> precoClube != null || (precoPropBase != null && pc < precoPropBase) }
         val precoPropApartirde = field("preco_prop_apartirde")
 
-        // codigo_etiqueta "2" indica pesável (venda por peso)
-        val codigoEtiqueta = data.optString("codigo_etiqueta", "").trim()
-        val isPesavel = codigoEtiqueta == "2"
-
         val description = data.optString("descricao_produto", "").ifBlank { null }
-        val embalagVenda = data.optString("embalagem_venda", "UN").ifBlank { "UN" }
+        val embalagVenda = data.optString("embalagem_venda", "UN").trim().uppercase().ifBlank { "UN" }
+        val embalagProp = data.optString("embalagem_proporcional", "").trim().uppercase()
         val clientImageUrl = data.optString("link_imagem", "").ifBlank { null }
         val codigoProduto = data.optString("codigo_produto", "").ifBlank { null }
 
-        // ── Monta priceSlots (ordem visual: base → pesável/kg → clube → bulk) ──
+        // Pesável apenas quando a unidade de venda ou proporcional é KG
+        val isPesavel = embalagVenda == "KG" || embalagProp == "KG"
+
+        fun unitLabel(unit: String) = when (unit) {
+            "KG" -> "KG"
+            "UN", "" -> "UNIDADE"
+            else -> unit
+        }
+
+        // Preço promocional (antigo "atacado"): preco_apartirde a partir de qtd unidades
+        val precoPromo = precoApartirdeClube ?: precoApartirde
+        val bulkPropPrice = precoPropApartirde
+
+        // Descrição enriquecida: adiciona condição da promoção quando aplicável
+        val promoCondition = when {
+            precoPromo != null && qtdApartirde > 0 ->
+                "A partir de $qtdApartirde ${unitLabel(embalagVenda).lowercase()} para o preço em promoção"
+            precoPromo != null -> "Preço em promoção"
+            else -> null
+        }
+        val enrichedDescription = listOfNotNull(description, promoCondition)
+            .joinToString(" • ").ifBlank { null }
+
+        // ── Monta priceSlots: base → EM PROMOÇÃO → CLUBE K (D3/D4) ──
         val slots = ArrayList<ProductPriceSlot>()
 
         if (isPesavel && precoPropBase != null) {
-            // Pesável: mostra preço por KG como slot principal
             slots += ProductPriceSlot(
                 label = "PREÇO POR KG",
                 value = precoPropBase,
@@ -579,9 +676,8 @@ class PriceQueryEngine(
                 isClub = false,
             )
         } else {
-            // Não pesável: slot do preço base
             slots += ProductPriceSlot(
-                label = "PREÇO/$embalagVenda",
+                label = "PREÇO/${unitLabel(embalagVenda)}",
                 value = precoBase,
                 field = "price",
                 isPromo = false,
@@ -589,21 +685,38 @@ class PriceQueryEngine(
             )
         }
 
-        // Clube (preço unitário)
+        // D1/D3: Promoção (antigo bulk) vem antes do clube, rotulado como "EM PROMOÇÃO"
+        if (precoPromo != null) {
+            slots += ProductPriceSlot(
+                label = "EM PROMOÇÃO",
+                value = precoPromo,
+                field = "price_wholesale",
+                isPromo = true,
+                isClub = false,
+            )
+        } else if (isPesavel && bulkPropPrice != null) {
+            slots += ProductPriceSlot(
+                label = "PROMOÇÃO POR KG",
+                value = bulkPropPrice,
+                field = "price_wholesale",
+                isPromo = true,
+                isClub = false,
+            )
+        }
+
+        // D3/D4: Clube K — exibido apenas quando existe preço clube menor que o base
         if (precoClube != null) {
             slots += ProductPriceSlot(
-                label = "CLIENTE CLUBE",
+                label = "CLUBE K",
                 value = precoClube,
                 field = "price_club",
                 isPromo = false,
                 isClub = true,
             )
         }
-
-        // Clube pesável (preço por kg clube)
         if (isPesavel && precoPropClube != null) {
             slots += ProductPriceSlot(
-                label = "CLUBE POR KG",
+                label = "CLUBE K POR KG",
                 value = precoPropClube,
                 field = "price_club",
                 isPromo = false,
@@ -611,36 +724,13 @@ class PriceQueryEngine(
             )
         }
 
-        // "A partir de X unidades" (bulk)
-        val bulkPrice = precoApartirdeClube ?: precoApartirde
-        val bulkPropPrice = precoPropApartirde
-        if (bulkPrice != null) {
-            val bulkLabel = if (qtdApartirde > 0) "A PARTIR DE $qtdApartirde UN" else "ATACADO"
-            slots += ProductPriceSlot(
-                label = bulkLabel,
-                value = bulkPrice,
-                field = "price_wholesale",
-                isPromo = precoApartirdeClube != null,
-                isClub = precoApartirdeClube != null,
-            )
-        } else if (isPesavel && bulkPropPrice != null) {
-            val bulkLabel = if (qtdApartirde > 0) "A PARTIR DE $qtdApartirde KG" else "KG ATACADO"
-            slots += ProductPriceSlot(
-                label = bulkLabel,
-                value = bulkPropPrice,
-                field = "price_wholesale",
-                isPromo = false,
-                isClub = false,
-            )
-        }
-
-        // Offer badge para bulk (A partir de X un)
-        val offer: PriceOffer? = if (bulkPrice != null && qtdApartirde > 0) {
+        // Offer badge (mantido para compatibilidade com outros layouts)
+        val offer: PriceOffer? = if (precoPromo != null && qtdApartirde > 0) {
             PriceOffer(
                 enabled = true,
-                title = "A PARTIR DE $qtdApartirde UN",
+                title = "A PARTIR DE $qtdApartirde ${unitLabel(embalagVenda)}",
                 description = null,
-                secondUnit = bulkPrice,
+                secondUnit = precoPromo,
                 type = "bulk",
             )
         } else null
@@ -650,14 +740,14 @@ class PriceQueryEngine(
         return PriceProduct(
             id = codigoProduto,
             ean = ean,
-            description = description,
+            description = enrichedDescription,
             price = if (isPesavel) precoPropBase ?: precoBase else precoBase,
             originalPrice = null,
             priceFrom = null,
             pricePromotional = null,
             clubPrice = precoClube,
             priceClub = precoClube,
-            priceWholesale = bulkPrice,
+            priceWholesale = precoPromo,
             priceWeighable = if (isPesavel) precoPropBase else null,
             cardPrice = null,
             stock = null,
@@ -850,8 +940,10 @@ class PriceQueryEngine(
         if (normalizedEan.isBlank()) return@withContext null to null
 
         val existing = localProductImagePathIfExists(normalizedEan)
-        if (existing != null) return@withContext existing to null
-        if (!isOnline) return@withContext null to null
+        // Cache 60 min: imagem fresca é servida direto; vencida, tenta rebaixar (cai no fluxo
+        // abaixo). Offline, serve a imagem que houver (fresca ou vencida) — melhor que nada.
+        if (existing != null && isProductImageFresh(normalizedEan)) return@withContext existing to null
+        if (!isOnline) return@withContext existing to null
 
         val cachedProduct = db.priceCacheDao().getByEan(normalizedEan)?.let { cache ->
             runCatching { parseProductFromCache(normalizedEan, cache) }.getOrNull()
@@ -888,23 +980,17 @@ class PriceQueryEngine(
         val isKomprao = config.integration.contains("komprao", ignoreCase = true) || config.integration.contains("komprão", ignoreCase = true)
         if (isKomprao) {
             val sku = cachedProduct?.id ?: normalizedEan
-            val token = sessionState.optString("access_token", "").ifBlank {
-                val authStep = config.steps.firstOrNull { it.type == "authenticate" }
-                if (authStep != null) {
-                    runCatching {
-                        val resp = executeStep(authStep, sessionState)
-                        applyMapping(resp, authStep.mapping, sessionState)
-                        sessionState.optString("access_token", "")
-                    }.getOrNull()
-                } else ""
-            }
-            if (!sku.isNullOrBlank() && !token.isNullOrBlank()) {
+            val token = obterTokenKomprao()
+            if (!sku.isNullOrBlank() && token.isNotBlank()) {
                 val kompraoUrl = "https://apionway.superkoch.com.br/on-way/product/image/$sku"
                 val headers = mapOf("accept" to "image/jpeg", "Authorization" to "Bearer $token")
                 val kompraoLocal = runCatching {
                     downloadProductImageIfNeeded(ean = normalizedEan, rawUrl = kompraoUrl, headers = headers)
                 }.getOrNull()
+                Log.d("MPlayerPrice", "komprao_image sku=$sku ok=${kompraoLocal != null}")
                 if (kompraoLocal != null) return@withContext saveToCacheAndReturn(kompraoLocal, null)
+            } else {
+                Log.w("MPlayerPrice", "komprao_image_skip sku=$sku hasToken=${token.isNotBlank()}")
             }
         }
 
@@ -913,9 +999,20 @@ class PriceQueryEngine(
         val vtexLocal = vtexUrl?.let { downloadProductImageIfNeeded(ean = normalizedEan, rawUrl = it) }
         if (vtexLocal != null) return@withContext saveToCacheAndReturn(vtexLocal, null)
 
+        // 2ª opção garantida: API de imagem da Mupa (srv-mupa). Tenta primeiro o step
+        // "lookup_image" do config (se houver) e, se ele não trouxer imagem, cai SEMPRE no
+        // srv-mupa hardcoded — assim o fallback da Mupa acontece independente do config.
         val step3 = config.steps.firstOrNull { it.type == "lookup_image" }
-        val meta = fetchProductImageMeta(ean = normalizedEan, step = step3)
-        val mupaLocal = meta?.imageUrl?.let { downloadProductImageIfNeeded(ean = normalizedEan, rawUrl = it) }
+        var meta = fetchProductImageMeta(ean = normalizedEan, step = step3)
+        var mupaLocal = meta?.imageUrl?.let { downloadProductImageIfNeeded(ean = normalizedEan, rawUrl = it) }
+        if (mupaLocal == null && step3 != null) {
+            val fallbackMeta = fetchProductImageMeta(ean = normalizedEan, step = null)
+            val fallbackLocal = fallbackMeta?.imageUrl?.let { downloadProductImageIfNeeded(ean = normalizedEan, rawUrl = it) }
+            if (fallbackLocal != null) {
+                meta = fallbackMeta
+                mupaLocal = fallbackLocal
+            }
+        }
         val theme =
             meta?.let {
                 PriceTheme(
@@ -924,7 +1021,76 @@ class PriceQueryEngine(
                     dark = it.dark,
                 )
             }?.takeIf { it.signature != null || it.dark != null || it.light != null }
-        return@withContext if (mupaLocal != null) saveToCacheAndReturn(mupaLocal, theme) else null to null
+        if (mupaLocal != null) return@withContext saveToCacheAndReturn(mupaLocal, theme)
+
+        // Todas as fontes falharam: registra o EAN para um técnico resolver manualmente depois.
+        // Fire-and-forget — não afeta o retorno nem a velocidade da consulta de preço.
+        reportMissingImage(normalizedEan)
+        null to null
+    }
+
+    /** Registra localmente que [ean] está sem imagem em nenhuma fonte; sincronizado com o backend depois, em lote. */
+    private suspend fun reportMissingImage(ean: String) {
+        runCatching {
+            db.missingProductImageDao().insert(
+                MissingProductImageEntity(
+                    ean = ean,
+                    companyId = resolveCompanyId(),
+                    deviceId = deviceId,
+                    firstReportedAtEpochMs = System.currentTimeMillis(),
+                    uploadedAtEpochMs = null,
+                ),
+            )
+        }
+    }
+
+    /**
+     * Verifica, em lote, se alguma imagem antes ausente já foi cadastrada pelo backend (após um
+     * técnico resolver manualmente) e baixa/cacheia via [downloadProductImageIfNeeded] — mesmo
+     * caminho de sempre, sem duplicar lógica. Roda inteiramente em background: não é chamado do
+     * fluxo de consulta de preço, então nunca atrasa um scan.
+     */
+    suspend fun checkAndRecoverMissingImages(limit: Int = 25): Int = withContext(Dispatchers.IO) {
+        val token = BuildConfig.SUPABASE_TOKEN.trim()
+        if (token.isBlank()) return@withContext 0
+
+        val eans = runCatching { db.missingProductImageDao().getEansToRecheck(limit) }.getOrNull().orEmpty()
+        if (eans.isEmpty()) return@withContext 0
+
+        val eanFilter = eans.joinToString(",") { "\"$it\"" }
+        val url = "https://iurqddkuihjsmxubibao.supabase.co/rest/v1/product_images_missing" +
+            "?ean=in.($eanFilter)&resolved_at=not.is.null&select=ean,image_url"
+        val req = Request.Builder()
+            .url(url)
+            .header("apikey", token)
+            .header("Authorization", "Bearer $token")
+            .get()
+            .build()
+
+        val resolved = runCatching {
+            http.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@use null
+                JSONArray(resp.body?.string().orEmpty())
+            }
+        }.getOrNull() ?: return@withContext 0
+
+        var recovered = 0
+        val recoveredEans = mutableListOf<String>()
+        for (i in 0 until resolved.length()) {
+            val row = resolved.optJSONObject(i) ?: continue
+            val ean = row.optString("ean", "").trim()
+            val imageUrl = row.optString("image_url", "").trim()
+            if (ean.isBlank() || imageUrl.isBlank()) continue
+            val local = runCatching { downloadProductImageIfNeeded(ean = ean, rawUrl = imageUrl) }.getOrNull()
+            if (local != null) {
+                recoveredEans += ean
+                recovered++
+            }
+        }
+        if (recoveredEans.isNotEmpty()) {
+            runCatching { db.missingProductImageDao().deleteResolved(recoveredEans) }
+        }
+        recovered
     }
 
     private fun fetchProductImageMeta(ean: String, step: PriceStep?): ProductImageMeta? {
@@ -1074,6 +1240,28 @@ class PriceQueryEngine(
         return any?.absolutePath
     }
 
+    /** Arquivo de imagem local do [ean], se existir (independente da idade). */
+    private fun localProductImageFile(ean: String): File? {
+        val normalized = ean.trim()
+        if (normalized.isBlank()) return null
+        val primary = File(productsDir(), "$normalized.webp")
+        if (primary.exists() && primary.length() > 0L) return primary
+        return productsDir().listFiles()
+            ?.firstOrNull { it.isFile && it.length() > 0L && it.nameWithoutExtension == normalized }
+    }
+
+    /** true se há imagem local do [ean] e ela ainda está dentro da janela de 60 min. */
+    private fun isProductImageFresh(ean: String): Boolean {
+        val f = localProductImageFile(ean) ?: return false
+        return System.currentTimeMillis() - f.lastModified() < IMAGE_CACHE_TTL_MS
+    }
+
+    /** true se há imagem local do [ean] mas ela já venceu (>60 min) — deve ser reatualizada. */
+    fun isProductImageStale(ean: String): Boolean {
+        val f = localProductImageFile(ean) ?: return false
+        return System.currentTimeMillis() - f.lastModified() >= IMAGE_CACHE_TTL_MS
+    }
+
     private fun normalizeCachedProduct(product: PriceProduct?): PriceProduct? {
         if (product == null) return null
         val sanitized = sanitizeLocalPathOrNull(product.image)
@@ -1089,12 +1277,22 @@ class PriceQueryEngine(
     ): String? {
         val url = normalizeExternalUrl(rawUrl).trim()
         if (url.isBlank()) return null
+        val now = System.currentTimeMillis()
         val optimizedTarget = File(productsDir(), "$ean.webp")
-        if (optimizedTarget.exists() && optimizedTarget.length() > 0L) return optimizedTarget.absolutePath
+        if (optimizedTarget.exists() && optimizedTarget.length() > 0L) {
+            // Cache 60 min: só reaproveita se ainda estiver fresco; vencido, apaga e rebaixa.
+            if (now - optimizedTarget.lastModified() < IMAGE_CACHE_TTL_MS) return optimizedTarget.absolutePath
+            runCatching { optimizedTarget.delete() }
+        }
 
-        val existing =
+        val existingAny =
             productsDir().listFiles()
                 ?.firstOrNull { it.isFile && it.length() > 0L && it.nameWithoutExtension == ean }
+        // Arquivo não-otimizado vencido também é descartado pra forçar download novo.
+        if (existingAny != null && now - existingAny.lastModified() >= IMAGE_CACHE_TTL_MS) {
+            runCatching { existingAny.delete() }
+        }
+        val existing = existingAny?.takeIf { it.exists() && it.length() > 0L }
         if (existing != null) {
             val bmp = runCatching { BitmapFactory.decodeFile(existing.absolutePath) }.getOrNull()
             if (bmp == null) return existing.absolutePath
@@ -1709,4 +1907,427 @@ class PriceQueryEngine(
 
         return out
     }
+
+    // ─────────────────────────────────────────────────────────────
+    // integra-komprao  (Komprão / SuperKoch OnWay API)
+    // Auth:  POST https://apionway.superkoch.com.br/on-way/auth/login
+    //        body: {"username":"MUPA.APP","password":"vRTz834/"}
+    //        resp: { data: { token: "..." } }
+    // Price: GET  https://apionway.superkoch.com.br/on-way/product/ean/{ean}/store/{store}
+    //        resp: { data: { PRECO_NORMAL, PRECO_PDV, PRECO_CLUBE_KOCH,
+    //                        PRECO_PDV_ATACADO, PRECO_LEVEPAGUE,
+    //                        priceDynamicsType, description, ean[] } }
+    // ─────────────────────────────────────────────────────────────
+
+    /** Token do Komprão (cache de 50 min). Faz login se necessário. */
+    private fun obterTokenKomprao(): String {
+        val now = System.currentTimeMillis()
+        val cachedToken = sessionState.optString("komprao_access_token", "")
+        val cachedAt = sessionState.optLong("komprao_access_token_at", 0L)
+        if (cachedToken.isNotBlank() && (now - cachedAt) < 50 * 60 * 1000L) return cachedToken
+        val authBody = """{"username":"MUPA.APP","password":"vRTz834/"}"""
+        val authReq = Request.Builder()
+            .url("https://apionway.superkoch.com.br/on-way/auth/login")
+            .header("Content-Type", "application/json")
+            .post(authBody.toRequestBody("application/json".toMediaType()))
+            .build()
+        val token = runCatching {
+            httpMultiStep.newCall(authReq).execute().use { r ->
+                JSONObject(r.body?.string().orEmpty())
+            }.optJSONObject("data")?.optString("token", "").orEmpty()
+        }.getOrDefault("")
+        if (token.isNotBlank()) {
+            sessionState.put("komprao_access_token", token)
+            sessionState.put("komprao_access_token_at", now)
+        }
+        return token
+    }
+
+    private suspend fun queryKomprao(ean: String, config: PriceConfig, isOnline: Boolean, filial: String): PriceProduct? {
+        val now = System.currentTimeMillis()
+        val cache = db.priceCacheDao().getByEan(ean)
+        val fromCache = cache != null && (now - cache.updatedAtEpochMs) <= config.cacheMinutes * 60 * 1000L
+
+        if (fromCache) {
+            val product = normalizeCachedProduct(parseProductFromCache(ean, cache))
+            insertEvent(ean = ean, filial = filial, responseTimeMs = 0L, fromCache = true, success = product != null)
+            return product
+        }
+
+        if (!isOnline) {
+            val product = normalizeCachedProduct(parseProductFromCache(ean, cache))?.copy(offline = true)
+            insertEvent(ean = ean, filial = filial, responseTimeMs = 0L, fromCache = false, success = product != null)
+            return product
+        }
+
+        val startedAt = System.currentTimeMillis()
+        var product: PriceProduct? = null
+        try {
+            // 1. Token (cache 50 min)
+            val bearerToken = obterTokenKomprao()
+
+            if (bearerToken.isBlank()) {
+                Log.w("MPlayerPrice", "komprao_auth_failed ean=$ean")
+                return null
+            }
+
+            // 2. Consulta de preço
+            val store = filial.ifBlank { "18" }
+            val priceResp = fetchKompraoPrice(ean = ean, store = store, bearerToken = bearerToken)
+
+            // 3. Parse
+            product = parseKompraoResponse(ean = ean, json = priceResp)?.let { attachLocalImageIfExists(it) }
+
+            if (product != null) {
+                db.priceCacheDao().upsert(
+                    PriceCacheEntity(
+                        ean = ean,
+                        productJson = productToJson(product).toString(),
+                        updatedAtEpochMs = System.currentTimeMillis(),
+                    )
+                )
+            }
+        } catch (t: Throwable) {
+            Log.w("MPlayerPrice", "query_komprao_failed ean=$ean err=${t.javaClass.simpleName}:${t.message}")
+        } finally {
+            val took = System.currentTimeMillis() - startedAt
+            insertEvent(ean = ean, filial = filial, responseTimeMs = took, fromCache = false, success = product != null)
+        }
+        return product
+    }
+
+    private fun fetchKompraoPrice(ean: String, store: String, bearerToken: String): JSONObject {
+        val url = "https://apionway.superkoch.com.br/on-way/product/ean/$ean/store/$store"
+        val req = Request.Builder()
+            .url(url)
+            .header("accept", "application/json")
+            .header("Authorization", "Bearer $bearerToken")
+            .build()
+        httpMultiStep.newCall(req).execute().use { resp ->
+            val body = resp.body?.string().orEmpty()
+            Log.d("MPlayerPrice", "komprao_price_resp ean=$ean status=${resp.code} body=${body.take(400)}")
+            return runCatching { JSONObject(body) }.getOrElse { JSONObject() }
+        }
+    }
+
+    private fun parseKompraoResponse(ean: String, json: JSONObject): PriceProduct? {
+        val data = json.optJSONObject("data") ?: return null
+
+        val description = data.optString("description", "").ifBlank {
+            data.optString("fullDescription", "").ifBlank { null }
+        }
+
+        // ── Fonte da verdade: o array "prices" (o mesmo usado para imprimir a etiqueta).
+        // Cada item traz { description, value, label, a_partir_de_x }. A label já vem pronta
+        // da API (ex: "OFERTA", "Oferta Clube K:", "A partir de {{a_partir_de_x}} unidades…")
+        // e o {{a_partir_de_x}} é interpolado com a quantidade retornada. ──
+        val pricesArr = data.optJSONArray("prices") ?: return null
+
+        val slots = ArrayList<ProductPriceSlot>()
+        val precos = LinkedHashMap<String, Double>()
+        var normal: Double? = null
+        var pdv: Double? = null
+        var atacado: Double? = null
+        var clube: Double? = null
+
+        for (i in 0 until pricesArr.length()) {
+            val o = pricesArr.optJSONObject(i) ?: continue
+            val desc = o.optString("description", "").trim().uppercase()
+            val value = o.opt("value")?.toString()?.trim()?.toDoubleOrNull()?.takeIf { it > 0 } ?: continue
+            if (desc.isBlank()) continue
+            precos[desc] = value
+
+            // Label da API, com {{a_partir_de_x}} substituído pela quantidade
+            val aPartirDe = o.opt("a_partir_de_x")?.toString()?.trim()?.toIntOrNull()
+            val label = o.optString("label", "").trim()
+                .replace("{{a_partir_de_x}}", aPartirDe?.toString().orEmpty())
+                .trim()
+                .removeSuffix(":")
+                .trim()
+
+            // Cor/estilo pelo tipo de preço
+            val isClube = desc.contains("CLUBE")
+            val isOferta = !isClube && desc != "PRECO_NORMAL" &&
+                !label.equals("Preço Normal", ignoreCase = true)
+
+            when (desc) {
+                "PRECO_NORMAL" -> normal = value
+                "PRECO_PDV" -> pdv = value
+                "PRECO_PDV_ATACADO" -> atacado = value
+                else -> if (isClube) clube = value
+            }
+
+            slots += ProductPriceSlot(
+                label = label.ifBlank { "PREÇO" },
+                value = value,
+                field = when {
+                    isClube -> "price_club"
+                    isOferta -> "price_wholesale"
+                    else -> "price"
+                },
+                isPromo = isOferta,
+                isClub = isClube,
+            )
+        }
+        if (slots.isEmpty()) return null
+
+        // Preço de venda de referência (o "cheio" do dia)
+        val precoVenda = pdv ?: normal ?: precos.values.first()
+
+        // Mostra o preço normal riscado dentro do box das ofertas mais baratas
+        val referencia = normal ?: pdv
+        if (referencia != null) {
+            for (i in slots.indices) {
+                val s = slots[i]
+                if ((s.isPromo || s.isClub) && s.value < referencia) {
+                    slots[i] = s.copy(fromValue = referencia)
+                }
+            }
+        }
+
+        val localImagePath = localProductImagePathIfExists(ean)
+
+        return PriceProduct(
+            id = data.optString("sku", "").ifBlank { null },
+            ean = ean,
+            description = description,
+            price = precoVenda,
+            originalPrice = null,
+            clubPrice = clube,
+            priceClub = clube,
+            priceWholesale = atacado,
+            pricePromotional = if (normal != null && pdv != null && pdv < normal) pdv else null,
+            priceFrom = null,
+            priceWeighable = null,
+            cardPrice = null,
+            stock = null,
+            image = localImagePath,
+            clientImageUrl = null,
+            offer = null,
+            packs = emptyList(),
+            theme = null,
+            offline = false,
+            priceSlots = slots.ifEmpty { null },
+            xmlLayoutType = "multi_price",
+        )
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // integra-tcserver  (Gertec TCServer — protocolo TCP de terminal
+    // de consulta, porta padrão 6500)
+    //
+    // Handshake:  conecta → servidor envia "#ok"
+    //             terminal envia "#<tipo>|<versão>"
+    //             servidor envia "#alwayslive"
+    //             terminal envia "#alwayslive_ok"
+    // Consulta:   terminal envia "#<ean>"
+    //             servidor responde "#<DESCRIÇÃO>|<PREÇO>" ou "#nfound"
+    //
+    // Endereço configurado em Configurações (SettingsManager
+    // tc_server_address, formato "ip:porta"; porta default 6500).
+    // ─────────────────────────────────────────────────────────────
+
+    private suspend fun queryTcServer(ean: String, config: PriceConfig, filial: String): PriceProduct? {
+        val now = System.currentTimeMillis()
+        val cache = db.priceCacheDao().getByEan(ean)
+        val fromCache = cache != null && (now - cache.updatedAtEpochMs) <= config.cacheMinutes * 60 * 1000L
+
+        if (fromCache) {
+            val product = normalizeCachedProduct(parseProductFromCache(ean, cache))
+            insertEvent(ean = ean, filial = filial, responseTimeMs = 0L, fromCache = true, success = product != null)
+            return product
+        }
+
+        val address = SettingsManager(context).getTcServerAddress()
+        if (address.isBlank()) {
+            Log.w("MPlayerPrice", "tcserver_address_not_configured ean=$ean")
+            return null
+        }
+        // address = "ip:porta" (ex: 192.168.1.175:8080)
+        val baseAddr = address.removePrefix("http://").removePrefix("https://").trimEnd('/')
+
+        val startedAt = System.currentTimeMillis()
+        var product: PriceProduct? = null
+        try {
+            val json = fetchTcServerPrice(baseAddr, ean)
+            Log.d("MPlayerPrice", "tcserver_resp ean=$ean resp=${json?.toString()?.take(300)}")
+            product = json?.let { parseTcServerResponse(ean, it) }?.let { attachLocalImageIfExists(it) }
+
+            if (product != null) {
+                db.priceCacheDao().upsert(
+                    PriceCacheEntity(
+                        ean = ean,
+                        productJson = productToJson(product).toString(),
+                        updatedAtEpochMs = System.currentTimeMillis(),
+                    )
+                )
+            }
+        } catch (t: Throwable) {
+            Log.w("MPlayerPrice", "query_tcserver_failed ean=$ean addr=$baseAddr err=${t.javaClass.simpleName}:${t.message}")
+            // Fallback para cache mesmo expirado quando o servidor está inacessível
+            if (cache != null) {
+                product = normalizeCachedProduct(parseProductFromCache(ean, cache))?.copy(offline = true)
+            }
+        } finally {
+            val took = System.currentTimeMillis() - startedAt
+            insertEvent(ean = ean, filial = filial, responseTimeMs = took, fromCache = false, success = product != null)
+        }
+        return product
+    }
+
+    /** GET http://{addr}/consulta?ean={ean} — retorna o JSON do TCServer Mupa (ou null se 404). */
+    private fun fetchTcServerPrice(addr: String, ean: String): JSONObject? {
+        val url = "http://$addr/consulta?ean=$ean"
+        val req = Request.Builder().url(url).header("accept", "application/json").get().build()
+        http.newCall(req).execute().use { resp ->
+            val body = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                // 404 = produto não encontrado (resposta esperada, não é erro de rede)
+                Log.d("MPlayerPrice", "tcserver_http_status=${resp.code} ean=$ean")
+                return null
+            }
+            return runCatching { JSONObject(body) }.getOrNull()
+        }
+    }
+
+    private fun parseTcServerResponse(ean: String, json: JSONObject): PriceProduct? {
+        if (!json.optBoolean("encontrado", false)) return null
+
+        fun num(key: String): Double? =
+            if (json.isNull(key)) null else json.optDouble(key, -1.0).takeIf { it > 0 }
+
+        val preco = num("preco") ?: return null
+        val precoPromo = num("preco_promo")?.takeIf { it < preco }
+        val precoClube = num("preco_clube")?.takeIf { it < preco }
+        val description = json.optString("descricao", "").ifBlank { null }
+
+        // Slots na ordem: PREÇO NORMAL → EM PROMOÇÃO → CLUBE
+        val slots = ArrayList<ProductPriceSlot>()
+        slots += ProductPriceSlot(
+            label = "PREÇO NORMAL",
+            value = preco,
+            field = "price",
+            isPromo = false,
+            isClub = false,
+        )
+        if (precoPromo != null) {
+            slots += ProductPriceSlot(
+                label = "EM PROMOÇÃO",
+                value = precoPromo,
+                field = "price_wholesale",
+                isPromo = true,
+                isClub = false,
+                fromValue = preco,  // "de" riscado dentro do box de promoção
+            )
+        }
+        if (precoClube != null) {
+            slots += ProductPriceSlot(
+                label = "CLUBE",
+                value = precoClube,
+                field = "price_club",
+                isPromo = false,
+                isClub = true,
+            )
+        }
+
+        // ── Campos extras dinâmicos vindos do TCServer Mupa ──
+        // preços viram slots (com "de" riscado dentro do box); ofertas viram frases
+        val ofertaFrases = ArrayList<String>()
+        val extrasArr = json.optJSONArray("extras")
+        if (extrasArr != null) {
+            for (i in 0 until extrasArr.length()) {
+                val ex = extrasArr.optJSONObject(i) ?: continue
+                val tipo = ex.optString("tipo")
+                val label = ex.optString("label").trim()
+                when (tipo) {
+                    "preco_simples" -> {
+                        val v = ex.optDouble("valor", -1.0).takeIf { it > 0 } ?: continue
+                        slots += ProductPriceSlot(
+                            label = label.ifBlank { "PREÇO" },
+                            value = v,
+                            field = "price_extra",
+                            isPromo = v < preco,
+                            isClub = false,
+                        )
+                    }
+                    "de_por" -> {
+                        val de = ex.optDouble("de", -1.0).takeIf { it > 0 }
+                        val por = ex.optDouble("por", -1.0).takeIf { it > 0 } ?: continue
+                        slots += ProductPriceSlot(
+                            label = label.ifBlank { "OFERTA" },
+                            value = por,
+                            field = "price_wholesale",
+                            isPromo = true,
+                            isClub = false,
+                            fromValue = de?.takeIf { it > por },  // "de" riscado dentro do box
+                        )
+                    }
+                    "leve_pague" -> {
+                        val leve = ex.optInt("leve", 0)
+                        val pague = ex.optInt("pague", 0)
+                        if (leve > 0 && pague > 0) {
+                            ofertaFrases += label.ifBlank { "LEVE $leve PAGUE $pague" }
+                        }
+                    }
+                    "compre_pague" -> {
+                        val qtd = ex.optInt("qtd", 0)
+                        val valor = ex.optDouble("valor", -1.0).takeIf { it > 0 }
+                        if (qtd > 0 && valor != null) {
+                            ofertaFrases += label.ifBlank {
+                                "NA COMPRA DE $qtd, PAGUE ${formatMoneyBr(valor)}"
+                            }
+                        }
+                    }
+                    "desconto_progressivo" -> {
+                        val item = ex.optInt("item", 0)
+                        val percent = ex.optDouble("percent", -1.0).takeIf { it > 0 }
+                        if (item > 0 && percent != null) {
+                            ofertaFrases += label.ifBlank {
+                                "NO ${item}º ITEM, ${percent.toInt()}% DE DESCONTO"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        val offer = if (ofertaFrases.isNotEmpty()) {
+            PriceOffer(
+                enabled = true,
+                title = ofertaFrases.joinToString("  •  "),
+                description = null,
+                secondUnit = null,
+                type = "extra",
+            )
+        } else null
+
+        val localImagePath = localProductImagePathIfExists(ean)
+
+        return PriceProduct(
+            id = null,
+            ean = ean,
+            description = description,
+            price = preco,
+            originalPrice = null,
+            clubPrice = precoClube,
+            priceClub = precoClube,
+            priceWholesale = precoPromo,
+            pricePromotional = precoPromo,
+            priceFrom = null,
+            priceWeighable = null,
+            cardPrice = null,
+            stock = null,
+            image = localImagePath,
+            clientImageUrl = null,
+            offer = offer,
+            packs = emptyList(),
+            theme = null,
+            offline = false,
+            priceSlots = slots,
+            xmlLayoutType = "multi_price",
+        )
+    }
+
+    private fun formatMoneyBr(v: Double): String =
+        "R$ " + String.format(Locale.US, "%.2f", v).replace(".", ",")
 }
