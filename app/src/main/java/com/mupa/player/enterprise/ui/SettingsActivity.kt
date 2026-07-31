@@ -16,6 +16,7 @@ import com.mupa.player.enterprise.managers.DeviceCacheManager
 import com.mupa.player.enterprise.managers.DeviceIdentityManager
 import com.mupa.player.enterprise.managers.ManifestManager
 import com.mupa.player.enterprise.managers.SettingsManager
+import com.mupa.player.enterprise.player.MediaPlayLogsSyncManager
 import com.mupa.player.enterprise.storage.db.AppDatabase
 import com.mupa.player.enterprise.storage.settingsDataStore
 import kotlinx.coroutines.Dispatchers
@@ -214,6 +215,30 @@ class SettingsActivity : ComponentActivity() {
                     }
                 } else {
                     binding.txtSyncProgress.text = "Falha no download inicial do manifesto."
+                }
+            }
+        }
+
+        binding.btnUploadMediaPlayLogs.setOnClickListener {
+            binding.txtSyncProgress.visibility = View.VISIBLE
+            binding.txtSyncProgress.text = "Verificando relatório de mídias..."
+            lifecycleScope.launch {
+                val db = AppDatabase.get(applicationContext)
+                val count = db.mediaPlayLogDao().getPendingCount()
+                if (count == 0) {
+                    binding.txtSyncProgress.text = "Nenhum log de reprodução de mídia pendente para envio."
+                    Toast.makeText(this@SettingsActivity, "Nenhum log pendente.", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+
+                binding.txtSyncProgress.text = "Enviando $count log(s) de reprodução de mídias para o Supabase..."
+                val success = MediaPlayLogsSyncManager(applicationContext).uploadPending()
+                if (success) {
+                    binding.txtSyncProgress.text = "Logs de mídias enviados com sucesso!"
+                    Toast.makeText(this@SettingsActivity, "Relatório de mídias enviado com sucesso!", Toast.LENGTH_SHORT).show()
+                } else {
+                    binding.txtSyncProgress.text = "Falha ao enviar relatório de mídias para o Supabase."
+                    Toast.makeText(this@SettingsActivity, "Falha no envio.", Toast.LENGTH_SHORT).show()
                 }
             }
         }

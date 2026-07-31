@@ -38,6 +38,7 @@ import com.mupa.player.enterprise.managers.MediaSyncProgress
 import com.mupa.player.enterprise.managers.SettingsManager
 import com.mupa.player.enterprise.player.PlaybackProfile
 import com.mupa.player.enterprise.player.PlayerEngine
+import com.mupa.player.enterprise.player.MediaPlayLogsSyncManager
 import com.mupa.player.enterprise.player.TransitionConfig
 import com.mupa.player.enterprise.R
 import java.util.Locale
@@ -215,6 +216,15 @@ class PlayerActivity : ComponentActivity() {
             while (true) {
                 delay(60 * 1000L)
                 updatePlaylistIfActiveItemsChanged()
+            }
+        }
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            while (true) {
+                delay(60 * 60 * 1000L) // cada 1 hora
+                if (isOnline()) {
+                    runCatching { MediaPlayLogsSyncManager(applicationContext).uploadPending() }
+                }
             }
         }
 
@@ -412,9 +422,15 @@ class PlayerActivity : ComponentActivity() {
 
         val items = manifestManager.parseItemsPublic(remote)
         var playlist = buildLocalPlaylist(items)
-        if (playlist.size == items.size) {
+
+        // Se já tivermos ao menos 1 mídia pronta localmente, iniciamos a reprodução imediatamente
+        // e ocultamos o overlay para não bloquear o conteúdo na tela enquanto baixa o restante.
+        if (playlist.isNotEmpty()) {
             playerEngine.setPlaylist(playlist)
             setSyncOverlayVisible(false)
+        }
+
+        if (playlist.size == items.size) {
             lifecycleScope.launch {
                 runCatching {
                     manifestManager.syncMedia(
@@ -428,38 +444,34 @@ class PlayerActivity : ComponentActivity() {
             return
         }
 
-        runCatching {
-            manifestManager.syncMedia(
-                deviceId = deviceId,
-                manifestJson = remote,
-                onProgress = { p -> runOnUiThread { renderProgress(p) } },
-                maxConcurrentDownloads = 1,
-            )
-        }
-
-        playlist = buildLocalPlaylist(items)
-        while (playlist.size < items.size) {
-            val missing = (items.size - playlist.size).coerceAtLeast(0)
-            updateSyncTexts(
-                status = "Baixando conteúdos...",
-                countText = "Faltando $missing de ${items.size} mídias",
-                fileText = "",
-                detailText = "",
-                progressPercent = null,
-            )
-            delay(2500L)
-            runCatching {
-                manifestManager.syncMedia(
-                    deviceId = deviceId,
-                    manifestJson = remote,
-                    onProgress = { p -> runOnUiThread { renderProgress(p) } },
-                    maxConcurrentDownloads = 1,
-                )
+        // Caso falte algum arquivo, fazemos o download em background
+        lifecycleScope.launch(Dispatchers.IO) {
+            var currentPlaylist = playlist
+            while (currentPlaylist.size < items.size) {
+                runCatching {
+                    manifestManager.syncMedia(
+                        deviceId = deviceId,
+                        manifestJson = remote,
+                        onProgress = null,
+                        maxConcurrentDownloads = 1,
+                    )
+                }
+                val updated = buildLocalPlaylist(items)
+                if (updated.size > currentPlaylist.size) {
+                    currentPlaylist = updated
+                    withContext(Dispatchers.Main) {
+                        playerEngine.setPlaylist(currentPlaylist)
+                        setSyncOverlayVisible(false)
+                    }
+                } else {
+                    delay(5000L)
+                }
             }
-            playlist = buildLocalPlaylist(items)
+            withContext(Dispatchers.Main) {
+                playerEngine.setPlaylist(currentPlaylist)
+                setSyncOverlayVisible(false)
+            }
         }
-        playerEngine.setPlaylist(playlist)
-        setSyncOverlayVisible(false)
     }
 
     private suspend fun refreshInBackground(): Boolean {
@@ -629,6 +641,7 @@ class PlayerActivity : ComponentActivity() {
                 volume = item.volume,
                 offsetStartMs = item.offsetStartMs,
                 offsetEndMs = item.offsetEndMs,
+                name = item.name,
             )
         }
     }

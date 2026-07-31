@@ -9,13 +9,15 @@ import androidx.room.RoomDatabase
     entities = [
         ManifestEntity::class,
         MediaEntity::class,
+        MediaPlayLogEntity::class,
     ],
-    version = 1,
+    version = 2,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun manifestDao(): ManifestDao
     abstract fun mediaDao(): MediaDao
+    abstract fun mediaPlayLogDao(): MediaPlayLogDao
 
     companion object {
         @Volatile
@@ -28,6 +30,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "mplayer.db",
                 )
+                    .fallbackToDestructiveMigration()
                     .build()
                     .also { instance = it }
             }
