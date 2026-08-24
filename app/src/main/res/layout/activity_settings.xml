@@ -288,6 +288,22 @@
                         android:textSize="12sp"
                         android:layout_marginBottom="12dp"/>
 
+                    <com.google.android.material.switchmaterial.SwitchMaterial
+                        android:id="@+id/switchTcServerGertec"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginBottom="4dp"
+                        android:text="Servidor Gertec (protocolo /barcode)"
+                        android:textColor="@color/enterprise_on" />
+
+                    <com.google.android.material.textview.MaterialTextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Ligado: TCServer da Gertec (GET /barcode?param=, porta padrão 7476). Desligado: TCServer da Mupa (GET /consulta, JSON)."
+                        android:textColor="#9CA3AF"
+                        android:textSize="12sp"
+                        android:layout_marginBottom="12dp"/>
+
                     <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"

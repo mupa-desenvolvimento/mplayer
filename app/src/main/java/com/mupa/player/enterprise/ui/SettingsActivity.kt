@@ -95,6 +95,8 @@ class SettingsActivity : ComponentActivity() {
             binding.editTcServer.setText(
                 runCatching { SettingsManager(applicationContext).getTcServerAddress() }.getOrDefault(""),
             )
+            binding.switchTcServerGertec.isChecked =
+                runCatching { SettingsManager(applicationContext).getTcServerGertecEnabled() }.getOrDefault(false)
             binding.switchGertecScanner.isChecked =
                 runCatching { SettingsManager(applicationContext).getGertecScannerEnabled() }.getOrDefault(false)
             binding.editHeartbeatIdleMinutes.setText(
@@ -169,12 +171,15 @@ class SettingsActivity : ComponentActivity() {
                 Toast.makeText(this, "Formato inválido. Use IP:Porta (ex: 192.168.0.10:8080)", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
+            val gertec = binding.switchTcServerGertec.isChecked
             lifecycleScope.launch {
                 SettingsManager(applicationContext).setTcServerAddress(address)
+                SettingsManager(applicationContext).setTcServerGertecEnabled(gertec)
+                val tipo = if (gertec) "Gertec (/barcode)" else "Mupa (/consulta)"
                 val msg = if (address.isBlank()) {
                     "TCServer desativado. Consulta volta a usar as APIs."
                 } else {
-                    "TCServer salvo: $address. Consulta de preço usará o TCServer."
+                    "TCServer $tipo salvo: $address. Consulta de preço usará o TCServer."
                 }
                 Toast.makeText(this@SettingsActivity, msg, Toast.LENGTH_LONG).show()
             }
@@ -186,24 +191,39 @@ class SettingsActivity : ComponentActivity() {
                 Toast.makeText(this, "Digite o endereço do TCServer primeiro.", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
-            val baseAddr = address.removePrefix("http://").removePrefix("https://").trimEnd('/')
+            var baseAddr = address.removePrefix("http://").removePrefix("https://").trimEnd('/')
+            val gertec = binding.switchTcServerGertec.isChecked
+            // Gertec usa porta padrão 7476 quando o operador não informa a porta.
+            if (gertec && !baseAddr.substringAfterLast(':', "").matches(Regex("""\d{1,5}"""))) {
+                baseAddr = "$baseAddr:7476"
+            }
             binding.txtSyncProgress.visibility = View.VISIBLE
             binding.txtSyncProgress.text = "Testando conexão com $baseAddr..."
             lifecycleScope.launch(Dispatchers.IO) {
                 val result = runCatching {
-                    val url = java.net.URL("http://$baseAddr/health")
-                    val conn = url.openConnection() as java.net.HttpURLConnection
+                    // Mupa: GET /health (JSON de status). Gertec: GET /barcode?param=0 (HTML do product/notfound).
+                    val testUrl = if (gertec) "http://$baseAddr/barcode?param=0" else "http://$baseAddr/health"
+                    val conn = java.net.URL(testUrl).openConnection() as java.net.HttpURLConnection
                     conn.connectTimeout = 3000
                     conn.readTimeout = 3000
                     conn.requestMethod = "GET"
                     val code = conn.responseCode
-                    val text = conn.inputStream.bufferedReader().use { it.readText() }
+                    val stream = if (code in 200..399) conn.inputStream else conn.errorStream
+                    val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
                     conn.disconnect()
                     code to text
                 }
                 withContext(Dispatchers.Main) {
                     result.onSuccess { (code, text) ->
-                        if (code == 200 && text.contains("\"status\"")) {
+                        if (gertec) {
+                            // O TCServer Gertec responde HTML (product.jsp / notfound.jsp) com "Consulta de Barcode".
+                            if (code == 200 && text.contains("Consulta de Barcode", ignoreCase = true)) {
+                                binding.txtSyncProgress.text = "Conexão OK! TCServer Gertec online."
+                                Toast.makeText(this@SettingsActivity, "TCServer Gertec conectado!", Toast.LENGTH_SHORT).show()
+                            } else {
+                                binding.txtSyncProgress.text = "Conectou (HTTP $code), mas resposta inesperada para Gertec."
+                            }
+                        } else if (code == 200 && text.contains("\"status\"")) {
                             val prod = Regex("\"produtos\"\\s*:\\s*(\\d+)").find(text)?.groupValues?.get(1) ?: "?"
                             binding.txtSyncProgress.text = "Conexão OK! TCServer Mupa online ($prod produtos)."
                             Toast.makeText(this@SettingsActivity, "TCServer Mupa conectado!", Toast.LENGTH_SHORT).show()

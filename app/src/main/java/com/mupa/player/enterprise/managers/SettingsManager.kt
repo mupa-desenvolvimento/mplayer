@@ -37,6 +37,7 @@ class SettingsManager(private val context: Context) {
         val devMode = booleanPreferencesKey("dev_mode")
         val demoMode = booleanPreferencesKey("demo_mode")
         val tcServerAddress = stringPreferencesKey("tc_server_address")
+        val tcServerGertec = booleanPreferencesKey("tc_server_gertec")
         val gertecScannerEnabled = booleanPreferencesKey("gertec_scanner_enabled")
         val imageSearchEnabled = booleanPreferencesKey("image_search_enabled")
         val heartbeatIdleMinutes = intPreferencesKey("heartbeat_idle_minutes")
@@ -113,6 +114,18 @@ class SettingsManager(private val context: Context) {
 
     suspend fun getTcServerAddress(): String {
         return context.settingsDataStore.data.first()[Keys.tcServerAddress]?.trim().orEmpty()
+    }
+
+    /**
+     * true  -> TCServer da Gertec (protocolo HTTP GET /barcode?param=<ean>, resposta HTML, porta padrão 7476)
+     * false -> TCServer da Mupa   (protocolo HTTP GET /consulta?ean=<ean>, resposta JSON)
+     */
+    suspend fun setTcServerGertecEnabled(enabled: Boolean) {
+        context.settingsDataStore.edit { it[Keys.tcServerGertec] = enabled }
+    }
+
+    suspend fun getTcServerGertecEnabled(): Boolean {
+        return context.settingsDataStore.data.first()[Keys.tcServerGertec] ?: false
     }
 
     suspend fun setGertecScannerEnabled(enabled: Boolean) {

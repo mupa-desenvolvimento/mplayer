@@ -2138,20 +2138,32 @@ class PriceQueryEngine(
             return product
         }
 
-        val address = SettingsManager(context).getTcServerAddress()
+        val settings = SettingsManager(context)
+        val address = settings.getTcServerAddress()
         if (address.isBlank()) {
             Log.w("MPlayerPrice", "tcserver_address_not_configured ean=$ean")
             return null
         }
-        // address = "ip:porta" (ex: 192.168.1.175:8080)
-        val baseAddr = address.removePrefix("http://").removePrefix("https://").trimEnd('/')
+        val gertec = settings.getTcServerGertecEnabled()
+        // address = "ip:porta" (ex: 192.168.1.175:8080). No modo Gertec, se o operador não
+        // informar a porta, assume a padrão do TCServer Gertec (7476).
+        var baseAddr = address.removePrefix("http://").removePrefix("https://").trimEnd('/')
+        if (gertec && !baseAddr.substringAfterLast(':', "").matches(Regex("""\d{1,5}"""))) {
+            baseAddr = "$baseAddr:7476"
+        }
 
         val startedAt = System.currentTimeMillis()
         var product: PriceProduct? = null
         try {
-            val json = fetchTcServerPrice(baseAddr, ean)
-            Log.d("MPlayerPrice", "tcserver_resp ean=$ean resp=${json?.toString()?.take(300)}")
-            product = json?.let { parseTcServerResponse(ean, it) }?.let { attachLocalImageIfExists(it) }
+            product = if (gertec) {
+                val html = fetchGertecBarcode(baseAddr, ean)
+                Log.d("MPlayerPrice", "tcserver_gertec_resp ean=$ean len=${html?.length ?: -1}")
+                html?.let { parseGertecResponse(ean, it) }?.let { attachLocalImageIfExists(it) }
+            } else {
+                val json = fetchTcServerPrice(baseAddr, ean)
+                Log.d("MPlayerPrice", "tcserver_resp ean=$ean resp=${json?.toString()?.take(300)}")
+                json?.let { parseTcServerResponse(ean, it) }?.let { attachLocalImageIfExists(it) }
+            }
 
             if (product != null) {
                 db.priceCacheDao().upsert(
@@ -2330,4 +2342,127 @@ class PriceQueryEngine(
 
     private fun formatMoneyBr(v: Double): String =
         "R$ " + String.format(Locale.US, "%.2f", v).replace(".", ",")
+
+    // ─────────────────────────────────────────────────────────────
+    // TCServer da Gertec — protocolo HTTP nativo do "Terminal de Consulta"
+    //
+    // Consulta:  GET http://{addr}/barcode?param={ean}
+    // Achou:     HTML (product.jsp) com os campos, separados por <br/>:
+    //              Descricao: <desc>
+    //              Label1: <label1>   /  Preco1: <price1>
+    //              Label2: <label2>   /  Preco2: <price2>
+    // Não achou: HTML (notfound.jsp) contendo 'nao foi encontrado'
+    //
+    // Porta padrão 7476 (confirmada pelo price_checker.xml distribuído
+    // com o TCServer). Os rótulos LABEL1/LABEL2 são configurados no
+    // próprio servidor da loja e chegam prontos na resposta.
+    // ─────────────────────────────────────────────────────────────
+
+    /** GET http://{addr}/barcode?param={ean} — retorna o HTML do TCServer Gertec (ou null em erro de rede). */
+    private fun fetchGertecBarcode(addr: String, ean: String): String? {
+        val url = "http://$addr/barcode?param=$ean"
+        val req = Request.Builder().url(url).header("accept", "text/html").get().build()
+        http.newCall(req).execute().use { resp ->
+            val body = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                Log.d("MPlayerPrice", "tcserver_gertec_http_status=${resp.code} ean=$ean")
+                return null
+            }
+            return body
+        }
+    }
+
+    /**
+     * Converte preço em texto para Double, aceitando os dois formatos que o TCServer Gertec
+     * pode emitir dependendo do cadastro: ponto decimal ("17.19", "1234.56") ou vírgula
+     * decimal com ponto de milhar ("R$ 1.234,56", "6,79"). Retorna null se não houver número > 0.
+     */
+    private fun parseBrlNumber(raw: String?): Double? {
+        if (raw.isNullOrBlank()) return null
+        val cleaned = raw.replace(Regex("[^0-9.,]"), "").trim()
+        if (cleaned.isBlank()) return null
+        // O separador decimal é sempre o último '.' ou ',' que aparecer; tudo antes é milhar.
+        val lastSep = maxOf(cleaned.lastIndexOf('.'), cleaned.lastIndexOf(','))
+        val normalized = if (lastSep < 0) {
+            cleaned
+        } else {
+            val intPart = cleaned.substring(0, lastSep).replace(Regex("[.,]"), "")
+            val decPart = cleaned.substring(lastSep + 1).replace(Regex("[^0-9]"), "")
+            "$intPart.$decPart"
+        }
+        return normalized.toDoubleOrNull()?.takeIf { it > 0 }
+    }
+
+    private fun parseGertecResponse(ean: String, html: String): PriceProduct? {
+        if (html.contains("nao foi encontrado", ignoreCase = true) ||
+            html.contains("não foi encontrado", ignoreCase = true)
+        ) {
+            return null
+        }
+
+        fun field(name: String): String? =
+            Regex("""$name\s*:\s*([^<\r\n]*)""", RegexOption.IGNORE_CASE)
+                .find(html)?.groupValues?.get(1)?.trim()?.ifBlank { null }
+
+        val description = field("Descricao") ?: field("Descrição")
+        val label1 = field("Label1")
+        val label2 = field("Label2")
+        val price1 = parseBrlNumber(field("Preco1") ?: field("Preço1")) ?: return null
+        val price2 = parseBrlNumber(field("Preco2") ?: field("Preço2"))
+
+        // LABEL1 costuma vir como placeholder genérico do servidor ("Price"). Para o preço
+        // principal usamos sempre "PREÇO NORMAL"; um rótulo próprio só é respeitado se for
+        // claramente específico (diferente de Price/Preço/Preço Normal).
+        val label1Meaningful = label1?.takeIf {
+            val n = it.trim().lowercase(Locale.getDefault())
+            n.isNotBlank() && n != "price" && n != "preço" && n != "preco" &&
+                n != "preço normal" && n != "preco normal"
+        }
+        val slots = ArrayList<ProductPriceSlot>()
+        slots += ProductPriceSlot(
+            label = label1Meaningful?.uppercase(Locale.getDefault()) ?: "PREÇO NORMAL",
+            value = price1,
+            field = "price",
+            isPromo = false,
+            isClub = false,
+        )
+
+        var precoPromo: Double? = null
+        if (price2 != null && price2 != price1) {
+            val cheaper = price2 < price1
+            if (cheaper) precoPromo = price2
+            slots += ProductPriceSlot(
+                label = label2?.uppercase(Locale.getDefault()) ?: if (cheaper) "OFERTA" else "PREÇO",
+                value = price2,
+                field = if (cheaper) "price_wholesale" else "price_extra",
+                isPromo = cheaper,
+                isClub = false,
+                fromValue = if (cheaper) price1 else null, // "de" riscado dentro do box de oferta
+            )
+        }
+
+        return PriceProduct(
+            id = null,
+            ean = ean,
+            description = description,
+            price = price1,
+            originalPrice = null,
+            clubPrice = null,
+            priceClub = null,
+            priceWholesale = precoPromo,
+            pricePromotional = precoPromo,
+            priceFrom = null,
+            priceWeighable = null,
+            cardPrice = null,
+            stock = null,
+            image = localProductImagePathIfExists(ean),
+            clientImageUrl = null,
+            offer = null,
+            packs = emptyList(),
+            theme = null,
+            offline = false,
+            priceSlots = slots,
+            xmlLayoutType = "multi_price",
+        )
+    }
 }

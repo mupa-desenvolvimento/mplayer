@@ -18,7 +18,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MissingProductImageEntity::class,
         DeviceEventEntity::class,
     ],
-    version = 8,
+    version = 9,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -49,6 +49,10 @@ abstract class AppDatabase : RoomDatabase() {
                     .addMigrations(MIGRATION_5_6)
                     .addMigrations(MIGRATION_6_7)
                     .addMigrations(MIGRATION_7_8)
+                    // Só há dados regeneráveis aqui (cache de preço, analytics, sessões de
+                    // audiência). Se o schema divergir do banco em disco — ex.: device antigo
+                    // subindo direto para esta versão — recria o banco em vez de crashar.
+                    .fallbackToDestructiveMigration()
                     .build()
                     .also { instance = it }
             }
