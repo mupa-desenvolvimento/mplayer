@@ -3188,17 +3188,32 @@ class PlayerActivity : ComponentActivity() {
         lastSpokenEan = ean
         lastSpokenAtMs = now
 
+        // Rótulos genéricos de oferta (Gertec/De-Por): nesses, quando há preço "de" (fromValue),
+        // fala "Produto em oferta. De <de> por <por>". Rótulos específicos (ex.: Komprão
+        // "A partir de 3 unidades...") continuam sendo falados como "<rótulo>, <valor>".
+        val rotulosGenericos = setOf("OFERTA", "PROMOÇÃO", "EM PROMOÇÃO", "PROMOCAO", "PREÇO", "PRECO", "")
+
         val fala = StringBuilder()
         for (slot in validos) {
             val valor = buildSpokenPrice(slot.value)
+            val rotulo = slot.label.trim().trimEnd(':', '.').trim()
+            val de = slot.fromValue
+            val ofertaDePor = slot.isPromo && de != null && de > slot.value &&
+                rotulo.uppercase(java.util.Locale.getDefault()) in rotulosGenericos
             val ehOferta = slot.isPromo || slot.isClub
-            if (ehOferta) {
-                val rotulo = slot.label.trim().trimEnd(':', '.').trim()
-                if (rotulo.isNotBlank()) fala.append("$rotulo, ")
-                fala.append("$valor. ")
-            } else {
-                // Preço normal: fala apenas o valor
-                fala.append("$valor. ")
+            when {
+                ofertaDePor -> {
+                    // "Produto em oferta. De R$ 10,99 por R$ 8,79."
+                    fala.append("Produto em oferta. De ${buildSpokenPrice(de!!)} por $valor. ")
+                }
+                ehOferta -> {
+                    if (rotulo.isNotBlank()) fala.append("$rotulo, ")
+                    fala.append("$valor. ")
+                }
+                else -> {
+                    // Preço normal: fala apenas o valor
+                    fala.append("$valor. ")
+                }
             }
         }
 

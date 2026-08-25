@@ -2593,30 +2593,42 @@ class PriceQueryEngine(
         val price2 = prices.getOrNull(1)
 
         val slots = ArrayList<ProductPriceSlot>()
-        slots += ProductPriceSlot(
-            label = "PREÇO NORMAL", value = price1, field = "price", isPromo = false, isClub = false,
-        )
-        var precoPromo: Double? = null
-        if (price2 != null && price2 != price1) {
-            val cheaper = price2 < price1
-            if (cheaper) precoPromo = price2
+
+        // Dois preços distintos = oferta De/Por: o menor é a oferta (por), o maior é o
+        // preço original (de). Caixa única de OFERTA com o "de" riscado; o TTS fala
+        // "Produto em oferta. De <de> por <por>". Um preço só = PREÇO NORMAL.
+        return if (price2 != null && price2 != price1) {
+            val por = minOf(price1, price2)
+            val de = maxOf(price1, price2)
             slots += ProductPriceSlot(
-                label = if (cheaper) "OFERTA" else "PREÇO",
-                value = price2,
-                field = if (cheaper) "price_wholesale" else "price_extra",
-                isPromo = cheaper, isClub = false,
-                fromValue = if (cheaper) price1 else null,
+                label = "OFERTA", value = por, field = "price_wholesale",
+                isPromo = true, isClub = false, fromValue = de,
+            )
+            // price = de (referência): a caixa de OFERTA já exibe "De: R$ <de>" riscado via
+            // fromValue e o valor da oferta (por). Manter price = de evita que a dedup de
+            // populatePriceSlots descarte o slot (que ocorreria se price == valor do slot).
+            PriceProduct(
+                id = null, ean = ean, description = description,
+                price = de, originalPrice = null, clubPrice = null, priceClub = null,
+                priceWholesale = por, pricePromotional = por,
+                priceFrom = de, priceWeighable = null, cardPrice = null, stock = null,
+                image = localProductImagePathIfExists(ean), clientImageUrl = null,
+                offer = null, packs = emptyList(), theme = null, offline = false,
+                priceSlots = slots, xmlLayoutType = "multi_price",
+            )
+        } else {
+            slots += ProductPriceSlot(
+                label = "PREÇO NORMAL", value = price1, field = "price", isPromo = false, isClub = false,
+            )
+            PriceProduct(
+                id = null, ean = ean, description = description,
+                price = price1, originalPrice = null, clubPrice = null, priceClub = null,
+                priceWholesale = null, pricePromotional = null,
+                priceFrom = null, priceWeighable = null, cardPrice = null, stock = null,
+                image = localProductImagePathIfExists(ean), clientImageUrl = null,
+                offer = null, packs = emptyList(), theme = null, offline = false,
+                priceSlots = slots, xmlLayoutType = "multi_price",
             )
         }
-
-        return PriceProduct(
-            id = null, ean = ean, description = description,
-            price = price1, originalPrice = null, clubPrice = null, priceClub = null,
-            priceWholesale = precoPromo, pricePromotional = precoPromo,
-            priceFrom = null, priceWeighable = null, cardPrice = null, stock = null,
-            image = localProductImagePathIfExists(ean), clientImageUrl = null,
-            offer = null, packs = emptyList(), theme = null, offline = false,
-            priceSlots = slots, xmlLayoutType = "multi_price",
-        )
     }
 }
