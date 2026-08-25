@@ -304,6 +304,22 @@
                         android:textSize="12sp"
                         android:layout_marginBottom="12dp"/>
 
+                    <com.google.android.material.switchmaterial.SwitchMaterial
+                        android:id="@+id/switchTcServerGertecTcp"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginBottom="4dp"
+                        android:text="Protocolo TCP (socket, porta 6500)"
+                        android:textColor="@color/enterprise_on" />
+
+                    <com.google.android.material.textview.MaterialTextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Só com 'Servidor Gertec' ligado. Ligado: protocolo TCP nativo do terminal (#handshake, #ean → #descrição|preço, porta padrão 6500) — use com o serviço da Consinco. Desligado: HTTP."
+                        android:textColor="#9CA3AF"
+                        android:textSize="12sp"
+                        android:layout_marginBottom="12dp"/>
+
                     <LinearLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"

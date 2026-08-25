@@ -2145,17 +2145,22 @@ class PriceQueryEngine(
             return null
         }
         val gertec = settings.getTcServerGertecEnabled()
-        // address = "ip:porta" (ex: 192.168.1.175:8080). No modo Gertec, se o operador não
-        // informar a porta, assume a padrão do TCServer Gertec (7476).
+        val gertecTcp = gertec && settings.getTcServerGertecTcpEnabled()
+        // address = "ip:porta". Porta padrão por protocolo quando o operador não informa:
+        // Gertec TCP -> 6500 ; Gertec HTTP -> 7476 ; Mupa -> mantém como veio.
         var baseAddr = address.removePrefix("http://").removePrefix("https://").trimEnd('/')
         if (gertec && !baseAddr.substringAfterLast(':', "").matches(Regex("""\d{1,5}"""))) {
-            baseAddr = "$baseAddr:7476"
+            baseAddr = if (gertecTcp) "$baseAddr:6500" else "$baseAddr:7476"
         }
 
         val startedAt = System.currentTimeMillis()
         var product: PriceProduct? = null
         try {
-            product = if (gertec) {
+            product = if (gertecTcp) {
+                val raw = gertecTcpQuery(baseAddr, ean)
+                Log.d("MPlayerPrice", "tcserver_gertec_tcp_resp ean=$ean raw=${raw?.take(200)}")
+                raw?.let { parseGertecTcpResponse(ean, it) }?.let { attachLocalImageIfExists(it) }
+            } else if (gertec) {
                 val html = fetchGertecBarcode(baseAddr, ean)
                 Log.d("MPlayerPrice", "tcserver_gertec_resp ean=$ean len=${html?.length ?: -1}")
                 html?.let { parseGertecResponse(ean, it) }?.let { attachLocalImageIfExists(it) }
@@ -2463,6 +2468,155 @@ class PriceQueryEngine(
             offline = false,
             priceSlots = slots,
             xmlLayoutType = "multi_price",
+        )
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // TCServer da Gertec — protocolo TCP nativo do terminal (porta 6500)
+    //
+    // Handshake (ref. oficial Terminal.java/Consulta.java da Gertec):
+    //   << #ok            (servidor, ao conectar)
+    //   >> #tc406|1.1.0   (terminal se identifica)
+    //   << #alwayslive    (servidor)
+    //   >> #alwayslive_ok (terminal)
+    // Consulta:
+    //   >> #<ean>
+    //   << #<descrição>|<preço1>[|<preço2>]   (achou)  |  #nfound (não achou)
+    // Keep-alive: servidor pode mandar "#live?" -> terminal responde "#live".
+    //
+    // Conexão é PERSISTENTE (como um terminal real): o handshake é feito uma vez e
+    // o socket é reutilizado nas consultas. Servidores Gertec registram o terminal por
+    // conexão; reconectar a cada consulta gera registros presos e o servidor para de
+    // responder. Em erro de socket, reconecta e tenta de novo uma vez.
+    // ─────────────────────────────────────────────────────────────
+
+    private val gertecTcpLock = Any()
+    private var gertecSock: java.net.Socket? = null
+    private var gertecIn: java.io.InputStream? = null
+    private var gertecOut: java.io.OutputStream? = null
+    private var gertecConnectedAddr: String? = null
+
+    private fun gertecTcpClose() {
+        runCatching { gertecSock?.close() }
+        gertecSock = null; gertecIn = null; gertecOut = null; gertecConnectedAddr = null
+    }
+
+    /** Lê uma mensagem do socket (bloqueia até [timeoutMs]); null em timeout/fechado. Latin-1 preserva acentos do Gertec. */
+    private fun gertecReadMsg(timeoutMs: Int): String? {
+        val input = gertecIn ?: return null
+        gertecSock?.soTimeout = timeoutMs
+        val buf = ByteArray(1024)
+        val n = try { input.read(buf) } catch (e: java.net.SocketTimeoutException) { return null }
+        if (n <= 0) { if (n < 0) gertecTcpClose(); return null }
+        return String(buf, 0, n, Charsets.ISO_8859_1).trim()
+    }
+
+    private fun gertecSend(msg: String) {
+        val out = gertecOut ?: throw java.io.IOException("gertec_tcp_not_connected")
+        out.write(msg.toByteArray(Charsets.ISO_8859_1)); out.flush()
+    }
+
+    /** Garante socket conectado e handshake concluído para [addr] ("ip:porta"). */
+    private fun gertecTcpConnect(addr: String) {
+        if (gertecSock?.isConnected == true && gertecSock?.isClosed == false && gertecConnectedAddr == addr) return
+        gertecTcpClose()
+        val host = addr.substringBeforeLast(':')
+        val port = addr.substringAfterLast(':', "6500").toIntOrNull() ?: 6500
+        val sock = java.net.Socket()
+        sock.connect(java.net.InetSocketAddress(host, port), 4000)
+        gertecSock = sock
+        gertecIn = java.io.BufferedInputStream(sock.getInputStream())
+        gertecOut = java.io.BufferedOutputStream(sock.getOutputStream())
+
+        // 1) servidor manda #ok
+        val ok = gertecReadMsg(4000)
+        if (ok == null || !ok.startsWith("#ok")) {
+            Log.w("MPlayerPrice", "gertec_tcp_no_ok addr=$addr got=${ok?.take(40)}")
+        }
+        // 2) terminal se identifica
+        gertecSend("#tc406|1.1.0")
+        // 3) espera #alwayslive (respondendo eventuais keep-alives) e confirma
+        var handshakeMsg = gertecReadMsg(4000)
+        var tries = 0
+        while (handshakeMsg != null && tries < 4) {
+            when {
+                handshakeMsg.startsWith("#alwayslive") -> { gertecSend("#alwayslive_ok"); break }
+                handshakeMsg.startsWith("#live") -> { gertecSend("#live"); }
+                else -> { /* #config02 ou outros — ignora */ }
+            }
+            handshakeMsg = gertecReadMsg(2000)
+            tries++
+        }
+        gertecConnectedAddr = addr
+        Log.i("MPlayerPrice", "gertec_tcp_connected addr=$addr")
+    }
+
+    /** Consulta [ean] via TCP; retorna a resposta bruta (#desc|preço...) ou null. Reconecta 1x em falha. */
+    private fun gertecTcpQuery(addr: String, ean: String): String? = synchronized(gertecTcpLock) {
+        repeat(2) { attempt ->
+            try {
+                gertecTcpConnect(addr)
+                gertecSend("#$ean")
+                // lê resposta; responde keep-alives que apareçam no meio
+                var msg = gertecReadMsg(5000)
+                var guard = 0
+                while (msg != null && guard < 5) {
+                    when {
+                        msg.startsWith("#live") -> { gertecSend("#live"); }
+                        msg.startsWith("#alwayslive") -> { gertecSend("#alwayslive_ok"); }
+                        else -> return msg  // resposta do produto (#desc|preço) ou #nfound
+                    }
+                    msg = gertecReadMsg(5000)
+                    guard++
+                }
+                return msg
+            } catch (t: Throwable) {
+                Log.w("MPlayerPrice", "gertec_tcp_query_fail attempt=$attempt ean=$ean err=${t.javaClass.simpleName}:${t.message}")
+                gertecTcpClose()  // força reconexão na próxima tentativa
+            }
+        }
+        return null
+    }
+
+    /** Parse da resposta TCP "#<descrição>|<preço1>[|<preço2>...]" (ou #nfound). */
+    private fun parseGertecTcpResponse(ean: String, raw: String): PriceProduct? {
+        val body = raw.trim().removePrefix("#").trim()
+        if (body.isEmpty() || body.equals("nfound", true) ||
+            body.contains("nao encontrado", true) || body.contains("não encontrado", true)
+        ) {
+            return null
+        }
+        val parts = body.split("|").map { it.trim() }
+        val description = parts.getOrNull(0)?.ifBlank { null }
+        val prices = parts.drop(1).mapNotNull { parseBrlNumber(it) }
+        val price1 = prices.getOrNull(0) ?: return null
+        val price2 = prices.getOrNull(1)
+
+        val slots = ArrayList<ProductPriceSlot>()
+        slots += ProductPriceSlot(
+            label = "PREÇO NORMAL", value = price1, field = "price", isPromo = false, isClub = false,
+        )
+        var precoPromo: Double? = null
+        if (price2 != null && price2 != price1) {
+            val cheaper = price2 < price1
+            if (cheaper) precoPromo = price2
+            slots += ProductPriceSlot(
+                label = if (cheaper) "OFERTA" else "PREÇO",
+                value = price2,
+                field = if (cheaper) "price_wholesale" else "price_extra",
+                isPromo = cheaper, isClub = false,
+                fromValue = if (cheaper) price1 else null,
+            )
+        }
+
+        return PriceProduct(
+            id = null, ean = ean, description = description,
+            price = price1, originalPrice = null, clubPrice = null, priceClub = null,
+            priceWholesale = precoPromo, pricePromotional = precoPromo,
+            priceFrom = null, priceWeighable = null, cardPrice = null, stock = null,
+            image = localProductImagePathIfExists(ean), clientImageUrl = null,
+            offer = null, packs = emptyList(), theme = null, offline = false,
+            priceSlots = slots, xmlLayoutType = "multi_price",
         )
     }
 }

@@ -38,6 +38,7 @@ class SettingsManager(private val context: Context) {
         val demoMode = booleanPreferencesKey("demo_mode")
         val tcServerAddress = stringPreferencesKey("tc_server_address")
         val tcServerGertec = booleanPreferencesKey("tc_server_gertec")
+        val tcServerGertecTcp = booleanPreferencesKey("tc_server_gertec_tcp")
         val gertecScannerEnabled = booleanPreferencesKey("gertec_scanner_enabled")
         val imageSearchEnabled = booleanPreferencesKey("image_search_enabled")
         val heartbeatIdleMinutes = intPreferencesKey("heartbeat_idle_minutes")
@@ -126,6 +127,19 @@ class SettingsManager(private val context: Context) {
 
     suspend fun getTcServerGertecEnabled(): Boolean {
         return context.settingsDataStore.data.first()[Keys.tcServerGertec] ?: false
+    }
+
+    /**
+     * Só aplica quando [getTcServerGertecEnabled] é true.
+     * true  -> protocolo TCP nativo do terminal Gertec (socket porta 6500, handshake #ok/#alwayslive, consulta #<ean>)
+     * false -> protocolo HTTP (GET /barcode?param=)
+     */
+    suspend fun setTcServerGertecTcpEnabled(enabled: Boolean) {
+        context.settingsDataStore.edit { it[Keys.tcServerGertecTcp] = enabled }
+    }
+
+    suspend fun getTcServerGertecTcpEnabled(): Boolean {
+        return context.settingsDataStore.data.first()[Keys.tcServerGertecTcp] ?: false
     }
 
     suspend fun setGertecScannerEnabled(enabled: Boolean) {

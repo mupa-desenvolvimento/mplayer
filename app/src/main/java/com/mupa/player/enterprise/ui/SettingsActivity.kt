@@ -97,6 +97,8 @@ class SettingsActivity : ComponentActivity() {
             )
             binding.switchTcServerGertec.isChecked =
                 runCatching { SettingsManager(applicationContext).getTcServerGertecEnabled() }.getOrDefault(false)
+            binding.switchTcServerGertecTcp.isChecked =
+                runCatching { SettingsManager(applicationContext).getTcServerGertecTcpEnabled() }.getOrDefault(false)
             binding.switchGertecScanner.isChecked =
                 runCatching { SettingsManager(applicationContext).getGertecScannerEnabled() }.getOrDefault(false)
             binding.editHeartbeatIdleMinutes.setText(
@@ -172,10 +174,12 @@ class SettingsActivity : ComponentActivity() {
                 return@setOnClickListener
             }
             val gertec = binding.switchTcServerGertec.isChecked
+            val gertecTcp = binding.switchTcServerGertecTcp.isChecked
             lifecycleScope.launch {
                 SettingsManager(applicationContext).setTcServerAddress(address)
                 SettingsManager(applicationContext).setTcServerGertecEnabled(gertec)
-                val tipo = if (gertec) "Gertec (/barcode)" else "Mupa (/consulta)"
+                SettingsManager(applicationContext).setTcServerGertecTcpEnabled(gertecTcp)
+                val tipo = if (gertec) (if (gertecTcp) "Gertec TCP (:6500)" else "Gertec HTTP (/barcode)") else "Mupa (/consulta)"
                 val msg = if (address.isBlank()) {
                     "TCServer desativado. Consulta volta a usar as APIs."
                 } else {
@@ -193,12 +197,49 @@ class SettingsActivity : ComponentActivity() {
             }
             var baseAddr = address.removePrefix("http://").removePrefix("https://").trimEnd('/')
             val gertec = binding.switchTcServerGertec.isChecked
-            // Gertec usa porta padrão 7476 quando o operador não informa a porta.
+            val gertecTcp = gertec && binding.switchTcServerGertecTcp.isChecked
+            // Porta padrão quando não informada: TCP 6500 ; HTTP Gertec 7476.
             if (gertec && !baseAddr.substringAfterLast(':', "").matches(Regex("""\d{1,5}"""))) {
-                baseAddr = "$baseAddr:7476"
+                baseAddr = if (gertecTcp) "$baseAddr:6500" else "$baseAddr:7476"
             }
             binding.txtSyncProgress.visibility = View.VISIBLE
             binding.txtSyncProgress.text = "Testando conexão com $baseAddr..."
+
+            if (gertecTcp) {
+                // Teste do protocolo TCP: conecta, faz handshake (#ok/#alwayslive) e valida.
+                val addrTcp = baseAddr
+                lifecycleScope.launch(Dispatchers.IO) {
+                    val res = runCatching {
+                        val host = addrTcp.substringBeforeLast(':')
+                        val port = addrTcp.substringAfterLast(':', "6500").toIntOrNull() ?: 6500
+                        java.net.Socket().use { sk ->
+                            sk.connect(java.net.InetSocketAddress(host, port), 3000)
+                            sk.soTimeout = 3000
+                            val ins = sk.getInputStream(); val outs = sk.getOutputStream()
+                            fun rd(): String { val b = ByteArray(256); val n = ins.read(b); return if (n > 0) String(b, 0, n, Charsets.ISO_8859_1).trim() else "" }
+                            val ok = rd()
+                            outs.write("#tc406|1.1.0".toByteArray()); outs.flush()
+                            val alive = rd()
+                            if (alive.startsWith("#alwayslive")) { outs.write("#alwayslive_ok".toByteArray()); outs.flush() }
+                            ok to alive
+                        }
+                    }
+                    withContext(Dispatchers.Main) {
+                        res.onSuccess { (ok, alive) ->
+                            if (ok.startsWith("#ok")) {
+                                binding.txtSyncProgress.text = "Conexão OK! TCServer Gertec TCP respondeu handshake ($ok / $alive)."
+                                Toast.makeText(this@SettingsActivity, "TCServer Gertec TCP conectado!", Toast.LENGTH_SHORT).show()
+                            } else {
+                                binding.txtSyncProgress.text = "Conectou na $addrTcp mas sem #ok (recebido: '${ok.take(20)}'). Verifique o serviço."
+                            }
+                        }.onFailure { e ->
+                            binding.txtSyncProgress.text = "Falha TCP em $addrTcp: ${e.message}"
+                            Toast.makeText(this@SettingsActivity, "Não foi possível conectar (TCP).", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+                return@setOnClickListener
+            }
             lifecycleScope.launch(Dispatchers.IO) {
                 val result = runCatching {
                     // Mupa: GET /health (JSON de status). Gertec: GET /barcode?param=0 (HTML do product/notfound).
