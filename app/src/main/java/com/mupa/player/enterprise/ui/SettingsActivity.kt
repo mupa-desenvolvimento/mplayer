@@ -28,8 +28,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.json.JSONObject
 import java.io.File
+import java.util.concurrent.TimeUnit
 
 class SettingsActivity : ComponentActivity() {
 
@@ -90,6 +93,9 @@ class SettingsActivity : ComponentActivity() {
                 binding.txtApiEndpoint.text = "API de Consulta: Supabase (Padrão)"
             }
 
+            binding.editPriceHost.setText(settings?.priceHost ?: "")
+            binding.editPricePort.setText(settings?.pricePort ?: "")
+
             binding.switchDevMode.isChecked = settings?.devMode ?: false
             binding.switchDemoMode.isChecked = settings?.demoMode ?: false
             binding.editTcServer.setText(
@@ -109,6 +115,62 @@ class SettingsActivity : ComponentActivity() {
             maintenanceModeEnabled = prefs[androidx.datastore.preferences.core.booleanPreferencesKey("maintenance_mode")] ?: false
             binding.switchMaintenanceMode.isChecked = maintenanceModeEnabled
             binding.cardMaintenance.visibility = if (maintenanceModeEnabled) View.VISIBLE else View.GONE
+        }
+    }
+
+    /** Retorna a mensagem de erro, ou null se a configuração for válida. Host em branco é
+     *  válido e significa "esta loja não usa servidor local de preços". */
+    private fun validatePriceServer(host: String, port: String): String? {
+        if (host.isBlank() && port.isBlank()) return null
+        if (host.isBlank()) return "Informe o IP do servidor (ou limpe a porta para desativar)."
+
+        val octets = host.split(".")
+        val validIp = octets.size == 4 && octets.all { o ->
+            o.isNotBlank() && o.length <= 3 && o.all { it.isDigit() } && o.toInt() in 0..255
+        }
+        if (!validIp) return "IP inválido. Use o formato 192.168.0.10."
+
+        val portNum = port.toIntOrNull()
+        if (portNum == null || portNum !in 1..65535) return "Porta inválida. Use um valor entre 1 e 65535."
+
+        return null
+    }
+
+    /**
+     * Bate no endpoint com um EAN sabidamente inexistente: o objetivo é provar alcance de
+     * rede, não achar produto. Qualquer resposta HTTP (inclusive 404) significa servidor no ar.
+     */
+    private fun testPriceServer(host: String, port: String) {
+        binding.btnTestPriceServer.isEnabled = false
+        binding.txtPriceServerStatus.text = "Testando $host:$port..."
+
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                val client = OkHttpClient.Builder()
+                    .connectTimeout(4, TimeUnit.SECONDS)
+                    .readTimeout(5, TimeUnit.SECONDS)
+                    .callTimeout(7, TimeUnit.SECONDS)
+                    .build()
+                val request = Request.Builder()
+                    .url("http://$host:$port/consulta?ean=0000000000000")
+                    .get()
+                    .build()
+                runCatching {
+                    client.newCall(request).execute().use { resp -> resp.code }
+                }
+            }
+
+            result.fold(
+                onSuccess = { code ->
+                    binding.txtPriceServerStatus.text =
+                        "OK - servidor respondeu (HTTP $code) em $host:$port"
+                },
+                onFailure = { t ->
+                    binding.txtPriceServerStatus.text =
+                        "FALHOU - ${t.javaClass.simpleName}: ${t.message ?: "sem detalhe"}"
+                },
+            )
+            binding.btnTestPriceServer.isEnabled = true
         }
     }
 
@@ -235,6 +297,38 @@ class SettingsActivity : ComponentActivity() {
                 binding.btnTestFaceRecognition.visibility = if (isChecked) View.VISIBLE else View.GONE
                 Toast.makeText(this@SettingsActivity, if (isChecked) "Modo Dev Ativado" else "Modo Dev Desativado", Toast.LENGTH_SHORT).show()
             }
+        }
+
+        binding.btnSavePriceServer.setOnClickListener {
+            val host = binding.editPriceHost.text.toString().trim()
+            val port = binding.editPricePort.text.toString().trim()
+            val error = validatePriceServer(host, port)
+            if (error != null) {
+                Toast.makeText(this, error, Toast.LENGTH_LONG).show()
+                return@setOnClickListener
+            }
+            lifecycleScope.launch {
+                val mgr = SettingsManager(applicationContext)
+                mgr.setPriceHost(host)
+                mgr.setPricePort(port)
+                val msg =
+                    if (host.isBlank()) "Servidor local desativado."
+                    else "Servidor local salvo: $host:$port"
+                binding.txtPriceServerStatus.text = msg
+                Toast.makeText(this@SettingsActivity, msg, Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        binding.btnTestPriceServer.setOnClickListener {
+            val host = binding.editPriceHost.text.toString().trim()
+            val port = binding.editPricePort.text.toString().trim()
+            val error = validatePriceServer(host, port)
+                ?: if (host.isBlank()) "Informe o IP do servidor para testar." else null
+            if (error != null) {
+                Toast.makeText(this, error, Toast.LENGTH_LONG).show()
+                return@setOnClickListener
+            }
+            testPriceServer(host, port)
         }
 
         binding.btnTestFaceRecognition.setOnClickListener {

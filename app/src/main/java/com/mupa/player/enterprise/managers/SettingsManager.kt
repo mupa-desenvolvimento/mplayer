@@ -23,6 +23,11 @@ data class AppSettings(
     val devMode: Boolean,
     val demoMode: Boolean,
     val imageSearchEnabled: Boolean,
+    // Endpoint do serviço local de consulta de preços da loja (ex: 192.168.6.171:8000).
+    // Interpolado no price_config como {{price_host}}/{{price_port}}; vazio = integração
+    // não usa servidor local.
+    val priceHost: String,
+    val pricePort: String,
 )
 
 class SettingsManager(private val context: Context) {
@@ -40,6 +45,8 @@ class SettingsManager(private val context: Context) {
         val gertecScannerEnabled = booleanPreferencesKey("gertec_scanner_enabled")
         val imageSearchEnabled = booleanPreferencesKey("image_search_enabled")
         val heartbeatIdleMinutes = intPreferencesKey("heartbeat_idle_minutes")
+        val priceHost = stringPreferencesKey("price_host")
+        val pricePort = stringPreferencesKey("price_port")
     }
 
     val settingsFlow: Flow<AppSettings> =
@@ -69,6 +76,12 @@ class SettingsManager(private val context: Context) {
                         ?: legacyPrefs.getBoolean(LEGACY_KEY_DEMO_MODE, false),
                     imageSearchEnabled = prefs[Keys.imageSearchEnabled]
                         ?: legacyPrefs.getBoolean(LEGACY_KEY_IMAGE_SEARCH_ENABLED, true),
+                    priceHost = prefs[Keys.priceHost]
+                        ?: legacyPrefs.getString(LEGACY_KEY_PRICE_HOST, "")
+                        ?: "",
+                    pricePort = prefs[Keys.pricePort]
+                        ?: legacyPrefs.getString(LEGACY_KEY_PRICE_PORT, DEFAULT_PRICE_PORT)
+                        ?: DEFAULT_PRICE_PORT,
                 )
             }
             .distinctUntilChanged()
@@ -97,6 +110,14 @@ class SettingsManager(private val context: Context) {
 
     suspend fun setTenantId(value: String) {
         persistString(Keys.tenantId, LEGACY_KEY_TENANT_ID, value.trim())
+    }
+
+    suspend fun setPriceHost(value: String) {
+        persistString(Keys.priceHost, LEGACY_KEY_PRICE_HOST, value.trim())
+    }
+
+    suspend fun setPricePort(value: String) {
+        persistString(Keys.pricePort, LEGACY_KEY_PRICE_PORT, value.trim())
     }
 
     suspend fun setDevMode(enabled: Boolean) {
@@ -180,6 +201,7 @@ class SettingsManager(private val context: Context) {
     companion object {
         private const val DEFAULT_SERVER_URL = "https://midias.mupa.app"
         private const val DEFAULT_ENVIRONMENT = "prod"
+        private const val DEFAULT_PRICE_PORT = "8000"
 
         private const val LEGACY_PREFS_NAME = "mupa_settings_legacy"
         private const val LEGACY_KEY_SERVER_URL = "server_url"
@@ -191,6 +213,8 @@ class SettingsManager(private val context: Context) {
         private const val LEGACY_KEY_DEMO_MODE = "demo_mode"
         private const val LEGACY_KEY_IMAGE_SEARCH_ENABLED = "image_search_enabled"
         private const val LEGACY_KEY_GERTEC_SCANNER_ENABLED = "gertec_scanner_enabled"
+        private const val LEGACY_KEY_PRICE_HOST = "price_host"
+        private const val LEGACY_KEY_PRICE_PORT = "price_port"
 
         private const val ANDROID_ID_BUG = "9774d56d682e549c"
 

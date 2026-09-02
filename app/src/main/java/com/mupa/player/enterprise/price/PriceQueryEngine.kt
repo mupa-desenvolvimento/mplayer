@@ -117,6 +117,17 @@ class PriceQueryEngine(
         return resolved
     }
 
+    /**
+     * Endpoint do serviço local de consulta de preços, configurado por dispositivo em
+     * Configurações. Fica disponível para os templates do price_config como
+     * {{price_host}} / {{price_port}} — assim uma integração local vira configuração no
+     * manifest, sem código novo no motor.
+     */
+    private suspend fun resolvePriceEndpoint(): Pair<String, String> {
+        val settings = runCatching { SettingsManager(context).getSettings() }.getOrNull()
+        return (settings?.priceHost.orEmpty()) to (settings?.pricePort.orEmpty())
+    }
+
     private fun insertEvent(
         ean: String,
         filial: String,
@@ -250,6 +261,7 @@ class PriceQueryEngine(
         }
 
         val startedAt = System.currentTimeMillis()
+        val (priceHost, pricePort) = resolvePriceEndpoint()
         val state = JSONObject()
             .put("ean", normalizedEan)
             .put("device", deviceId)
@@ -257,6 +269,8 @@ class PriceQueryEngine(
             .put("loja", filial)
             .put("store_id", filial)
             .put("integration", config.integration)
+            .put("price_host", priceHost)
+            .put("price_port", pricePort)
 
         var product: PriceProduct? = null
         try {

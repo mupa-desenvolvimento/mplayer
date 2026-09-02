@@ -1,12 +1,36 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Política invertida em relação à versão anterior.
+
+  Motivação: o serviço local de consulta de preços roda em HTTP na rede da loja e o IP muda
+  de loja para loja (configurado por dispositivo em Configurações). O network-security-config
+  do Android não aceita faixa CIDR — só domínios/IPs estáticos — então não há como declarar
+  "toda a rede local" sem liberar cleartext na base-config.
+
+  Contrapartida: os domínios da Mupa, que carregam token e dados de dispositivo, ficam com
+  TLS OBRIGATÓRIO em domain-config próprio. Ou seja, tráfego em claro passa a ser possível
+  apenas para hosts que não são nossos (o servidor da loja), e nunca para os nossos.
+-->
 <network-security-config>
-    <!-- Cleartext permitido: o TCServer Mupa roda em HTTP na rede local da loja e o
-         IP é configurável por cliente. As APIs de nuvem (Zaffari, Komprão) continuam
-         em HTTPS normalmente — permitir cleartext não as rebaixa. -->
+    <!-- Cleartext permitido: o TCServer Mupa e o serviço local de preços rodam em HTTP
+         na rede local da loja e o IP é configurável por cliente. As APIs de nuvem
+         (Zaffari, Komprão) continuam em HTTPS normalmente — permitir cleartext não as rebaixa. -->
     <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
             <certificates src="system" />
             <certificates src="user" />
         </trust-anchors>
     </base-config>
+
+    <!-- Infra Mupa: TLS obrigatório, sem exceção. -->
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="true">mupa.app</domain>
+        <domain includeSubdomains="true">supabase.co</domain>
+        <domain includeSubdomains="true">r2.dev</domain>
+    </domain-config>
+
+    <!-- Legado: este host ainda serve mídias em HTTP. -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">srv-mupa.ddns.net</domain>
+    </domain-config>
 </network-security-config>
