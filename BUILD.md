@@ -6,6 +6,74 @@ Android Gradle, Fastlane, GitHub Actions e Google Play.
 O desenvolvedor executa **um único comando** e todo o resto é automático:
 versionamento → build → renomeação → SHA-256 → release notes → changelog → tag git.
 
+> **Antes do primeiro build, leia [Configuração de segredos](#configuração-de-segredos).**
+> Sem o `SUPABASE_TOKEN` o APK compila normalmente, instala normalmente — e **não funciona**.
+
+---
+
+## Configuração de segredos
+
+Nenhum segredo fica no repositório. Todos são lidos em tempo de build e injetados no
+`BuildConfig` ou na configuração de assinatura.
+
+### Como o Gradle resolve cada valor
+
+`app/build.gradle.kts` (e `agent/build.gradle.kts`) usam esta precedência — o primeiro que
+existir vence:
+
+| Ordem | Origem | Como usar |
+|-------|--------|-----------|
+| 1º | Propriedade Gradle | `./gradlew :app:assembleModernRelease -PSUPABASE_TOKEN=xxx` |
+| 2º | `local.properties` | `SUPABASE_TOKEN=xxx` no arquivo (recomendado para a máquina local) |
+| 3º | Variável de ambiente | `SUPABASE_TOKEN=xxx` no ambiente (recomendado para CI) |
+
+`local.properties` está no `.gitignore` e **nunca** deve ser commitado.
+
+### Segredos necessários
+
+| Chave | Obrigatório para | O que quebra sem ela |
+|-------|------------------|----------------------|
+| `SUPABASE_TOKEN` | **qualquer APK funcional** | cadastro do dispositivo falha com "Token não configurado"; manifest, analytics de audiência e eventos de dispositivo param de sincronizar |
+| `RELEASE_STORE_FILE` | build de release assinado | build de release sai **sem assinatura** (não atualiza APK de campo) |
+| `RELEASE_STORE_PASSWORD` | build de release assinado | `GradleException` no configure |
+| `RELEASE_KEY_ALIAS` | build de release assinado | `GradleException` no configure |
+| `RELEASE_KEY_PASSWORD` | build de release assinado | `GradleException` no configure |
+
+As quatro chaves `RELEASE_*` só são exigidas quando `RELEASE_STORE_FILE` está preenchida; se
+ela estiver em branco, o build de release apenas ignora a assinatura em vez de falhar.
+
+> **Onde obter o `SUPABASE_TOKEN`:** _pendente de definição._ Hoje esse valor não está em
+> nenhuma máquina de desenvolvimento nem documentado — só existe no ambiente que gerou os
+> APKs de campo. Preencher aqui com a origem oficial (cofre de segredos, responsável ou
+> procedimento de solicitação).
+
+### Configuração da máquina local
+
+```bash
+echo "SUPABASE_TOKEN=<token>" >> local.properties
+```
+
+Para um worktree novo (`git worktree add`), o `local.properties` e o `app/libs/` **não são
+copiados** — ambos estão fora do controle de versão. Copie os dois do clone principal antes
+do primeiro build:
+
+```bash
+cp local.properties <worktree>/local.properties
+cp -r app/libs <worktree>/app/
+```
+
+### Como verificar se o APK saiu com token
+
+O jeito mais rápido é o log de inicialização — `AudienceSyncManager` registra o estado do
+token sem expor o valor:
+
+```bash
+adb logcat -d | grep "SUPABASE_TOKEN is blank"
+```
+
+`is blank: false` com `length` diferente de zero significa APK íntegro. `is blank: true` é
+um APK que vai falhar em campo.
+
 ---
 
 ## Uso rápido
