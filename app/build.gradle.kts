@@ -29,6 +29,17 @@ android {
         versionCode = 65
         versionName = "1.1.49"
 
+        // Toda a frota (G-BOT, X96, SK-100, ST-103) é ARM. Empacotar x86/x86_64 adicionava
+        // ~54 MB de binários que nenhum dispositivo executa — peso puro para o OTA em rede
+        // de loja. Para rodar em emulador x86, compile com -PincludeX86Abis=true.
+        val includeX86 = (getConfig("includeX86Abis") ?: "false").toBoolean()
+        ndk {
+            abiFilters += listOf("armeabi-v7a", "arm64-v8a")
+            if (includeX86) {
+                abiFilters += listOf("x86", "x86_64")
+            }
+        }
+
         fun String.escapeForBuildConfig(): String = replace("\\", "\\\\").replace("\"", "\\\"")
 
         val supabaseToken = (getConfig("SUPABASE_TOKEN") ?: "").trim()
@@ -200,6 +211,14 @@ dependencies {
     // TensorFlow Lite
     implementation("org.tensorflow:tensorflow-lite:2.14.0")
     implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+
+    add("modernImplementation", files("libs/EasyLayerUnificadaVarejo_1_0_3.aar"))
+
+    // Mesmas dependências do :mplayer_renner. O layout activity_camera_test.xml usa
+    // com.mupa.engage.ui.GestureOverlayView, então o ViewBinding do flavor modern não
+    // compila sem o engage-ui (o flavor legacy usa o override em app/src/legacy/res).
+    add("modernImplementation", project(":engage-ui"))
+    add("modernImplementation", project(":engage-vision"))
 
     // Unit testing dependencies
     testImplementation("junit:junit:4.13.2")
