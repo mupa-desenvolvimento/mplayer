@@ -4,11 +4,39 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
 import com.mupa.agent.argos.admin.WifiManager
+import com.mupa.agent.argos.security.SecurePrefs
 
 class WifiConfig(private val context: Context) {
-    private val prefs: SharedPreferences = context.getSharedPreferences("wifi_config", Context.MODE_PRIVATE)
+    // Credentials (incl. the WiFi password) are stored encrypted-at-rest. Legacy plaintext
+    // values written by older builds are migrated into the encrypted store on first use.
+    private val prefs: SharedPreferences = SecurePrefs.open(context, SECURE_PREFS_NAME)
     private val wifiManager = WifiManager(context)
     private val tag = "ArgosWifiConfig"
+
+    init {
+        migrateLegacyPlaintext()
+    }
+
+    /**
+     * One-time migration: copy WiFi credentials written in plaintext by older builds
+     * (SharedPreferences "wifi_config") into the encrypted store, then wipe the plaintext
+     * copy. No-op once the legacy file is empty.
+     */
+    private fun migrateLegacyPlaintext() {
+        val legacy = context.getSharedPreferences(LEGACY_PREFS_NAME, Context.MODE_PRIVATE)
+        if (legacy.all.isEmpty()) return
+        runCatching {
+            if (!prefs.contains("wifi_ssid") && !prefs.contains("wifi_configured")) {
+                prefs.edit()
+                    .putString("wifi_ssid", legacy.getString("wifi_ssid", "") ?: "")
+                    .putString("wifi_password", legacy.getString("wifi_password", "") ?: "")
+                    .putBoolean("wifi_configured", legacy.getBoolean("wifi_configured", false))
+                    .apply()
+            }
+            legacy.edit().clear().apply()
+            Log.i(tag, "wifi_credentials_migrated_to_encrypted_store")
+        }.onFailure { Log.w(tag, "wifi_migration_failed: ${it.message}") }
+    }
 
     fun setCredentials(ssid: String, password: String) {
         prefs.edit()
@@ -22,6 +50,32 @@ class WifiConfig(private val context: Context) {
     fun getSsid(): String = prefs.getString("wifi_ssid", "") ?: ""
     fun getPassword(): String = prefs.getString("wifi_password", "") ?: ""
     fun isConfigured(): Boolean = prefs.getBoolean("wifi_configured", false)
+
+    /** SSID atualmente conectado (sem aspas), ou vazio se não conectado. */
+    fun getCurrentSsid(): String = wifiManager.getCurrentSsid().orEmpty()
+
+    /**
+     * Applies WiFi credentials pushed from the ARGOS web (group/device policies via
+     * ConfigurationEngine). Saves them, and connects only when the SSID or password
+     * actually changed — so a config sync every few minutes doesn't keep re-triggering
+     * a WiFi reconnect on a device that's already on the right network.
+     * Returns true if a (re)connect was attempted.
+     */
+    fun applyRemoteCredentials(ssid: String, password: String): Boolean {
+        val newSsid = ssid.trim()
+        if (newSsid.isBlank()) return false
+        val changed = newSsid != getSsid() || password != getPassword()
+        setCredentials(newSsid, password)
+        if (!changed && wifiManager.getCurrentSsid() == newSsid) {
+            Log.d(tag, "WiFi remota inalterada e já conectada: $newSsid")
+            return false
+        }
+        Log.i(tag, "Aplicando WiFi das políticas: $newSsid")
+        val success = wifiManager.connectToWifi(newSsid, password)
+        if (success) Log.i(tag, "WiFi das políticas conectada: $newSsid")
+        else Log.w(tag, "Falha ao conectar WiFi das políticas: $newSsid")
+        return true
+    }
 
     /**
      * Tenta conectar à rede WiFi salva automaticamente.
@@ -56,6 +110,23 @@ class WifiConfig(private val context: Context) {
         }
     }
 
+    /**
+     * Explicit "set WiFi now" — used by the console `set_wifi` command. Always saves and
+     * attempts a connect (unlike applyRemoteCredentials, which no-ops when unchanged).
+     * Returns true when the connect attempt succeeded.
+     */
+    fun setAndConnect(ssid: String, password: String): Boolean {
+        val newSsid = ssid.trim()
+        if (newSsid.isBlank()) return false
+        setCredentials(newSsid, password)
+        Log.i(tag, "set_wifi: conectando a $newSsid")
+        val ok = wifiManager.connectToWifi(newSsid, password)
+        if (ok) Log.i(tag, "set_wifi ok: $newSsid") else Log.w(tag, "set_wifi falhou: $newSsid")
+        return ok
+    }
+
+    suspend fun getScanResults(): List<String> = wifiManager.getScanResults()
+
     fun clearCredentials() {
         prefs.edit()
             .remove("wifi_ssid")
@@ -63,5 +134,10 @@ class WifiConfig(private val context: Context) {
             .putBoolean("wifi_configured", false)
             .apply()
         Log.d(tag, "Credenciais de WiFi limpas")
+    }
+
+    companion object {
+        private const val SECURE_PREFS_NAME = "wifi_config_secure"
+        private const val LEGACY_PREFS_NAME = "wifi_config"
     }
 }

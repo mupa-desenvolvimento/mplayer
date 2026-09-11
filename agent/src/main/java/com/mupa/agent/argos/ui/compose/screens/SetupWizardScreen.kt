@@ -1,11 +1,19 @@
 package com.mupa.agent.argos.ui.compose.screens
 
+import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -14,11 +22,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Divider
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -66,6 +77,12 @@ private enum class SetupWizardPhase {
     BindDevice,
 }
 
+private fun isOnline(context: Context): Boolean {
+    val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager ?: return false
+    val caps = cm.activeNetwork?.let { cm.getNetworkCapabilities(it) } ?: return false
+    return caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+}
+
 @Composable
 fun SetupWizardScreen(
     onBack: () -> Unit,
@@ -81,7 +98,44 @@ fun SetupWizardScreen(
     var states by remember { mutableStateOf<List<PermissionState>>(emptyList()) }
     var showDeviceOwnerHelp by remember { mutableStateOf(false) }
     var stepIndex by remember { mutableStateOf(0) }
-    var phase by remember { mutableStateOf(SetupWizardPhase.Permissions) }
+    // Os 8 passos de permissões são pré-configurados na ROM — o wizard começa
+    // direto na seleção de grupo, passando pelo Wi-Fi apenas se estiver offline.
+    var phase by remember {
+        mutableStateOf(if (isOnline(context)) SetupWizardPhase.BindDevice else SetupWizardPhase.WiFiSetup)
+    }
+
+    // Quando o usuário abre o Wi-Fi manualmente (via "Voltar" na seleção de
+    // grupo) não há retorno automático — só quando ele caiu ali por estar offline.
+    var wifiOpenedManually by remember { mutableStateOf(false) }
+
+    // Enquanto estiver na fase de Wi-Fi, monitora a conectividade: assim que a
+    // conexão for confirmada, retorna automaticamente para a seleção de grupo.
+    LaunchedEffect(phase, wifiOpenedManually) {
+        when (phase) {
+            SetupWizardPhase.WiFiSetup -> {
+                if (wifiOpenedManually) return@LaunchedEffect
+                while (true) {
+                    kotlinx.coroutines.delay(2_000)
+                    if (isOnline(context)) {
+                        phase = SetupWizardPhase.BindDevice
+                        break
+                    }
+                }
+            }
+            SetupWizardPhase.BindDevice -> {
+                wifiOpenedManually = false
+                // Se a rede cair durante a seleção de grupo, volta para o Wi-Fi.
+                while (true) {
+                    kotlinx.coroutines.delay(3_000)
+                    if (!isOnline(context)) {
+                        phase = SetupWizardPhase.WiFiSetup
+                        break
+                    }
+                }
+            }
+            else -> Unit
+        }
+    }
 
     fun refresh() {
         scope.launch {
@@ -119,6 +173,30 @@ fun SetupWizardScreen(
     LaunchedEffect(states) {
         if (ordered.isEmpty()) return@LaunchedEffect
         stepIndex = stepIndex.coerceIn(0, ordered.lastIndex)
+    }
+
+    // If permissions are all done AND the device is already enrolled in a group,
+    // go directly to the launcher — skip WiFi setup and group linking.
+    val criticalReadyForAutoSkip = states.filter { it.critical }.all { it.status == PermissionStatus.Completed } && states.isNotEmpty()
+    LaunchedEffect(criticalReadyForAutoSkip) {
+        if (!criticalReadyForAutoSkip) return@LaunchedEffect
+        val reallyBound = withContext(Dispatchers.IO) {
+            (settings.isDeviceBoundCached() && settings.getBoundCompanyIdCached() != "local-bypass") ||
+                settings.getGroupSetupSkippedCached()
+        }
+        if (reallyBound) {
+            val dpm = DeviceOwnerPolicyManager(context)
+            if (dpm.isDeviceOwner(context.packageName)) {
+                dpm.setLauncherAsHome(context.packageName, enabled = true)
+            }
+            runCatching {
+                context.startActivity(
+                    Intent(context, ArgosLauncherActivity::class.java)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED),
+                )
+            }
+            onBack()
+        }
     }
 
     val completed = states.count { it.status == PermissionStatus.Completed }
@@ -235,7 +313,8 @@ fun SetupWizardScreen(
                             if (dpm.isDeviceOwner(context.packageName)) {
                                 dpm.setLauncherAsHome(context.packageName, enabled = true)
                             }
-                            val reallyBound = settings.isDeviceBoundCached() && settings.getBoundCompanyIdCached() != "local-bypass"
+                            val reallyBound = (settings.isDeviceBoundCached() && settings.getBoundCompanyIdCached() != "local-bypass") ||
+                                settings.getGroupSetupSkippedCached()
                             if (reallyBound) {
                                 if (onComplete != null) {
                                     onComplete()
@@ -315,20 +394,31 @@ fun SetupWizardScreen(
             }
         } else if (phase == SetupWizardPhase.WiFiSetup) {
             WiFiSetupWizard(
-                onBack = { phase = SetupWizardPhase.Permissions },
+                onBack = onBack,
                 onDone = { phase = SetupWizardPhase.BindDevice },
             )
         } else {
             GroupLinkWizard(
-                onBack = { phase = SetupWizardPhase.WiFiSetup },
+                allowSkip = true,
+                // A navegação para o launcher é feita pelo onDone→onComplete (NavController).
+                // startActivity apontaria para a própria Activity e prenderia a tela.
+                launchLauncherOnSuccess = false,
+                onBack = {
+                    wifiOpenedManually = true
+                    phase = SetupWizardPhase.WiFiSetup
+                },
                 onDone = {
                     if (onComplete != null) {
                         onComplete()
                     } else {
                         runCatching {
                             context.startActivity(
+                                // CLEAR_TASK força a ArgosLauncherActivity a reiniciar do zero e
+                                // re-avaliar o roteamento com o estado já vinculado/"sem grupo" —
+                                // sem isso ela era reusada (onNewIntent) presa na rota do grupo,
+                                // reabrindo "Cadastrar Dispositivo" em loop após o vínculo.
                                 Intent(context, ArgosLauncherActivity::class.java)
-                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED),
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK),
                             )
                         }
                         onBack()
@@ -428,12 +518,65 @@ private fun WiFiSetupWizard(
     onDone: () -> Unit,
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val wifiConfig = remember { com.mupa.agent.argos.wifi.WifiConfig(context) }
-    var ssid by remember { mutableStateOf(wifiConfig.getSsid()) }
+
+    // ACCESS_FINE_LOCATION é runtime permission obrigatória para scan no Android 10+
+    var locationGranted by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) ==
+                PackageManager.PERMISSION_GRANTED
+        )
+    }
+    val locationLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        locationGranted = granted
+    }
+
+    // SSID selection state
+    var scanResults by remember { mutableStateOf<List<String>>(emptyList()) }
+    var isScanning by remember { mutableStateOf(false) }
+    var selectedSsid by remember { mutableStateOf(wifiConfig.getSsid()) }
+    var manualSsid by remember { mutableStateOf("") }
+    var showManualEntry by remember { mutableStateOf(false) }
+
+    // Password state (shown only after SSID selected)
     var password by remember { mutableStateOf(wifiConfig.getPassword()) }
     var showPassword by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf("") }
     var isConnecting by remember { mutableStateOf(false) }
+
+    // Effective SSID: manual entry overrides scan selection
+    val effectiveSsid = if (showManualEntry) manualSsid.trim() else selectedSsid
+
+    fun scan() {
+        if (isScanning || !locationGranted) return
+        isScanning = true
+        scope.launch {
+            try {
+                val results = withContext(Dispatchers.IO) {
+                    kotlinx.coroutines.withTimeoutOrNull(8_000) { wifiConfig.getScanResults() } ?: emptyList()
+                }
+                scanResults = results
+            } finally {
+                isScanning = false
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (!locationGranted) {
+            locationLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+        } else {
+            scan()
+        }
+    }
+
+    // Re-scan automaticamente quando a permissão for concedida
+    LaunchedEffect(locationGranted) {
+        if (locationGranted && scanResults.isEmpty()) scan()
+    }
 
     val dimens = LocalArgosDimens.current
     Column(
@@ -459,7 +602,7 @@ private fun WiFiSetupWizard(
                 Spacer(modifier = Modifier.height(10.dp))
                 Text("Configuração de WiFi", style = MaterialTheme.typography.titleLarge)
                 Spacer(modifier = Modifier.height(2.dp))
-                Text("Rede WiFi da loja (opcional)", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Selecione a rede (opcional)", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
 
@@ -470,50 +613,130 @@ private fun WiFiSetupWizard(
                 .fillMaxWidth()
                 .weight(1f),
         ) {
-            val scrollState = rememberScrollState()
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .verticalScroll(scrollState),
-            ) {
-                Text("Configurar WiFi", style = MaterialTheme.typography.headlineSmall)
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    "Salve o SSID e senha da WiFi da loja. Quando a player chegar no cliente, " +
-                        "conectará automaticamente.",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(modifier = Modifier.height(16.dp))
-
-                Text("SSID (Nome da Rede)", style = MaterialTheme.typography.labelMedium)
-                Spacer(modifier = Modifier.height(4.dp))
-                OutlinedTextField(
-                    value = ssid,
-                    onValueChange = { ssid = it },
+            Column(modifier = Modifier.fillMaxSize()) {
+                // SSID section header with toggle between scan list and manual entry
+                Row(
                     modifier = Modifier.fillMaxWidth(),
-                    placeholder = { Text("Ex: Loja_WiFi") },
-                    enabled = !isConnecting,
-                    singleLine = true,
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-
-                Text("Senha (WPA2)", style = MaterialTheme.typography.labelMedium)
-                Spacer(modifier = Modifier.height(4.dp))
-                OutlinedTextField(
-                    value = password,
-                    onValueChange = { password = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    placeholder = { Text("Digite a senha") },
-                    visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
-                    trailingIcon = {
-                        TextButton(onClick = { showPassword = !showPassword }) {
-                            Text(if (showPassword) "Ocultar" else "Mostrar", style = MaterialTheme.typography.labelSmall)
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        if (showManualEntry) "SSID manual" else "Redes disponíveis",
+                        style = MaterialTheme.typography.headlineSmall,
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (!showManualEntry) {
+                            if (isScanning) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.padding(4.dp).then(Modifier.then(Modifier)),
+                                    strokeWidth = 2.dp,
+                                )
+                            } else {
+                                TextButton(onClick = { scan() }, enabled = !isConnecting) {
+                                    Text("Atualizar")
+                                }
+                            }
                         }
-                    },
-                    enabled = !isConnecting,
-                    singleLine = true,
-                )
-                Spacer(modifier = Modifier.height(16.dp))
+                        TextButton(
+                            onClick = {
+                                showManualEntry = !showManualEntry
+                                message = ""
+                            },
+                            enabled = !isConnecting,
+                        ) {
+                            Text(if (showManualEntry) "Ver lista" else "Digitar")
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(6.dp))
+
+                if (showManualEntry) {
+                    // Manual SSID entry
+                    OutlinedTextField(
+                        value = manualSsid,
+                        onValueChange = { manualSsid = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Nome da rede (SSID)") },
+                        placeholder = { Text("Ex: MinhaRede") },
+                        enabled = !isConnecting,
+                        singleLine = true,
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                } else {
+                    if (!locationGranted) {
+                        Text(
+                            "Permissão de localização necessária para listar redes WiFi. " +
+                                "Conceda a permissão ou use \"Digitar\" para inserir o SSID manualmente.",
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        OutlinedButton(
+                            onClick = { locationLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION) },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("Conceder permissão de localização") }
+                        Spacer(modifier = Modifier.height(4.dp))
+                    } else if (scanResults.isEmpty() && !isScanning) {
+                        Text(
+                            "Nenhuma rede encontrada. Toque em \"Digitar\" para inserir o SSID manualmente.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+
+                    LazyColumn(modifier = Modifier.weight(1f)) {
+                        items(scanResults) { ssid ->
+                            val isSelected = ssid == selectedSsid
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable(enabled = !isConnecting) {
+                                        selectedSsid = ssid
+                                        if (ssid != wifiConfig.getSsid()) password = ""
+                                        else password = wifiConfig.getPassword()
+                                        message = ""
+                                    }
+                                    .padding(vertical = 10.dp, horizontal = 4.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    ssid,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = if (isSelected) MaterialTheme.colorScheme.primary
+                                            else MaterialTheme.colorScheme.onSurface,
+                                )
+                                if (isSelected) {
+                                    Text("✓", color = MaterialTheme.colorScheme.primary)
+                                }
+                            }
+                            Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+                        }
+                    }
+                }
+
+                // Password field — shown when an SSID is selected (scan) or typed (manual)
+                if (effectiveSsid.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text("Rede: $effectiveSsid", style = MaterialTheme.typography.labelLarge)
+                    Spacer(modifier = Modifier.height(6.dp))
+                    OutlinedTextField(
+                        value = password,
+                        onValueChange = { password = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Senha (WPA2)") },
+                        placeholder = { Text("Digite a senha") },
+                        visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                        trailingIcon = {
+                            TextButton(onClick = { showPassword = !showPassword }) {
+                                Text(if (showPassword) "Ocultar" else "Mostrar", style = MaterialTheme.typography.labelSmall)
+                            }
+                        },
+                        enabled = !isConnecting,
+                        singleLine = true,
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
 
                 if (message.isNotEmpty()) {
                     Text(
@@ -521,53 +744,88 @@ private fun WiFiSetupWizard(
                         color = if ("Erro" in message) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.tertiary,
                         style = MaterialTheme.typography.labelMedium,
                     )
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
                 }
 
                 if (isConnecting) {
                     CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
+                    Spacer(modifier = Modifier.height(8.dp))
                 }
 
-                Spacer(modifier = Modifier.height(16.dp).weight(1f))
+                // No Android 10+, conectar programaticamente é bloqueante/não-confiável.
+                // Salvamos as credenciais e abrimos as configurações do sistema.
+                val isModernAndroid = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     OutlinedButton(
                         modifier = Modifier.weight(1f),
                         onClick = onBack,
                         enabled = !isConnecting,
-                    ) {
-                        Text("Voltar")
-                    }
+                    ) { Text("Voltar") }
+
+                    OutlinedButton(
+                        modifier = Modifier.weight(1f),
+                        onClick = onDone,
+                    ) { Text(if (isModernAndroid && message.isNotBlank()) "Próximo" else "Pular") }
 
                     Button(
                         modifier = Modifier.weight(1f),
+                        enabled = !isConnecting && effectiveSsid.isNotBlank(),
                         onClick = {
-                            if (ssid.trim().isEmpty()) {
-                                message = "SSID não pode estar vazio"
-                                return@Button
-                            }
                             if (password.isEmpty()) {
-                                message = "Senha não pode estar vazia"
+                                message = "Digite a senha"
                                 return@Button
                             }
-                            isConnecting = true
-                            message = "Conectando..."
-                            wifiConfig.setCredentials(ssid.trim(), password)
-                            // Simula um pequeno delay antes de passar para a próxima fase
-                            Thread {
-                                Thread.sleep(1500)
-                                message = "Credenciais salvas!"
-                                Thread.sleep(1000)
-                                onDone()
-                            }.start()
+                            val targetSsid = effectiveSsid
+                            if (isModernAndroid) {
+                                // Android 10+: salva credenciais e abre configurações Wi-Fi do sistema.
+                                // O app não pode conectar diretamente — o usuário conecta no sistema
+                                // e volta para clicar em "Próximo".
+                                scope.launch {
+                                    withContext(Dispatchers.IO) {
+                                        wifiConfig.setCredentials(targetSsid, password)
+                                    }
+                                    message = "Credenciais salvas. Conecte ao Wi-Fi e toque em \"Próximo\"."
+                                }
+                                runCatching {
+                                    context.startActivity(
+                                        Intent(Settings.ACTION_WIFI_SETTINGS)
+                                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                                    )
+                                }
+                            } else {
+                                // Android < 10: conexão programática via WifiConfiguration (legado).
+                                isConnecting = true
+                                message = "Conectando..."
+                                scope.launch {
+                                    try {
+                                        val connected = withContext(Dispatchers.IO) {
+                                            wifiConfig.setAndConnect(targetSsid, password)
+                                            var ok = false
+                                            var tries = 0
+                                            while (tries < 10 && !ok) {
+                                                kotlinx.coroutines.delay(1000)
+                                                if (wifiConfig.getCurrentSsid() == targetSsid) ok = true
+                                                tries++
+                                            }
+                                            ok
+                                        }
+                                        message = if (connected) "Conectado a $targetSsid!"
+                                            else "Credenciais salvas (conectará quando a rede estiver disponível)."
+                                        kotlinx.coroutines.delay(1200)
+                                        onDone()
+                                    } catch (e: Exception) {
+                                        message = "Erro ao conectar: ${e.message}"
+                                    } finally {
+                                        isConnecting = false
+                                    }
+                                }
+                            }
                         },
-                        enabled = !isConnecting,
-                    ) {
-                        Text("Salvar e Continuar")
-                    }
+                    ) { Text(if (isModernAndroid) "Salvar" else "Conectar") }
                 }
             }
         }

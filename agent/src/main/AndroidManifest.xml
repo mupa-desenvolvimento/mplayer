@@ -122,15 +122,42 @@
 
         <!-- Separate class required — Android manifest merger rejects duplicate receiver
              entries for the same class. This thin wrapper receives MEFERI ScanWizard
-             broadcasts (android.intent.action.MEF_ACTION) without the custom permission
-             restriction, since the ScanWizard system service cannot hold app-defined
-             permissions. The permission guard on MaintenanceBarcodeReceiver still protects
-             the internal BARCODE_TRIGGER path. -->
+             broadcasts (android.intent.action.MEF_ACTION).
+             SECURITY-2026-07-31 item 1.6: intentionally left WITHOUT android:permission —
+             investigated (see MeferiScanReceiver.kt kdoc). Reusing
+             com.mupa.player.enterprise.permission.SET_DEV_MODE here (as done below on
+             MaintenanceBarcodeReceiver) is not viable: that permission is signature-level,
+             owned by the MPlayer app, and the OEM-signed MEFERI ScanWizard system service can
+             never hold it — requiring it would silently break real scans on MC45 hardware.
+             No alternative MEFERI/system permission for MEF_ACTION was found. Mitigated
+             instead at the code level: MeferiScanReceiver.onReceive() now no-ops unless
+             BuildConfig.MEFERI_DEVICE is true, so this stays reachable by any installed app
+             only on the MC45 build flavor that actually needs it — not the rest of the fleet.
+             Residual risk on MC45 units themselves is accepted for now; needs real-hardware
+             smoke test before shipping. The permission guard on MaintenanceBarcodeReceiver
+             still protects the internal BARCODE_TRIGGER path. -->
         <receiver
             android:name=".receivers.MeferiScanReceiver"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MEF_ACTION" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Scanner do Gertec SK100 (UROVO i9600 rebrandado): o serviço
+             com.urovo.windowscannerservice emite android.intent.ACTION_DECODE_DATA.
+             Classe separada da MeferiScanReceiver pelo mesmo motivo descrito acima (o
+             manifest merger rejeita <receiver> duplicado para a mesma classe).
+             Exportado sem android:permission pela mesma razão do MEF_ACTION: o serviço de
+             scanner é assinado pelo OEM UROVO e nunca poderá ter uma permission signature da
+             Mupa; exigir uma faria o Android descartar o broadcast real e o scanner do SK100
+             pararia de liberar manutenção. Mitigado no código: UrovoScanReceiver só age quando
+             BuildConfig.SK100_DEVICE é true, ou seja, apenas no flavor sk100. -->
+        <receiver
+            android:name=".receivers.UrovoScanReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.ACTION_DECODE_DATA" />
             </intent-filter>
         </receiver>
 

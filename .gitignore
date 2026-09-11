@@ -52,3 +52,8 @@ trae-debug-log-*
 
 # ML models (baixados em runtime via AudienceModelDownloader)
 *.tflite
+
+# Ferramentas e artefatos locais
+dist/
+hard_reset_tool/
+tools/
