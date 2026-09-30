@@ -537,16 +537,90 @@
 
     </androidx.constraintlayout.widget.ConstraintLayout>
 
-    <com.google.android.material.textview.MaterialTextView
-        android:id="@+id/deviceIdWatermark"
+    <LinearLayout
+        android:id="@+id/syncPillContainer"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginBottom="16dp"
+        android:background="@drawable/bg_sync_pill"
+        android:elevation="6dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="14dp"
+        android:paddingTop="8dp"
+        android:paddingEnd="16dp"
+        android:paddingBottom="8dp"
+        android:visibility="gone">
+
+        <com.google.android.material.progressindicator.CircularProgressIndicator
+            android:id="@+id/syncPillSpinner"
+            android:layout_width="16dp"
+            android:layout_height="16dp"
+            android:indeterminate="true"
+            app:indicatorColor="@color/mupa_cyan"
+            app:indicatorSize="14dp"
+            app:trackThickness="2dp" />
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="10dp"
+            android:orientation="vertical">
+
+            <com.google.android.material.textview.MaterialTextView
+                android:id="@+id/syncPillText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:includeFontPadding="false"
+                android:text="Atualizando conteúdos..."
+                android:textColor="@color/enterprise_on"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+
+            <com.google.android.material.progressindicator.LinearProgressIndicator
+                android:id="@+id/syncPillProgressBar"
+                android:layout_width="130dp"
+                android:layout_height="3dp"
+                android:layout_marginTop="4dp"
+                app:indicatorColor="@color/mupa_cyan"
+                app:trackColor="#33FFFFFF"
+                app:trackCornerRadius="2dp"
+                app:trackThickness="3dp" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/bottomLeftContainer"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom|start"
-        android:layout_marginStart="10dp"
-        android:layout_marginBottom="10dp"
-        android:alpha="0.38"
-        android:textColor="@color/enterprise_on_muted"
-        android:textSize="11sp" />
+        android:layout_marginStart="6dp"
+        android:layout_marginBottom="6dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <ImageView
+            android:id="@+id/btnSettingsGear"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:padding="6dp"
+            android:src="@drawable/ic_settings_gear"
+            android:alpha="0.4"
+            android:contentDescription="Configurações"
+            android:clickable="true"
+            android:focusable="true"
+            android:background="?attr/selectableItemBackgroundBorderless" />
+
+        <com.google.android.material.textview.MaterialTextView
+            android:id="@+id/deviceIdWatermark"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:alpha="0.38"
+            android:textColor="@color/enterprise_on_muted"
+            android:textSize="11sp" />
+    </LinearLayout>
 
     <com.google.android.material.textview.MaterialTextView
         android:id="@+id/apkVersionWatermark"

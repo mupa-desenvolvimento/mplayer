@@ -6,7 +6,9 @@ import com.mupa.player.enterprise.network.SupabaseClient
 import com.mupa.player.enterprise.network.TlsCompat
 import com.mupa.player.enterprise.storage.db.AppDatabase
 import com.mupa.player.enterprise.storage.db.ManifestEntity
+import com.mupa.player.enterprise.storage.db.MediaDownloadFailureEntity
 import com.mupa.player.enterprise.storage.db.MediaEntity
+import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -158,7 +160,7 @@ class ManifestManager(private val context: Context) {
                             lastSpeedBytes.set(0L)
                             emitProgress(item.name)
 
-                            val ok =
+                            val downloadResult =
                                 runCatching {
                                     downloadToFile(
                                         url = item.url,
@@ -171,8 +173,24 @@ class ManifestManager(private val context: Context) {
                                             }
                                         },
                                     )
-                                }.isSuccess
-                            if (!ok || !target.exists() || target.length() == 0L) {
+                                }
+                            if (downloadResult.isFailure || !target.exists() || target.length() == 0L) {
+                                val errorReason = downloadResult.exceptionOrNull()?.message
+                                    ?: if (!target.exists()) "file_not_created" else "empty_file"
+                                runCatching {
+                                    db.mediaDownloadFailureDao().insert(
+                                        MediaDownloadFailureEntity(
+                                            id = UUID.randomUUID().toString(),
+                                            deviceId = deviceId,
+                                            mediaId = item.id,
+                                            mediaName = item.name,
+                                            url = item.url,
+                                            errorReason = errorReason,
+                                            createdAtEpochMs = System.currentTimeMillis(),
+                                        )
+                                    )
+                                }
+                                android.util.Log.e("ManifestManager", "Failed downloading media ${item.id} (${item.name}): $errorReason")
                                 val done = completed.incrementAndGet()
                                 onProgress?.invoke(
                                     MediaSyncProgress(

@@ -26,8 +26,8 @@ android {
         applicationId = "com.mupa.player.enterprise"
         minSdk = 21
         targetSdk = 34
-        versionCode = 65
-        versionName = "1.1.49"
+        versionCode = 67
+        versionName = "1.1.50"
 
         // Toda a frota (G-BOT, X96, SK-100, ST-103) é ARM. Empacotar x86/x86_64 adicionava
         // ~54 MB de binários que nenhum dispositivo executa — peso puro para o OTA em rede
@@ -107,6 +107,8 @@ android {
             val storeFilePath = (getConfig("RELEASE_STORE_FILE") ?: "").trim()
             if (storeFilePath.isNotBlank()) {
                 signingConfig = signingConfigs.getByName("release")
+            } else {
+                signingConfig = signingConfigs.getByName("debug")
             }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
@@ -211,8 +213,6 @@ dependencies {
     // TensorFlow Lite
     implementation("org.tensorflow:tensorflow-lite:2.14.0")
     implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
-
-    add("modernImplementation", files("libs/EasyLayerUnificadaVarejo_1_0_3.aar"))
 
     // Mesmas dependências do :mplayer_renner. O layout activity_camera_test.xml usa
     // com.mupa.engage.ui.GestureOverlayView, então o ViewBinding do flavor modern não
