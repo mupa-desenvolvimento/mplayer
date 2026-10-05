@@ -17,8 +17,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MediaPlayLogEntity::class,
         MissingProductImageEntity::class,
         DeviceEventEntity::class,
+        MediaDownloadFailureEntity::class,
     ],
-    version = 8,
+    version = 9,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -30,6 +31,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun mediaPlayLogDao(): MediaPlayLogDao
     abstract fun missingProductImageDao(): MissingProductImageDao
     abstract fun deviceEventDao(): DeviceEventDao
+    abstract fun mediaDownloadFailureDao(): MediaDownloadFailureDao
 
     companion object {
         @Volatile
@@ -49,6 +51,7 @@ abstract class AppDatabase : RoomDatabase() {
                     .addMigrations(MIGRATION_5_6)
                     .addMigrations(MIGRATION_6_7)
                     .addMigrations(MIGRATION_7_8)
+                    .addMigrations(MIGRATION_8_9)
                     .build()
                     .also { instance = it }
             }
@@ -195,6 +198,30 @@ abstract class AppDatabase : RoomDatabase() {
                     )
                     db.execSQL("CREATE INDEX IF NOT EXISTS index_device_events_uploadedAtEpochMs ON device_events(uploadedAtEpochMs)")
                     db.execSQL("CREATE INDEX IF NOT EXISTS index_device_events_createdAtEpochMs ON device_events(createdAtEpochMs)")
+                }
+            }
+
+        private val MIGRATION_8_9 =
+            object : Migration(8, 9) {
+                override fun migrate(db: SupportSQLiteDatabase) {
+                    db.execSQL(
+                        """
+                        CREATE TABLE IF NOT EXISTS media_download_failures (
+                          id TEXT NOT NULL PRIMARY KEY,
+                          deviceId TEXT NOT NULL,
+                          mediaId TEXT NOT NULL,
+                          mediaName TEXT,
+                          url TEXT NOT NULL,
+                          errorReason TEXT NOT NULL,
+                          createdAtEpochMs INTEGER NOT NULL,
+                          uploadedAtEpochMs INTEGER
+                        )
+                        """.trimIndent(),
+                    )
+                    db.execSQL("CREATE INDEX IF NOT EXISTS index_media_download_failures_uploadedAtEpochMs ON media_download_failures(uploadedAtEpochMs)")
+                    db.execSQL("CREATE INDEX IF NOT EXISTS index_media_download_failures_createdAtEpochMs ON media_download_failures(createdAtEpochMs)")
+                    db.execSQL("CREATE INDEX IF NOT EXISTS index_media_download_failures_deviceId ON media_download_failures(deviceId)")
+                    db.execSQL("CREATE INDEX IF NOT EXISTS index_media_download_failures_mediaId ON media_download_failures(mediaId)")
                 }
             }
     }
