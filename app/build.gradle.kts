@@ -26,8 +26,8 @@ android {
         applicationId = "com.mupa.player.enterprise"
         minSdk = 21
         targetSdk = 34
-        versionCode = 67
-        versionName = "1.1.50"
+        versionCode = 68
+        versionName = "1.1.51"
 
         // Toda a frota (G-BOT, X96, SK-100, ST-103) é ARM. Empacotar x86/x86_64 adicionava
         // ~54 MB de binários que nenhum dispositivo executa — peso puro para o OTA em rede
