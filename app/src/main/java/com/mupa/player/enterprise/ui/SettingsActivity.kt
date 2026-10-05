@@ -95,6 +95,12 @@ class SettingsActivity : ComponentActivity() {
 
             binding.editPriceHost.setText(settings?.priceHost ?: "")
             binding.editPricePort.setText(settings?.pricePort ?: "")
+            binding.editImageHost.setText(
+                runCatching { SettingsManager(applicationContext).getImageHost() }.getOrDefault(""),
+            )
+            binding.editImagePort.setText(
+                runCatching { SettingsManager(applicationContext).getImagePort() }.getOrDefault(""),
+            )
 
             binding.switchDevMode.isChecked = settings?.devMode ?: false
             binding.switchDemoMode.isChecked = settings?.demoMode ?: false
@@ -171,6 +177,45 @@ class SettingsActivity : ComponentActivity() {
                 },
             )
             binding.btnTestPriceServer.isEnabled = true
+        }
+    }
+
+    /** Bate em GET /produto-imagem/{ean} no servidor de imagens configurado (ou no srv-mupa de
+     * produção, se em branco) e mostra o resultado bruto — usado pra confirmar se a arte/foto
+     * já está disponível antes de testar no dispositivo de verdade. */
+    private fun searchImageForEan(ean: String) {
+        binding.btnSearchImage.isEnabled = false
+        binding.txtImageSearchStatus.text = "Buscando imagem de $ean..."
+
+        lifecycleScope.launch {
+            val baseUrl = SettingsManager(applicationContext).getImageServerBaseUrl()
+            val result = withContext(Dispatchers.IO) {
+                val client = OkHttpClient.Builder()
+                    .connectTimeout(5, TimeUnit.SECONDS)
+                    .readTimeout(15, TimeUnit.SECONDS)
+                    .callTimeout(20, TimeUnit.SECONDS)
+                    .build()
+                val request = Request.Builder()
+                    .url("$baseUrl/produto-imagem/$ean")
+                    .get()
+                    .build()
+                runCatching {
+                    client.newCall(request).execute().use { resp ->
+                        Pair(resp.code, resp.body?.string().orEmpty())
+                    }
+                }
+            }
+
+            result.fold(
+                onSuccess = { (code, body) ->
+                    binding.txtImageSearchStatus.text = "$baseUrl (HTTP $code)\n$body"
+                },
+                onFailure = { t ->
+                    binding.txtImageSearchStatus.text =
+                        "FALHOU ($baseUrl) - ${t.javaClass.simpleName}: ${t.message ?: "sem detalhe"}"
+                },
+            )
+            binding.btnSearchImage.isEnabled = true
         }
     }
 
@@ -329,6 +374,33 @@ class SettingsActivity : ComponentActivity() {
                 return@setOnClickListener
             }
             testPriceServer(host, port)
+        }
+
+        binding.btnSaveImageServer.setOnClickListener {
+            val host = binding.editImageHost.text.toString().trim()
+            val port = binding.editImagePort.text.toString().trim()
+            if (port.isNotBlank() && port.toIntOrNull() !in 1..65535) {
+                Toast.makeText(this, "Porta inválida. Use um valor entre 1 e 65535.", Toast.LENGTH_LONG).show()
+                return@setOnClickListener
+            }
+            lifecycleScope.launch {
+                val mgr = SettingsManager(applicationContext)
+                mgr.setImageHost(host)
+                mgr.setImagePort(port)
+                val effective = mgr.getImageServerBaseUrl()
+                val msg = "Servidor de imagens salvo: $effective"
+                binding.txtImageSearchStatus.text = msg
+                Toast.makeText(this@SettingsActivity, msg, Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        binding.btnSearchImage.setOnClickListener {
+            val ean = binding.editImageSearchEan.text.toString().trim()
+            if (ean.isBlank()) {
+                Toast.makeText(this, "Informe um EAN para buscar.", Toast.LENGTH_LONG).show()
+                return@setOnClickListener
+            }
+            searchImageForEan(ean)
         }
 
         binding.btnTestFaceRecognition.setOnClickListener {

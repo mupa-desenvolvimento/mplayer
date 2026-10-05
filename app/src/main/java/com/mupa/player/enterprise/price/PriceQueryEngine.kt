@@ -58,6 +58,17 @@ class PriceQueryEngine(
         .writeTimeout(5, TimeUnit.SECONDS)
         .callTimeout(0, TimeUnit.SECONDS)
         .build()
+
+    // Client dedicado pro upload da foto + geração da arte no srv-mupa (roda em background via
+    // requestArtGeneration, nunca no caminho síncrono da consulta de preço). O srv-mupa chama a
+    // API Gemini de forma síncrona antes de responder, o que pode levar bem mais que os 5-8s dos
+    // clients acima — por isso o timeout generoso aqui.
+    private val httpArtUpload = TlsCompat.apply(OkHttpClient.Builder())
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .writeTimeout(15, TimeUnit.SECONDS)
+        .callTimeout(75, TimeUnit.SECONDS)
+        .build()
     private val sessionState = JSONObject()
 
     // Escopo separado para gravações de analytics (insertEvent) que não devem atrasar o
@@ -158,10 +169,20 @@ class PriceQueryEngine(
 
     private data class ProductImageMeta(
         val imageUrl: String?,
+        val arteUrl: String?,
         val signature: String?,
         val legibility: String?,
         val light: String?,
         val dark: String?,
+    )
+
+    /** Resultado de [preloadProductImageAndTheme]: caminho local da imagem baixada (crua ou
+     * arte), tema de cores associado (se houver), e se essa imagem é a arte publicitária
+     * gerada por IA (produtos-imgs/Gemini) — usado para decidir o badge de preço sobreposto. */
+    data class PreloadedImage(
+        val path: String?,
+        val theme: PriceTheme?,
+        val hasArt: Boolean = false,
     )
 
     suspend fun query(
@@ -949,27 +970,33 @@ class PriceQueryEngine(
         ean: String,
         config: PriceConfig,
         isOnline: Boolean,
-    ): Pair<String?, PriceTheme?> = withContext(Dispatchers.IO) {
+    ): PreloadedImage = withContext(Dispatchers.IO) {
         val normalizedEan = ean.trim()
-        if (normalizedEan.isBlank()) return@withContext null to null
-
-        val existing = localProductImagePathIfExists(normalizedEan)
-        // Cache 60 min: imagem fresca é servida direto; vencida, tenta rebaixar (cai no fluxo
-        // abaixo). Offline, serve a imagem que houver (fresca ou vencida) — melhor que nada.
-        if (existing != null && isProductImageFresh(normalizedEan)) return@withContext existing to null
-        if (!isOnline) return@withContext existing to null
+        if (normalizedEan.isBlank()) return@withContext PreloadedImage(null, null, false)
 
         val cachedProduct = db.priceCacheDao().getByEan(normalizedEan)?.let { cache ->
             runCatching { parseProductFromCache(normalizedEan, cache) }.getOrNull()
         }
 
-        suspend fun saveToCacheAndReturn(path: String, t: PriceTheme?): Pair<String?, PriceTheme?> {
+        val existing = localProductImagePathIfExists(normalizedEan)
+        val cachedHasArt = cachedProduct?.hasArt ?: false
+        // Cache 60 min: imagem fresca é servida direto — MAS só quando já tem arte, porque a
+        // arte pode ter sido gerada depois da última consulta (geração roda em background no
+        // srv-mupa). Sem arte ainda, cai no fluxo abaixo mesmo com foto fresca: o passo 0 dali
+        // faz um GET barato só pra checar se a arte já ficou pronta, sem rebaixar a foto de novo
+        // (downloadProductImageIfNeeded já reaproveita o arquivo fresco internamente).
+        if (existing != null && isProductImageFresh(normalizedEan) && cachedHasArt) {
+            return@withContext PreloadedImage(existing, null, true)
+        }
+        if (!isOnline) return@withContext PreloadedImage(existing, null, cachedHasArt)
+
+        suspend fun saveToCacheAndReturn(path: String, t: PriceTheme?, hasArt: Boolean): PreloadedImage {
             val cache = db.priceCacheDao().getByEan(normalizedEan)
             if (cache != null) {
                 runCatching {
                     val cachedProd = parseProductFromCache(normalizedEan, cache)
                     if (cachedProd != null) {
-                        val updatedProd = cachedProd.copy(image = path, theme = t ?: cachedProd.theme)
+                        val updatedProd = cachedProd.copy(image = path, theme = t ?: cachedProd.theme, hasArt = hasArt)
                         db.priceCacheDao().upsert(
                             PriceCacheEntity(
                                 ean = normalizedEan,
@@ -980,14 +1007,57 @@ class PriceQueryEngine(
                     }
                 }
             }
-            return path to t
+            return PreloadedImage(path, t, hasArt)
+        }
+
+        // 0. Arte publicitária gerada por IA (produtos-imgs/Gemini, srv-mupa). Quando existe,
+        // tem prioridade sobre qualquer outra fonte de imagem — é a peça de campanha completa,
+        // com espaço reservado para o badge de preço ser sobreposto (ver PlayerActivity).
+        // É uma funcionalidade exclusiva da Mupa, então sempre consulta o endpoint fixo,
+        // independente de haver um step "lookup_image" customizado por integração.
+        val step3 = config.steps.firstOrNull { it.type == "lookup_image" }
+        var meta = fetchProductImageMeta(ean = normalizedEan, step = step3)
+        if (meta?.arteUrl.isNullOrBlank() && step3 != null) {
+            meta = fetchProductImageMeta(ean = normalizedEan, step = null)
+        }
+        val arteUrl = meta?.arteUrl
+        if (!arteUrl.isNullOrBlank()) {
+            // Chave de cache própria ("_arte"): a foto crua e a arte do mesmo EAN não podem
+            // dividir o arquivo "$ean.webp" — se a crua já tiver sido baixada e estiver fresca
+            // (<60min), downloadProductImageIfNeeded reaproveitaria o arquivo errado (a crua)
+            // achando que já é a arte.
+            // A arte vira o fundo da tela toda — usa o maior lado da tela do próprio aparelho
+            // como teto de resolução, em vez do teto de 512px pensado pra thumbnail de produto,
+            // senão fica visivelmente pixelizada ao esticar de volta pro tamanho da tela.
+            val screenMaxDim = maxOf(
+                context.resources.displayMetrics.widthPixels,
+                context.resources.displayMetrics.heightPixels,
+            )
+            val arteLocal = runCatching {
+                downloadProductImageIfNeeded(ean = "${normalizedEan}_arte", rawUrl = arteUrl, maxDim = screenMaxDim)
+            }.getOrNull()
+            if (arteLocal != null) {
+                val arteTheme =
+                    meta?.let {
+                        PriceTheme(signature = it.signature, light = it.light, dark = it.dark)
+                    }?.takeIf { it.signature != null || it.dark != null || it.light != null }
+                return@withContext saveToCacheAndReturn(arteLocal, arteTheme, true)
+            }
         }
 
         // 1. Prioritize client-provided remote image URL
         val clientImageUrl = cachedProduct?.clientImageUrl
         if (!clientImageUrl.isNullOrBlank() && clientImageUrl.startsWith("http")) {
             val clientLocal = runCatching { downloadProductImageIfNeeded(ean = normalizedEan, rawUrl = clientImageUrl) }.getOrNull()
-            if (clientLocal != null) return@withContext saveToCacheAndReturn(clientLocal, null)
+            if (clientLocal != null) {
+                // A foto veio direto da API própria do cliente (não da Mupa), então srv-mupa
+                // ainda não tem essa imagem nem a arte publicitária dela — mesmo tratamento já
+                // dado ao Komprão logo abaixo: dispara em background o upload + geração da arte
+                // (o endpoint grava a foto crua também, se ainda não tiver), pra que a PRÓXIMA
+                // consulta desse EAN (passo 0 acima) já encontre 'imagem_url_arte' pronta.
+                requestArtGeneration(ean = normalizedEan, imagePath = clientLocal)
+                return@withContext saveToCacheAndReturn(clientLocal, null, false)
+            }
         }
 
         // 2. Alternative search for Komprão (OnWay SKU image API)
@@ -1002,7 +1072,14 @@ class PriceQueryEngine(
                     downloadProductImageIfNeeded(ean = normalizedEan, rawUrl = kompraoUrl, headers = headers)
                 }.getOrNull()
                 Log.d("MPlayerPrice", "komprao_image sku=$sku ok=${kompraoLocal != null}")
-                if (kompraoLocal != null) return@withContext saveToCacheAndReturn(kompraoLocal, null)
+                if (kompraoLocal != null) {
+                    // A foto veio da API própria do Komprão (não da Mupa), então srv-mupa ainda
+                    // não tem essa imagem nem a arte publicitária dela. Dispara em background o
+                    // upload + geração da arte, pra que a PRÓXIMA consulta (passo 0 acima) já
+                    // encontre 'imagem_url_arte' pronta e mostre o layout novo com o preço.
+                    requestArtGeneration(ean = normalizedEan, imagePath = kompraoLocal)
+                    return@withContext saveToCacheAndReturn(kompraoLocal, null, false)
+                }
             } else {
                 Log.w("MPlayerPrice", "komprao_image_skip sku=$sku hasToken=${token.isNotBlank()}")
             }
@@ -1011,15 +1088,12 @@ class PriceQueryEngine(
         // 3. Fallback to normal VTEX and Mupa image flow
         val vtexUrl = fetchVtexImageUrlFromApiProdutos(ean = normalizedEan)
         val vtexLocal = vtexUrl?.let { downloadProductImageIfNeeded(ean = normalizedEan, rawUrl = it) }
-        if (vtexLocal != null) return@withContext saveToCacheAndReturn(vtexLocal, null)
+        if (vtexLocal != null) return@withContext saveToCacheAndReturn(vtexLocal, null, false)
 
-        // 2ª opção garantida: API de imagem da Mupa (srv-mupa). Tenta primeiro o step
-        // "lookup_image" do config (se houver) e, se ele não trouxer imagem, cai SEMPRE no
-        // srv-mupa hardcoded — assim o fallback da Mupa acontece independente do config.
-        val step3 = config.steps.firstOrNull { it.type == "lookup_image" }
-        var meta = fetchProductImageMeta(ean = normalizedEan, step = step3)
+        // 2ª opção garantida: imagem crua da API da Mupa (srv-mupa), reaproveitando o 'meta'
+        // já buscado no passo 0 acima (evita uma segunda chamada de rede quando possível).
         var mupaLocal = meta?.imageUrl?.let { downloadProductImageIfNeeded(ean = normalizedEan, rawUrl = it) }
-        if (mupaLocal == null && step3 != null) {
+        if (mupaLocal == null && step3 != null && meta?.imageUrl == null) {
             val fallbackMeta = fetchProductImageMeta(ean = normalizedEan, step = null)
             val fallbackLocal = fallbackMeta?.imageUrl?.let { downloadProductImageIfNeeded(ean = normalizedEan, rawUrl = it) }
             if (fallbackLocal != null) {
@@ -1035,12 +1109,44 @@ class PriceQueryEngine(
                     dark = it.dark,
                 )
             }?.takeIf { it.signature != null || it.dark != null || it.light != null }
-        if (mupaLocal != null) return@withContext saveToCacheAndReturn(mupaLocal, theme)
+        if (mupaLocal != null) return@withContext saveToCacheAndReturn(mupaLocal, theme, false)
 
         // Todas as fontes falharam: registra o EAN para um técnico resolver manualmente depois.
         // Fire-and-forget — não afeta o retorno nem a velocidade da consulta de preço.
         reportMissingImage(normalizedEan)
-        null to null
+        PreloadedImage(null, null, false)
+    }
+
+    /**
+     * Envia a foto crua já baixada (ex.: da API própria do Komprão) pro srv-mupa gerar e salvar
+     * a arte publicitária do produto. Fire-and-forget em [analyticsScope]: não bloqueia nem
+     * atrasa a consulta de preço em andamento — o resultado só é aproveitado na próxima consulta
+     * desse EAN, quando o passo 0 de [preloadProductImageAndTheme] encontrar 'imagem_url_arte'.
+     */
+    private fun requestArtGeneration(ean: String, imagePath: String) {
+        analyticsScope.launch {
+            runCatching {
+                val file = File(imagePath)
+                if (!file.exists() || file.length() <= 0L) return@launch
+                val mime =
+                    when (file.extension.lowercase(Locale.ROOT)) {
+                        "png" -> "image/png"
+                        "jpg", "jpeg" -> "image/jpeg"
+                        else -> "image/webp"
+                    }
+                val baseUrl = SettingsManager(context).getImageServerBaseUrl()
+                val url = "$baseUrl/produto-imagem/$ean/gerar-arte"
+                val req = Request.Builder()
+                    .url(url)
+                    .post(file.readBytes().toRequestBody(mime.toMediaType()))
+                    .build()
+                httpArtUpload.newCall(req).execute().use { resp ->
+                    Log.i("MPlayerPrice", "art_generation_request ean=$ean status=${resp.code}")
+                }
+            }.onFailure {
+                Log.w("MPlayerPrice", "art_generation_request_failed ean=$ean err=${it.message}")
+            }
+        }
     }
 
     /** Registra localmente que [ean] está sem imagem em nenhuma fonte; sincronizado com o backend depois, em lote. */
@@ -1107,13 +1213,22 @@ class PriceQueryEngine(
         recovered
     }
 
-    private fun fetchProductImageMeta(ean: String, step: PriceStep?): ProductImageMeta? {
+    private suspend fun fetchProductImageMeta(ean: String, step: PriceStep?): ProductImageMeta? {
         return runCatching {
+            fetchProductImageMetaInner(ean, step)
+        }.onFailure {
+            Log.w("MPlayerScan", "fetch_image_meta_failed ean=$ean step=${step?.type} err=${it.javaClass.simpleName}:${it.message}")
+        }.getOrNull()
+    }
+
+    private suspend fun fetchProductImageMetaInner(ean: String, step: PriceStep?): ProductImageMeta? {
+        return run {
             val resp =
                 if (step != null) {
                     executeStep(step, JSONObject().put("ean", ean))
                 } else {
-                    val url = "http://srv-mupa.ddns.net:5050/produto-imagem/$ean"
+                    val baseUrl = SettingsManager(context).getImageServerBaseUrl()
+                    val url = "$baseUrl/produto-imagem/$ean"
                     val req = Request.Builder()
                         .url(url)
                         .header("accept", "application/json")
@@ -1127,18 +1242,20 @@ class PriceQueryEngine(
                 }
 
             val imageUrl = normalizeExternalUrl(resp.optString("imagem_url", "").trim()).ifBlank { null }
+            val arteUrl = normalizeExternalUrl(resp.optString("imagem_url_arte", "").trim()).ifBlank { null }
             val signature = resp.optString("cor_assinatura_produto", "").trim().ifBlank { null }
             val legibility = resp.optString("fundo_legibilidade", "").trim().ifBlank { null }
             val light = resp.optString("cor_dominante_claro", "").trim().ifBlank { null }
             val dark = resp.optString("cor_dominante_escuro", "").trim().ifBlank { null }
             ProductImageMeta(
                 imageUrl = imageUrl,
+                arteUrl = arteUrl,
                 signature = signature,
                 legibility = legibility,
                 light = light,
                 dark = dark,
             )
-        }.getOrNull()
+        }
     }
 
     private fun productsDir(): File {
@@ -1287,7 +1404,12 @@ class PriceQueryEngine(
     private fun downloadProductImageIfNeeded(
         ean: String,
         rawUrl: String,
-        headers: Map<String, String>? = null
+        headers: Map<String, String>? = null,
+        // Fotos de produto (pequenas, mostradas ao lado de texto) não precisam de mais que isso.
+        // A arte publicitária é passada à parte com um valor bem maior — ela vira o FUNDO DA TELA
+        // TODA, então rebaixar pra 512px (pensado pra thumbnail) deixava a arte visivelmente
+        // pixelizada quando esticada de volta pro tamanho da tela.
+        maxDim: Int = 512,
     ): String? {
         val url = normalizeExternalUrl(rawUrl).trim()
         if (url.isBlank()) return null
@@ -1313,7 +1435,6 @@ class PriceQueryEngine(
 
             val w = bmp.width.coerceAtLeast(1)
             val h = bmp.height.coerceAtLeast(1)
-            val maxDim = 512
             val scale =
                 if (w <= maxDim && h <= maxDim) {
                     1f
@@ -1396,7 +1517,6 @@ class PriceQueryEngine(
             return rawTarget.takeIf { it.exists() && it.length() > 0L }?.absolutePath
         }
 
-        val maxDim = 512
         val w = bmp.width.coerceAtLeast(1)
         val h = bmp.height.coerceAtLeast(1)
         val scale =
@@ -1573,6 +1693,7 @@ class PriceQueryEngine(
                 offline = o.optBoolean("offline", false),
                 priceSlots = priceSlots,
                 xmlLayoutType = o.optString("xmlLayoutType", "").ifBlank { o.optString("xml_layout_type", "").ifBlank { null } },
+                hasArt = o.optBoolean("hasArt", false),
             )
         }.getOrNull()
     }
@@ -1875,6 +1996,7 @@ class PriceQueryEngine(
             .put("offline", product.offline)
             .put("price_slots", priceSlots)
             .put("xmlLayoutType", product.xmlLayoutType)
+            .put("hasArt", product.hasArt)
     }
 
     private fun parseBoolean(v: Any?): Boolean {

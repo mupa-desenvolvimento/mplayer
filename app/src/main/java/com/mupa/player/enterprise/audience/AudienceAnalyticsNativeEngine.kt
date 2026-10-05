@@ -13,6 +13,8 @@ import com.google.mlkit.vision.face.FaceDetectorOptions
 import com.google.mlkit.vision.face.FaceLandmark
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.tensorflow.lite.Interpreter
 import java.io.File
@@ -38,6 +40,7 @@ class AudienceAnalyticsNativeEngine(
     // pode ser chamado concorrentemente — acesso concorrente ao interpreter causava o SIGSEGV
     // nativo. Serializamos toda chamada ao modelo por este lock.
     private val ageGenderLock = Any()
+    private val faceDetectorLock get() = Companion.faceDetectorLock
 
     // Estado de atenção por pessoa, indexado pelo trackingId ESTÁVEL do ML Kit (não mais por
     // embedding do TFLite, que estava desativado e fazia o id "pular" a cada frame).
@@ -127,7 +130,19 @@ class AudienceAnalyticsNativeEngine(
 
         val inputImage = InputImage.fromBitmap(rotatedBitmap, 0)
         val faces = try {
-            detector.process(inputImage).awaitTask()
+            // O detector de rosto do ML Kit também roda sobre TensorFlow Lite nativo (mesma
+            // libtensorflowlite_jni.so do Interpreter de idade/gênero) — assim como aquele já
+            // precisou de ageGenderLock pra não crashar com chamadas concorrentes (SIGSEGV
+            // nativo), esta chamada precisa da mesma serialização. Usa Mutex (não synchronized)
+            // porque awaitTask() é suspend e pode retomar em outra thread — um lock de monitor
+            // JVM não é seguro atravessando um ponto de suspensão. O lock é no companion object
+            // (compartilhado entre todas as instâncias do engine, não por instância) porque o
+            // FaceDetector do ML Kit compartilha estado nativo entre instâncias no mesmo
+            // processo — inclusive entre o pipeline principal e telas de teste como
+            // FaceRecognitionTestActivity, que instanciam seu próprio AudienceAnalyticsNativeEngine.
+            faceDetectorLock.withLock {
+                detector.process(inputImage).awaitTask()
+            }
         } catch (e: Exception) {
             e.printStackTrace()
             if (!rotatedBitmap.isRecycled) {
@@ -296,10 +311,23 @@ class AudienceAnalyticsNativeEngine(
     }
 
     suspend fun release() = withContext(Dispatchers.IO) {
-        faceDetector?.close()
-        faceDetector = null
-        ageGenderInterpreter?.close()
-        ageGenderInterpreter = null
+        // Chamado por AudienceAnalyticsManager.stop() — que dispara isso logo depois de
+        // desligar a câmera, SEM esperar um frame que já estava em voo (lançado em
+        // scope.launch a partir do onImage anterior) terminar de processar. Sem os locks
+        // abaixo, close() podia liberar os recursos nativos do Interpreter/FaceDetector
+        // enquanto esse frame ainda estava DENTRO da chamada nativa (runForMultipleInputsOutputs
+        // / process) em outra thread — use-after-free clássico, causa raiz de um SIGSEGV
+        // recorrente em libtensorflowlite_jni.so. Os mesmos locks usados nas chamadas de
+        // inferência garantem que close() só acontece depois que qualquer inferência em
+        // andamento termina (o release fica no máximo um frame mais lento, nunca crasha).
+        faceDetectorLock.withLock {
+            faceDetector?.close()
+            faceDetector = null
+        }
+        synchronized(ageGenderLock) {
+            ageGenderInterpreter?.close()
+            ageGenderInterpreter = null
+        }
         faceRecInterpreter?.close()
         faceRecInterpreter = null
     }
@@ -362,5 +390,14 @@ class AudienceAnalyticsNativeEngine(
             deferred.completeExceptionally(exception)
         }
         return deferred.await()
+    }
+
+    companion object {
+        // Compartilhado entre TODAS as instâncias de AudienceAnalyticsNativeEngine no processo
+        // (não por instância) — o FaceDetector do ML Kit compartilha estado nativo entre
+        // instâncias, e há mais de um ponto no app que cria seu próprio engine (o pipeline
+        // principal de audiência e a tela de teste FaceRecognitionTestActivity). Um Mutex por
+        // instância não protegeria contra as duas rodando ao mesmo tempo.
+        private val faceDetectorLock = Mutex()
     }
 }

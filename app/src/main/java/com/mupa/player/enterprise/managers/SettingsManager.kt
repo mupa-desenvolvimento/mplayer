@@ -47,6 +47,8 @@ class SettingsManager(private val context: Context) {
         val heartbeatIdleMinutes = intPreferencesKey("heartbeat_idle_minutes")
         val priceHost = stringPreferencesKey("price_host")
         val pricePort = stringPreferencesKey("price_port")
+        val imageHost = stringPreferencesKey("image_host")
+        val imagePort = stringPreferencesKey("image_port")
     }
 
     val settingsFlow: Flow<AppSettings> =
@@ -136,6 +138,32 @@ class SettingsManager(private val context: Context) {
         return context.settingsDataStore.data.first()[Keys.tcServerAddress]?.trim().orEmpty()
     }
 
+    suspend fun setImageHost(value: String) {
+        persistString(Keys.imageHost, LEGACY_KEY_IMAGE_HOST, value.trim())
+    }
+
+    suspend fun getImageHost(): String {
+        return context.settingsDataStore.data.first()[Keys.imageHost]?.trim()
+            ?: legacyPrefs.getString(LEGACY_KEY_IMAGE_HOST, "") ?: ""
+    }
+
+    suspend fun setImagePort(value: String) {
+        persistString(Keys.imagePort, LEGACY_KEY_IMAGE_PORT, value.trim())
+    }
+
+    suspend fun getImagePort(): String {
+        return context.settingsDataStore.data.first()[Keys.imagePort]?.trim()
+            ?: legacyPrefs.getString(LEGACY_KEY_IMAGE_PORT, "") ?: ""
+    }
+
+    /** Base URL do servidor produtos-imgs (ex.: http://192.168.6.219:5050 pra testar num
+     * servidor de desenvolvimento, ou o srv-mupa de produção por padrão). */
+    suspend fun getImageServerBaseUrl(): String {
+        val host = getImageHost().ifBlank { DEFAULT_IMAGE_HOST }
+        val port = getImagePort().ifBlank { DEFAULT_IMAGE_PORT }
+        return "http://$host:$port"
+    }
+
     suspend fun setGertecScannerEnabled(enabled: Boolean) {
         // Persiste no DataStore E no SharedPreferences (legacyPrefs). O DataStore pode ser
         // resetado por corrupção em reboot abrupto (ReplaceFileCorruptionHandler -> vazio); o
@@ -144,8 +172,10 @@ class SettingsManager(private val context: Context) {
     }
 
     suspend fun getGertecScannerEnabled(): Boolean {
+        // Padrão TRUE: o leitor Gertec deve ficar sempre ativo, pronto pra ler o código de
+        // barras, sem precisar de ativação manual em Configurações.
         return context.settingsDataStore.data.first()[Keys.gertecScannerEnabled]
-            ?: legacyPrefs.getBoolean(LEGACY_KEY_GERTEC_SCANNER_ENABLED, false)
+            ?: legacyPrefs.getBoolean(LEGACY_KEY_GERTEC_SCANNER_ENABLED, true)
     }
 
     suspend fun setImageSearchEnabled(enabled: Boolean) {
@@ -202,6 +232,8 @@ class SettingsManager(private val context: Context) {
         private const val DEFAULT_SERVER_URL = "https://midias.mupa.app"
         private const val DEFAULT_ENVIRONMENT = "prod"
         private const val DEFAULT_PRICE_PORT = "8000"
+        private const val DEFAULT_IMAGE_HOST = "srv-mupa.ddns.net"
+        private const val DEFAULT_IMAGE_PORT = "5050"
 
         private const val LEGACY_PREFS_NAME = "mupa_settings_legacy"
         private const val LEGACY_KEY_SERVER_URL = "server_url"
@@ -215,6 +247,8 @@ class SettingsManager(private val context: Context) {
         private const val LEGACY_KEY_GERTEC_SCANNER_ENABLED = "gertec_scanner_enabled"
         private const val LEGACY_KEY_PRICE_HOST = "price_host"
         private const val LEGACY_KEY_PRICE_PORT = "price_port"
+        private const val LEGACY_KEY_IMAGE_HOST = "image_host"
+        private const val LEGACY_KEY_IMAGE_PORT = "image_port"
 
         private const val ANDROID_ID_BUG = "9774d56d682e549c"
 

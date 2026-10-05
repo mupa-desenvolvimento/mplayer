@@ -220,6 +220,10 @@ dependencies {
     add("modernImplementation", project(":engage-ui"))
     add("modernImplementation", project(":engage-vision"))
 
+    // komprao também usa activity_camera_test.xml (mesmo layout do flavor modern) e precisa
+    // da mesma dependência de engage-ui para o ViewBinding compilar (GestureOverlayView).
+    add("kompraoImplementation", project(":engage-ui"))
+
     // Unit testing dependencies
     testImplementation("junit:junit:4.13.2")
     testImplementation("io.mockk:mockk:1.13.10")

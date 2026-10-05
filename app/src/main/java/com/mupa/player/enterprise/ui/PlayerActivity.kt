@@ -102,6 +102,11 @@ import androidx.core.widget.TextViewCompat
 import android.widget.TextView
 import android.widget.ImageView
 import android.widget.LinearLayout
+import androidx.constraintlayout.widget.Guideline
+import android.widget.FrameLayout
+import android.text.style.RelativeSizeSpan
+import android.text.style.AbsoluteSizeSpan
+import android.text.style.ForegroundColorSpan
 import android.graphics.Paint
 import android.view.LayoutInflater
 import com.mupa.player.enterprise.R
@@ -139,6 +144,9 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private lateinit var binding: ActivityPlayerBinding
+
+    /** Tag do badge de preço sobreposto na arte publicitária (ver [updatePriceBadge]). */
+    private val PRICE_ART_BADGE_TAG = "price_art_badge"
     private lateinit var deviceId: String
     private lateinit var playerEngine: PlayerEngine
     private val barcodeSimulationReceiver = object : BroadcastReceiver() {
@@ -2234,7 +2242,11 @@ class PlayerActivity : ComponentActivity() {
                 // velha na hora (rápido) e atualiza com fade quando a nova chega.
                 val imageSearchEnabled = runCatching { SettingsManager(applicationContext).getSettings().imageSearchEnabled }.getOrElse { true }
                 val imageStale = !localPath.isNullOrBlank() && (engine?.isProductImageStale(expectedEan) == true)
-                val needsBackgroundImageFetch = imageSearchEnabled && (localPath.isNullOrBlank() || imageStale)
+                // Mesmo com foto local fresca, sem arte ainda vale a pena checar em background —
+                // a arte pode ter sido gerada depois da última consulta (ver
+                // PriceQueryEngine.preloadProductImageAndTheme, que só re-baixa a foto se
+                // realmente precisar).
+                val needsBackgroundImageFetch = imageSearchEnabled && (localPath.isNullOrBlank() || imageStale || !product.hasArt)
                 var finalImagePath: String? = localPath
                 val finalTheme: PriceTheme? = product.theme
 
@@ -2372,9 +2384,11 @@ class PlayerActivity : ComponentActivity() {
                         )
                         val imgView = binding.priceResultRoot.findViewById<ImageView>(R.id.priceProductImage)
                         prepared.drawable?.let { imgView?.setImageDrawable(it) }
+                        updatePriceBadge(imgView, updatedProduct, updatedProduct.hasArt, prepared)
                     } else {
                         val imgView = binding.priceResultRoot.findViewById<ImageView>(R.id.priceProductImage)
                         imgView?.setImageResource(com.mupa.player.enterprise.R.drawable.ic_mplayer)
+                        updatePriceBadge(imgView, updatedProduct, false, null)
                     }
 
                     applyThemeColors(binding.priceResultRoot, updatedProduct, priceConfig?.layout)
@@ -2469,14 +2483,19 @@ class PlayerActivity : ComponentActivity() {
                 // e atualiza a tela com fade se o produto ainda estiver visível
                 if (needsBackgroundImageFetch && engine != null && cfg != null) {
                     launch(Dispatchers.IO) {
-                        val (downloadedPath, lateTheme) =
+                        val preloaded =
                             runCatching {
                                 engine.preloadProductImageAndTheme(
                                     ean = expectedEan,
                                     config = cfg,
                                     isOnline = isOnline(),
                                 )
-                            }.getOrNull() ?: (null to null)
+                            }.onFailure {
+                                Log.w("MPlayerScan", "bg_image_fetch_exception ean=$expectedEan err=${it.javaClass.simpleName}:${it.message}")
+                            }.getOrNull()
+                        val downloadedPath = preloaded?.path
+                        val lateTheme = preloaded?.theme
+                        val lateHasArt = preloaded?.hasArt ?: false
                         if (downloadedPath.isNullOrBlank()) return@launch
 
                         val preparedLate = prepareOverlayFromImage(url = downloadedPath, theme = lateTheme ?: product.theme)
@@ -2503,6 +2522,7 @@ class PlayerActivity : ComponentActivity() {
                                     animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(320).start()
                                 }
                             }
+                            updatePriceBadge(imgView, product.copy(hasArt = lateHasArt), lateHasArt, preparedLate)
                         }
                     }
                 }
@@ -3042,6 +3062,269 @@ class PlayerActivity : ComponentActivity() {
             setColor(color)
             cornerRadius = radiusDp * resources.displayMetrics.density
         }
+    }
+
+    /**
+     * Adiciona (ou remove) um badge de preço sobreposto sobre [imgView], usado somente quando
+     * a imagem exibida é a arte publicitária gerada por IA ([hasArt] = true) — a arte já reserva
+     * o canto inferior esquerdo livre de elementos justamente para este badge (ver backend
+     * produtos-imgs: gerar_arte_publicitaria/ARTE_PROMPT_TEMPLATE). As cores do badge vêm da
+     * paleta já extraída da própria imagem ([prepared]), para sempre combinar com a arte exibida.
+     * Sem arte, remove qualquer badge existente e não faz mais nada — comportamento inalterado.
+     */
+    private fun updatePriceBadge(
+        imgView: ImageView?,
+        product: PriceProduct,
+        hasArt: Boolean,
+        prepared: PreparedOverlay?,
+    ) {
+        if (imgView == null) return
+        val parent = imgView.parent as? ViewGroup ?: return
+
+        // Remove qualquer badge de uma renderização anterior deste mesmo produto (o render
+        // inicial e o fade-in tardio da imagem podem chamar esta função duas vezes em sequência).
+        for (i in parent.childCount - 1 downTo 0) {
+            if (parent.getChildAt(i).tag == PRICE_ART_BADGE_TAG) {
+                parent.removeViewAt(i)
+            }
+        }
+
+        // Com arte, TUDO do layout original (painel esquerdo, barras de preço nativas etc.) some
+        // — a própria arte já traz nome + preço embutidos — e a imagem ocupa a tela toda, borda a
+        // borda, cobrindo qualquer outro elemento por baixo. Sem arte, cada view volta exatamente
+        // ao estado (constraints + padding) que tinha antes desta função mexer nela — guardado na
+        // 1ª vez, então funciona igual em qualquer um dos vários layouts de preço, não só no
+        // split de duas colunas.
+        val leftPanel = binding.priceResultRoot.findViewById<View>(R.id.priceLeftPanel)
+        leftPanel?.visibility = if (hasArt) View.GONE else View.VISIBLE
+        val rightPanel = binding.priceResultRoot.findViewById<View>(R.id.priceRightPanel)
+        rightPanel?.let { makeFullBleed(it, hasArt) }
+
+        // FIT_CENTER em vez de CENTER_CROP (pedido do usuário): a arte NUNCA pode passar das
+        // bordas da tela — CENTER_CROP cobre a tela toda mas corta simetricamente o que sobra da
+        // proporção (a arte é sempre 1280x800 — resolução real do terminal físico, mas pode não
+        // bater exata em terminais com outra resolução),
+        // e esse corte já comeu conteúdo real (ex.: os ícones de benefício encostados na borda
+        // direita ficavam parcialmente cortados numa tela 1280x800). FIT_CENTER garante a arte
+        // inteira sempre visível, com uma tarja (letterbox) em vez de corte quando a proporção não
+        // bate — e como o fator de escala do FIT_CENTER é sempre <= o do CENTER_CROP (escala pelo
+        // menor lado, não pelo maior), nunca amplia mais do que amplicava antes, ou seja, nunca
+        // piora a qualidade percebida.
+        imgView.scaleType = ImageView.ScaleType.FIT_CENTER
+
+        if (!hasArt) return
+        val price = product.pricePromotional ?: product.price ?: return
+        if (price <= 0.0) return
+
+        // "secondary" é a cor vibrante/saturada da paleta (Palette.getVibrantColor, com
+        // getMutedColor só como reserva) — usada ANTES de "dominant" (que é só a cor mais
+        // frequente da imagem, quase sempre um tom neutro de fundo) pra o card de preço se
+        // destacar de verdade em vez de ficar esmaecido/sem graça.
+        val badgeColor = prepared?.secondary ?: prepared?.dominant ?: Color.parseColor("#DC2626")
+        val textColor = idealTextColor(badgeColor)
+
+        // Até 3 níveis de preço (ex.: "Preço Normal" + "OFERTA" + "Oferta Clube K") — o mesmo
+        // `prices[]` que a API do Komprão retorna. Era `take(2)` até um produto real (Perdigão
+        // Pizza Calabresa Moída, EAN 7891515555917) mostrar que isso descartava silenciosamente
+        // a 3ª faixa (tipicamente a oferta clube, o preço mais baixo dos três) sempre que a API
+        // retornava PRECO_NORMAL + PRECO_PDV + PRECO_CLUBE_KOCH juntos. Sem priceSlots
+        // (integrações mais simples), cai no preço único de sempre.
+        val slots = product.priceSlots?.filter { it.value > 0.0 }?.take(3)
+        val rows: List<Pair<String?, Double>> =
+            if (!slots.isNullOrEmpty()) {
+                slots.map { it.label to it.value }
+            } else {
+                listOf(null to price)
+            }
+
+        val container = LinearLayout(this).apply {
+            tag = PRICE_ART_BADGE_TAG
+            orientation = LinearLayout.VERTICAL
+            setPadding(dpToPx(18), dpToPx(14), dpToPx(18), dpToPx(14))
+            background = roundedBg(badgeColor, radiusDp = 16f)
+            elevation = dpToPx(32).toFloat()
+        }
+
+        rows.forEachIndexed { index, (label, value) ->
+            if (index > 0) {
+                // "match_parent" dentro de um LinearLayout "wrap_content" mede contra a TELA, não
+                // contra os irmãos — estica o card inteiro. Por isso medimos a largura que o card
+                // JÁ tem (só com a 1ª linha) e damos essa largura fixa ao divisor.
+                container.measure(
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+                )
+                val dividerWidth = container.measuredWidth
+                container.addView(
+                    View(this).apply {
+                        setBackgroundColor(adjustAlpha(textColor, 0.28f))
+                    },
+                    LinearLayout.LayoutParams(dividerWidth, dpToPx(1)).apply {
+                        topMargin = dpToPx(8)
+                        bottomMargin = dpToPx(8)
+                    },
+                )
+            }
+            // A 2ª e a 3ª linha (atacado/clube) são sempre um pouco menores que a primeira, pra
+            // deixar clara a hierarquia entre o preço principal e os secundários.
+            val scale = if (index == 0) 1f else 0.78f
+            if (!label.isNullOrBlank()) {
+                container.addView(
+                    MaterialTextView(this).apply {
+                        text = label
+                        setTextColor(adjustAlpha(textColor, 0.9f))
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f * scale)
+                        includeFontPadding = false
+                    },
+                )
+            }
+            container.addView(
+                MaterialTextView(this).apply {
+                    text = buildPriceSpannable(
+                        value = value,
+                        textColor = textColor,
+                        cifraoSp = 19.8f * scale,
+                        valueSp = 105.6f * scale,
+                        decimalsSp = 52.8f * scale,
+                    )
+                    typeface = BrandTypography.poppinsExtraBold(this@PlayerActivity)
+                        ?: android.graphics.Typeface.create(typeface, android.graphics.Typeface.BOLD)
+                    includeFontPadding = false
+                },
+            )
+        }
+
+        parent.addView(
+            container,
+            FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+        )
+
+        imgView.post {
+            if (container.tag != PRICE_ART_BADGE_TAG || container.parent == null) return@post
+            if (imgView.width <= 0 || imgView.height <= 0) return@post
+            // A arte é sempre gerada em 1280x800 (produtos-imgs: ARTE_LARGURA_HORIZONTAL /
+            // ARTE_ALTURA_HORIZONTAL), com o texto (nome/descrição) desenhado a partir de uma
+            // margem de 6% dessa largura (`margin = width * 0.06` em compor_texto_na_arte). O
+            // ImageView usa FIT_CENTER (a arte nunca pode passar da borda da tela) — escala pelo
+            // MENOR fator entre largura/altura da view e centraliza o resultado, sobrando uma
+            // tarja (letterbox) de cada lado no eixo que não bateu a proporção. Usar só
+            // "imgView.width * fração" pra posicionar o preço IGNORA essa tarja: o card ficaria
+            // desalinhado com o texto desenhado na arte, que está relativo à imagem, não à view.
+            val arteLarguraOriginal = 1280f
+            val arteAlturaOriginal = 800f
+            val escalaFitCenter = minOf(imgView.width / arteLarguraOriginal, imgView.height / arteAlturaOriginal)
+            val tarjaEsquerda = (imgView.width - arteLarguraOriginal * escalaFitCenter) / 2f
+            val margemTextoNaArte = 0.06f
+            container.x = imgView.left + tarjaEsquerda + arteLarguraOriginal * margemTextoNaArte * escalaFitCenter
+            // Card de preço ancorado pelo TOPO na metade vertical da tela + 50px (pedido do
+            // usuário, com referência visual) — não mais ancorado perto da base (92% da altura).
+            // Usa imgView.height (a tela toda), não a altura da arte, porque é isso que "metade
+            // da tela" significa; com a arte casando 1:1 com a tela (ver seção de tamanho fixo em
+            // produtos-imgs CLAUDE.md) as duas métricas coincidem de qualquer forma.
+            //
+            // Ancorado pelo TOPO (não pelo centro) de propósito: com produtos de 3 faixas de
+            // preço (normal + oferta + clube — ver ProductPriceSlot em PriceQueryEngine.kt) o
+            // card fica mais alto, e centralizar pelo meio do card fazia o TOPO subir e invadir a
+            // 2ª linha da descrição do produto acima. Ancorando pelo topo, o card sempre começa
+            // no mesmo Y e cresce pra baixo conforme o número de faixas — nunca invade o texto
+            // acima.
+            //
+            // Mas só ancorar pelo topo criou o problema oposto: com 3 faixas o card fica alto o
+            // bastante pra ULTRAPASSAR a borda inferior da tela (a 3ª linha, "Oferta Clube K",
+            // saía cortada por baixo — confirmado visualmente no teste com o EAN 7891515555917).
+            // yMaximo garante que o card nunca passe da base, com uma margem de segurança —
+            // desliza pra cima só o suficiente pra caber, sem nunca invadir o texto (o texto de
+            // um único produto não chega nem perto da base da tela).
+            val margemInferiorCard = dpToPx(24).toFloat()
+            val yDesejado = imgView.top + imgView.height / 2f + 50f
+            val yMaximo = imgView.top + imgView.height - margemInferiorCard - container.height
+            container.y = minOf(yDesejado, yMaximo)
+        }
+    }
+
+    /** Faz [panel] (o container da imagem/arte, ex.: priceRightPanel) ocupar a tela toda, sem
+     * padding, por cima de qualquer outro elemento ([fullBleed] = true) — ou volta exatamente ao
+     * estado (constraints + padding) que tinha antes desta função mexer nele, guardado em
+     * [panel.tag] na 1ª chamada. Funciona em qualquer layout de preço sem precisar conhecer sua
+     * estrutura original, já que só restaura o que ele mesmo já era. */
+    private fun makeFullBleed(panel: View, fullBleed: Boolean) {
+        val lp = panel.layoutParams as? ConstraintLayout.LayoutParams ?: return
+        if (fullBleed) {
+            if (panel.tag !is FullBleedOriginalState) {
+                panel.tag = FullBleedOriginalState(
+                    params = ConstraintLayout.LayoutParams(lp),
+                    paddingLeft = panel.paddingLeft,
+                    paddingTop = panel.paddingTop,
+                    paddingRight = panel.paddingRight,
+                    paddingBottom = panel.paddingBottom,
+                )
+            }
+            lp.startToStart = ConstraintLayout.LayoutParams.PARENT_ID
+            lp.endToEnd = ConstraintLayout.LayoutParams.PARENT_ID
+            lp.topToTop = ConstraintLayout.LayoutParams.PARENT_ID
+            lp.bottomToBottom = ConstraintLayout.LayoutParams.PARENT_ID
+            lp.startToEnd = ConstraintLayout.LayoutParams.UNSET
+            lp.endToStart = ConstraintLayout.LayoutParams.UNSET
+            panel.layoutParams = lp
+            panel.setPadding(0, 0, 0, 0)
+            panel.bringToFront()
+        } else {
+            val saved = panel.tag as? FullBleedOriginalState ?: return
+            panel.layoutParams = ConstraintLayout.LayoutParams(saved.params)
+            panel.setPadding(saved.paddingLeft, saved.paddingTop, saved.paddingRight, saved.paddingBottom)
+            panel.tag = null
+        }
+    }
+
+    private data class FullBleedOriginalState(
+        val params: ConstraintLayout.LayoutParams,
+        val paddingLeft: Int,
+        val paddingTop: Int,
+        val paddingRight: Int,
+        val paddingBottom: Int,
+    )
+
+    /** Monta "R$ 10,49" com o cifrão pequeno, a parte inteira grande e os centavos reduzidos —
+     * tamanhos absolutos em sp (não relativos ao texto ao redor), pra ficarem consistentes
+     * entre badges de tamanhos de fonte diferentes (preço principal vs. secundário). */
+    private fun buildPriceSpannable(
+        value: Double,
+        textColor: Int,
+        cifraoSp: Float,
+        valueSp: Float,
+        decimalsSp: Float,
+    ): SpannableStringBuilder {
+        val formatted = formatCurrency(value) // ex.: "R$ 10,49"
+        val spannable = SpannableStringBuilder(formatted)
+        spannable.setSpan(ForegroundColorSpan(textColor), 0, formatted.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+
+        fun sizePx(sp: Float) = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, sp, resources.displayMetrics).toInt()
+
+        val separatorIndex = formatted.indexOf(',')
+        val firstSpaceIndex = formatted.indexOf(' ')
+        if (separatorIndex > 0 && firstSpaceIndex in 0 until separatorIndex) {
+            spannable.setSpan(
+                AbsoluteSizeSpan(sizePx(cifraoSp)),
+                0,
+                firstSpaceIndex + 1,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+            )
+            spannable.setSpan(
+                AbsoluteSizeSpan(sizePx(valueSp)),
+                firstSpaceIndex + 1,
+                separatorIndex,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+            )
+            spannable.setSpan(
+                AbsoluteSizeSpan(sizePx(decimalsSp)),
+                separatorIndex,
+                formatted.length,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+            )
+        } else {
+            spannable.setSpan(AbsoluteSizeSpan(sizePx(valueSp)), 0, formatted.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        return spannable
     }
 
     private fun blendColors(a: Int, b: Int, t: Float): Int {

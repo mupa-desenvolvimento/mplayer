@@ -45,6 +45,9 @@ data class PriceProduct(
     val offline: Boolean = false,
     val priceSlots: List<ProductPriceSlot>? = null,
     val xmlLayoutType: String? = null,
+    // true quando `image` aponta para a arte publicitária gerada por IA (produtos-imgs/Gemini),
+    // em vez da foto crua do produto — usado para decidir se o badge de preço sobreposto é exibido.
+    val hasArt: Boolean = false,
 )
 
 data class PriceOffer(

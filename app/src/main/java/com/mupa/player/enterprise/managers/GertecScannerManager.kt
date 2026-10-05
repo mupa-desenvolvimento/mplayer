@@ -153,16 +153,13 @@ class GertecScannerManager(
 
     private fun scheduleNextCycle(ctxRef: WeakReference<Context>) {
         if (started) { arming = false; return } // uma leitura real encerrou o ciclo
-        if (armIteration < ARM_MAX_CYCLES) {
-            val r = Runnable { armCycle(ctxRef) }
-            retryRunnable = r
-            mainHandler.postDelayed(r, REARM_INTERVAL_MS)
-        } else {
-            // Esgotou os ciclos: mantém a última sessão ativa (uma leitura ainda pode confirmar).
-            // Libera arming pra um futuro onResume poder tentar de novo.
-            arming = false
-            Log.w("MPlayerScan", "gertec_sdk_arm esgotou $ARM_MAX_CYCLES ciclos — última sessão mantida")
-        }
+        // Sem teto: o leitor precisa ficar SEMPRE pronto pra ler, então continuamos re-armando
+        // indefinidamente até uma leitura real confirmar a sessão (started = true). Antes disso
+        // parava após ARM_MAX_CYCLES e deixava a última sessão "como estava", o que podia deixar
+        // o leitor morto se nenhum ciclo tivesse pego.
+        val r = Runnable { armCycle(ctxRef) }
+        retryRunnable = r
+        mainHandler.postDelayed(r, REARM_INTERVAL_MS)
     }
 
     private fun cancelPending() {

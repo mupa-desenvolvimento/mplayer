@@ -55,6 +55,15 @@ object BrandTypography {
     private var bebasNeue: Typeface? = null
     private var poppinsBold: Typeface? = null
     private var poppinsThin: Typeface? = null
+    private var poppinsExtraBold: Typeface? = null
+
+    /** Poppins ExtraBold, cacheado — usado pelo preço em destaque sobre a arte publicitária
+     * (ver PlayerActivity.updatePriceBadge), fora da varredura por ID de [applyBrandTypography]
+     * porque esse texto é montado programaticamente, não inflado de XML. */
+    fun poppinsExtraBold(context: Context): Typeface? =
+        poppinsExtraBold ?: runCatching {
+            ResourcesCompat.getFont(context, R.font.poppins_extrabold)
+        }.getOrNull()?.also { poppinsExtraBold = it }
 
     fun applyBrandTypography(root: View, context: Context) {
         val bebas = bebasNeue ?: runCatching {
