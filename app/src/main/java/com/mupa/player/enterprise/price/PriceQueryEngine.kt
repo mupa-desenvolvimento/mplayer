@@ -1015,17 +1015,26 @@ class PriceQueryEngine(
         // com espaço reservado para o badge de preço ser sobreposto (ver PlayerActivity).
         // É uma funcionalidade exclusiva da Mupa, então sempre consulta o endpoint fixo,
         // independente de haver um step "lookup_image" customizado por integração.
+        //
+        // Orientação do terminal (ver isDeviceVertical): o produtos-imgs mantém duas artes
+        // independentes por produto (horizontal <ean>.webp / vertical <ean>_vertical.webp) —
+        // pedimos só a que combina com o terminal físico deste aparelho, nunca as duas.
+        val orientacao = if (isDeviceVertical()) "vertical" else "horizontal"
         val step3 = config.steps.firstOrNull { it.type == "lookup_image" }
-        var meta = fetchProductImageMeta(ean = normalizedEan, step = step3)
+        var meta = fetchProductImageMeta(ean = normalizedEan, step = step3, orientacao = orientacao)
         if (meta?.arteUrl.isNullOrBlank() && step3 != null) {
-            meta = fetchProductImageMeta(ean = normalizedEan, step = null)
+            meta = fetchProductImageMeta(ean = normalizedEan, step = null, orientacao = orientacao)
         }
         val arteUrl = meta?.arteUrl
         if (!arteUrl.isNullOrBlank()) {
-            // Chave de cache própria ("_arte"): a foto crua e a arte do mesmo EAN não podem
-            // dividir o arquivo "$ean.webp" — se a crua já tiver sido baixada e estiver fresca
-            // (<60min), downloadProductImageIfNeeded reaproveitaria o arquivo errado (a crua)
-            // achando que já é a arte.
+            // Chave de cache própria por orientação ("_arte"/"_arte_vertical"): a foto crua e a
+            // arte do mesmo EAN não podem dividir o arquivo "$ean.webp" — se a crua já tiver
+            // sido baixada e estiver fresca (<60min), downloadProductImageIfNeeded reaproveitaria
+            // o arquivo errado (a crua) achando que já é a arte. Pela mesma razão, a arte
+            // horizontal e a vertical do mesmo EAN também não podem dividir chave entre si —
+            // um terminal vertical não pode acabar servindo a arte horizontal cacheada (ou
+            // vice-versa) só porque os dois passaram pelo mesmo aparelho em algum teste.
+            val chaveCacheArte = if (orientacao == "vertical") "${normalizedEan}_arte_vertical" else "${normalizedEan}_arte"
             // A arte vira o fundo da tela toda — usa o maior lado da tela do próprio aparelho
             // como teto de resolução, em vez do teto de 512px pensado pra thumbnail de produto,
             // senão fica visivelmente pixelizada ao esticar de volta pro tamanho da tela.
@@ -1034,7 +1043,7 @@ class PriceQueryEngine(
                 context.resources.displayMetrics.heightPixels,
             )
             val arteLocal = runCatching {
-                downloadProductImageIfNeeded(ean = "${normalizedEan}_arte", rawUrl = arteUrl, maxDim = screenMaxDim)
+                downloadProductImageIfNeeded(ean = chaveCacheArte, rawUrl = arteUrl, maxDim = screenMaxDim)
             }.getOrNull()
             if (arteLocal != null) {
                 val arteTheme =
@@ -1135,7 +1144,8 @@ class PriceQueryEngine(
                         else -> "image/webp"
                     }
                 val baseUrl = SettingsManager(context).getImageServerBaseUrl()
-                val url = "$baseUrl/produto-imagem/$ean/gerar-arte"
+                val orientacao = if (isDeviceVertical()) "vertical" else "horizontal"
+                val url = "$baseUrl/produto-imagem/$ean/gerar-arte" + if (orientacao == "vertical") "?orientacao=vertical" else ""
                 val req = Request.Builder()
                     .url(url)
                     .post(file.readBytes().toRequestBody(mime.toMediaType()))
@@ -1213,22 +1223,24 @@ class PriceQueryEngine(
         recovered
     }
 
-    private suspend fun fetchProductImageMeta(ean: String, step: PriceStep?): ProductImageMeta? {
+    private suspend fun fetchProductImageMeta(ean: String, step: PriceStep?, orientacao: String = "horizontal"): ProductImageMeta? {
         return runCatching {
-            fetchProductImageMetaInner(ean, step)
+            fetchProductImageMetaInner(ean, step, orientacao)
         }.onFailure {
             Log.w("MPlayerScan", "fetch_image_meta_failed ean=$ean step=${step?.type} err=${it.javaClass.simpleName}:${it.message}")
         }.getOrNull()
     }
 
-    private suspend fun fetchProductImageMetaInner(ean: String, step: PriceStep?): ProductImageMeta? {
+    private suspend fun fetchProductImageMetaInner(ean: String, step: PriceStep?, orientacao: String = "horizontal"): ProductImageMeta? {
         return run {
             val resp =
                 if (step != null) {
+                    // Steps de integração são específicos de cada cliente (API própria da loja) —
+                    // não conhecem o conceito de orientação, que é exclusivo do produtos-imgs.
                     executeStep(step, JSONObject().put("ean", ean))
                 } else {
                     val baseUrl = SettingsManager(context).getImageServerBaseUrl()
-                    val url = "$baseUrl/produto-imagem/$ean"
+                    val url = "$baseUrl/produto-imagem/$ean" + if (orientacao == "vertical") "?orientacao=vertical" else ""
                     val req = Request.Builder()
                         .url(url)
                         .header("accept", "application/json")
@@ -1256,6 +1268,18 @@ class PriceQueryEngine(
                 dark = dark,
             )
         }
+    }
+
+    /**
+     * true quando o terminal físico está montado em pé (retrato) — decide se o app pede a arte
+     * publicitária horizontal ou vertical (ver preloadProductImageAndTheme, passo 0). Terminais
+     * de consulta de preço ficam fixos numa orientação (aparafusados no suporte da loja), então
+     * basta olhar a proporção real da tela (`displayMetrics`) em vez de reagir a rotação de
+     * sensor — não existe rotação em tempo real nesse tipo de aparelho.
+     */
+    private fun isDeviceVertical(): Boolean {
+        val metrics = context.resources.displayMetrics
+        return metrics.heightPixels > metrics.widthPixels
     }
 
     private fun productsDir(): File {

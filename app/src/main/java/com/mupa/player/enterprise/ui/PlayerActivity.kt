@@ -414,7 +414,12 @@ class PlayerActivity : ComponentActivity() {
         }
         binding.hiddenBarcodeInput.post { ensureBarcodeFocus() }
         lifecycleScope.launch {
-            val gertecEnabled = runCatching { SettingsManager(applicationContext).getGertecScannerEnabled() }.getOrDefault(false)
+            // SK100/Gertec: pedido do usuário (2026-10-04) — o leitor não pode nunca ficar
+            // desligado nesses terminais, então ignoramos o valor salvo (o toggle em
+            // Configurações vira só um indicador travado pra esse caso — ver SettingsActivity).
+            // Em qualquer outro terminal o comportamento de sempre continua (toggle manual).
+            val gertecEnabled = com.mupa.player.enterprise.managers.GertecScannerManager.isGertecDevice() ||
+                runCatching { SettingsManager(applicationContext).getGertecScannerEnabled() }.getOrDefault(false)
             if (gertecEnabled && !gertecScanner.isStarted()) {
                 // post: garante que a janela já está montada antes do SDK iniciar
                 binding.root.post { gertecScanner.start(this@PlayerActivity) }
@@ -1632,6 +1637,22 @@ class PlayerActivity : ComponentActivity() {
                             ProductPriceSlot(label = "CLUBE 27 UN", value = 2.09, field = "price_club", isPromo = false, isClub = true),
                         ),
                         xmlLayoutType = "universal", packs = emptyList(), theme = null, offline = false
+                    )
+                    true
+                }
+                // Layout vertical (retrato) pensado pro terminal ET45 — mock pra validar o visual
+                // (foto em cima 45% + painel escuro embaixo 55%, badges "LEVE X PAGUE Y" e o card
+                // de pacote com preço por unidade) antes de decidir a seleção automática de layout
+                // por device profile, que ainda não existe (hoje xmlLayoutType só vem do config do
+                // servidor). Reaproveita o EAN do KitKat (já testado no produtos-imgs nesta sessão)
+                // pra puxar a foto real do cache local, se já tiver sido baixada antes.
+                "test_vertical" -> {
+                    mockProduct = PriceProduct(
+                        id = "VERT001", ean = "7891000248768", description = "CHOCOLATE KITKAT 4 FINGERS AO LEITE 41,5G",
+                        price = 6.94, originalPrice = null, clubPrice = null,
+                        offer = PriceOffer(enabled = true, title = "LEVE 3 PAGUE 2", description = null, secondUnit = null, type = "LEVE_PAGUE"),
+                        packs = listOf(PricePack(label = "2 CAP", price = 6.94, unitPrice = 4.63)),
+                        xmlLayoutType = "vertical_image_top", theme = null, offline = false
                     )
                     true
                 }
@@ -3116,12 +3137,24 @@ class PlayerActivity : ComponentActivity() {
         val price = product.pricePromotional ?: product.price ?: return
         if (price <= 0.0) return
 
+        // Layout vertical (terminal em pé, ver price_check_vertical_image_top/bottom.xml) usa uma
+        // arte com composição totalmente diferente da horizontal — cena só na faixa de cima +
+        // painel com nome já desenhado por baixo, reservando uma caixa BRANCA com sombra pro
+        // preço (ver compor_arte_vertical no produtos-imgs). Detecção estrutural (a guideline
+        // 'priceImageSplitGuide' só existe nesses dois layouts), calculada aqui em cima porque
+        // decide o estilo do card de preço logo abaixo (sem fundo colorido próprio — a caixa já
+        // está desenhada na arte, não faz sentido desenhar uma segunda por cima).
+        val isVerticalArtLayout = binding.priceResultRoot.findViewById<View>(R.id.priceImageSplitGuide) != null
+
         // "secondary" é a cor vibrante/saturada da paleta (Palette.getVibrantColor, com
         // getMutedColor só como reserva) — usada ANTES de "dominant" (que é só a cor mais
         // frequente da imagem, quase sempre um tom neutro de fundo) pra o card de preço se
         // destacar de verdade em vez de ficar esmaecido/sem graça.
         val badgeColor = prepared?.secondary ?: prepared?.dominant ?: Color.parseColor("#DC2626")
-        val textColor = idealTextColor(badgeColor)
+        // No vertical o preço é desenhado direto sobre a caixa branca já existente na arte — a
+        // cor do texto é o próprio acento do produto (sem precisar de idealTextColor, que existe
+        // pra garantir contraste contra um fundo variável; aqui o fundo é sempre branco/claro).
+        val textColor = if (isVerticalArtLayout) badgeColor else idealTextColor(badgeColor)
 
         // Até 3 níveis de preço (ex.: "Preço Normal" + "OFERTA" + "Oferta Clube K") — o mesmo
         // `prices[]` que a API do Komprão retorna. Era `take(2)` até um produto real (Perdigão
@@ -3140,9 +3173,16 @@ class PlayerActivity : ComponentActivity() {
         val container = LinearLayout(this).apply {
             tag = PRICE_ART_BADGE_TAG
             orientation = LinearLayout.VERTICAL
-            setPadding(dpToPx(18), dpToPx(14), dpToPx(18), dpToPx(14))
-            background = roundedBg(badgeColor, radiusDp = 16f)
-            elevation = dpToPx(32).toFloat()
+            if (isVerticalArtLayout) {
+                // Sem fundo/elevação próprios — a caixa branca com sombra já está desenhada na
+                // própria arte (compor_arte_vertical); um segundo fundo aqui em cima criaria uma
+                // "caixa dentro de caixa". Só um respiro pra não colar nas bordas dela.
+                setPadding(dpToPx(8), dpToPx(4), dpToPx(8), dpToPx(4))
+            } else {
+                setPadding(dpToPx(18), dpToPx(14), dpToPx(18), dpToPx(14))
+                background = roundedBg(badgeColor, radiusDp = 16f)
+                elevation = dpToPx(32).toFloat()
+            }
         }
 
         rows.forEachIndexed { index, (label, value) ->
@@ -3178,20 +3218,40 @@ class PlayerActivity : ComponentActivity() {
                     },
                 )
             }
-            container.addView(
-                MaterialTextView(this).apply {
-                    text = buildPriceSpannable(
-                        value = value,
-                        textColor = textColor,
-                        cifraoSp = 19.8f * scale,
-                        valueSp = 105.6f * scale,
-                        decimalsSp = 52.8f * scale,
-                    )
-                    typeface = BrandTypography.poppinsExtraBold(this@PlayerActivity)
-                        ?: android.graphics.Typeface.create(typeface, android.graphics.Typeface.BOLD)
-                    includeFontPadding = false
-                },
-            )
+            val precoView = MaterialTextView(this).apply {
+                text = buildPriceSpannable(
+                    value = value,
+                    textColor = textColor,
+                    cifraoSp = (if (isVerticalArtLayout) 17f else 19.8f) * scale,
+                    valueSp = (if (isVerticalArtLayout) 92f else 105.6f) * scale,
+                    decimalsSp = (if (isVerticalArtLayout) 46f else 52.8f) * scale,
+                )
+                typeface = BrandTypography.poppinsExtraBold(this@PlayerActivity)
+                    ?: android.graphics.Typeface.create(typeface, android.graphics.Typeface.BOLD)
+                includeFontPadding = false
+            }
+            if (isVerticalArtLayout) {
+                // "R$ 4,99 un" na mesma linha (referência do usuário) — sufixo de unidade
+                // discreto, cinza, alinhado pela base do preço.
+                container.addView(
+                    LinearLayout(this).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = android.view.Gravity.BOTTOM
+                        addView(precoView)
+                        addView(
+                            MaterialTextView(this@PlayerActivity).apply {
+                                text = "un"
+                                setTextColor(adjustAlpha(Color.BLACK, 0.45f))
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f * scale)
+                                includeFontPadding = false
+                                setPadding(dpToPx(6), 0, 0, dpToPx(10))
+                            },
+                        )
+                    },
+                )
+            } else {
+                container.addView(precoView)
+            }
         }
 
         parent.addView(
@@ -3202,7 +3262,40 @@ class PlayerActivity : ComponentActivity() {
         imgView.post {
             if (container.tag != PRICE_ART_BADGE_TAG || container.parent == null) return@post
             if (imgView.width <= 0 || imgView.height <= 0) return@post
-            // A arte é sempre gerada em 1280x800 (produtos-imgs: ARTE_LARGURA_HORIZONTAL /
+
+            if (isVerticalArtLayout) {
+                // Arte vertical sempre gerada em 1200x1920 (produtos-imgs: ARTE_LARGURA_VERTICAL/
+                // ARTE_ALTURA_VERTICAL, ET45 em pé) — mesma ideia do par horizontal abaixo, só que
+                // a caixa reservada pro preço tem posição FIXA (% de ARTE_ALTURA_VERTICAL a partir
+                // do início do painel, não derivada do texto do nome — ver CAIXA_PRECO_* em
+                // compor_arte_vertical) exatamente pra este cálculo poder replicar sem adivinhar
+                // quantas linhas o nome ocupou no servidor.
+                val arteLarguraVertical = 1200f
+                val arteAlturaVertical = 1920f
+                val alturaFotoPct = 0.45f
+                val caixaPrecoY0Pct = 0.16f
+                val caixaPrecoAlturaPct = 0.14f
+                val margemPct = 0.07f
+
+                val escalaFitCenter = minOf(imgView.width / arteLarguraVertical, imgView.height / arteAlturaVertical)
+                val tarjaEsquerda = (imgView.width - arteLarguraVertical * escalaFitCenter) / 2f
+                val tarjaSuperior = (imgView.height - arteAlturaVertical * escalaFitCenter) / 2f
+
+                val alturaFotoPx = arteAlturaVertical * alturaFotoPct
+                val caixaX0 = arteLarguraVertical * margemPct
+                val caixaX1 = arteLarguraVertical * (1f - margemPct)
+                val caixaY0 = alturaFotoPx + arteAlturaVertical * caixaPrecoY0Pct
+                val caixaAltura = arteAlturaVertical * caixaPrecoAlturaPct
+
+                val caixaXCentro = imgView.left + tarjaEsquerda + (caixaX0 + caixaX1) / 2f * escalaFitCenter
+                val caixaYCentro = imgView.top + tarjaSuperior + (caixaY0 + caixaAltura / 2f) * escalaFitCenter
+
+                container.x = caixaXCentro - container.width / 2f
+                container.y = caixaYCentro - container.height / 2f
+                return@post
+            }
+
+            // A arte horizontal é sempre gerada em 1280x800 (produtos-imgs: ARTE_LARGURA_HORIZONTAL /
             // ARTE_ALTURA_HORIZONTAL), com o texto (nome/descrição) desenhado a partir de uma
             // margem de 6% dessa largura (`margin = width * 0.06` em compor_texto_na_arte). O
             // ImageView usa FIT_CENTER (a arte nunca pode passar da borda da tela) — escala pelo
@@ -3265,6 +3358,17 @@ class PlayerActivity : ComponentActivity() {
             lp.bottomToBottom = ConstraintLayout.LayoutParams.PARENT_ID
             lp.startToEnd = ConstraintLayout.LayoutParams.UNSET
             lp.endToStart = ConstraintLayout.LayoutParams.UNSET
+            // Limpa também os vínculos do split VERTICAL (topToBottom/bottomToTop, usados pelos
+            // layouts vertical_image_top/bottom via priceImageSplitGuide) — sem isso, um painel
+            // que originalmente tinha `bottomToTop = priceImageSplitGuide` (ver XML) ficava com
+            // DOIS vínculos de borda inferior ao mesmo tempo (o novo bottomToBottom=PARENT_ID +
+            // o antigo bottomToTop=guideline, nunca desfeito), e o ConstraintLayout resolvia a
+            // altura pelo vínculo mais restritivo (a guideline, a ~45% da tela) em vez de ocupar
+            // a tela toda — bug real, pego testando a arte vertical em tela cheia no ET45: a
+            // imagem só cobria até a guideline, com uma área preta (fora dos bounds da view)
+            // ocupando o resto da tela abaixo.
+            lp.topToBottom = ConstraintLayout.LayoutParams.UNSET
+            lp.bottomToTop = ConstraintLayout.LayoutParams.UNSET
             panel.layoutParams = lp
             panel.setPadding(0, 0, 0, 0)
             panel.bringToFront()

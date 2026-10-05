@@ -8,6 +8,47 @@ App Android (Kotlin) para os terminais de consulta de preço nas lojas. Integra 
 - **Sem arte** (`hasArt = false`): layout tradicional, painel esquerdo com nome/preço visível (`priceLeftPanel` = VISIBLE), imagem do produto pequena com `FIT_CENTER`.
 - **Com arte** (`hasArt = true`): a arte vira o fundo em tela cheia (`makeFullBleed` esconde `priceLeftPanel`, expande `priceRightPanel`), `imgView.scaleType = FIT_CENTER`, e o preço é sobreposto por cima como um badge (`updatePriceBadge`) usando a cor dominante/vibrante extraída da própria imagem (`Palette`).
 
+## Terminal ET45 (em pé) — layout vertical + arte vertical própria
+
+Pedido do usuário, investigado e implementado nesta sessão: suporte a um terminal montado em retrato (ET45, 10.1", resolução real 1920x1200 girada = **1200x1920**). Achado inicial importante: os layouts XML já existiam prontos (`price_check_vertical_image_top.xml`/`price_check_vertical_image_bottom.xml` — foto 45%/painel 55% com split via `Guideline priceImageSplitGuide`, badges "LEVE X PAGUE Y" já com lógica pronta em `OfferIntelligence`, cards de pacote com preço por unidade em `createPackCard`) — o trabalho real foi (1) uma pipeline de arte vertical nova no `produtos-imgs` (ver CLAUDE.md de lá, `compor_arte_vertical`/`gerar_arte_publicitaria_vertical`) e (2) o app aprender a: detectar a orientação física do terminal, pedir a arte certa, cachear as duas orientações sem colisão, e desenhar o preço na posição certa em cima da arte vertical.
+
+### `isDeviceVertical()` — detecção por proporção da tela, não por sensor de rotação
+
+`PriceQueryEngine.isDeviceVertical()`: `resources.displayMetrics.heightPixels > widthPixels`. Terminais de consulta ficam fixos numa orientação (aparafusados no suporte da loja) — não existe rotação em tempo real nesse tipo de aparelho, então basta olhar a proporção real da tela, não reagir a eventos de sensor/orientation change.
+
+### Duas artes independentes por EAN — orientação vira parte da chave, não só do request
+
+`preloadProductImageAndTheme` (passo 0, arte publicitária) manda `orientacao` (`"vertical"`/`"horizontal"`) tanto pra `fetchProductImageMeta` (query param `?orientacao=vertical` no `GET /produto-imagem/<ean>`, ver contrato no CLAUDE.md do produtos-imgs) quanto pra decidir a **chave de cache local**: `"${ean}_arte_vertical"` vs `"${ean}_arte"` (mesmo raciocínio que já existia pra separar foto crua de arte — "nunca podem dividir arquivo", ver seção de cache de imagem mais abaixo). Sem essa separação, um mesmo EAN testado nas duas orientações (como aconteceu nesta sessão) fazia o cache de uma orientação "vazar" pra outra — a arte horizontal cacheada aparecia esticada/errada dentro do layout vertical. `requestArtGeneration` (upload fire-and-forget de foto vinda de fonte própria do cliente) manda o mesmo `orientacao` no `POST .../gerar-arte`.
+
+### `updatePriceBadge`: ramo vertical novo, math espelhada do produtos-imgs
+
+A arte vertical não tem nome/badges pra esconder (já vêm desenhados na própria imagem, ver `compor_arte_vertical`) — só precisa do preço sobreposto, numa caixa branca com sombra que a arte já reserva. Detecção do layout é estrutural (`findViewById<View>(R.id.priceImageSplitGuide) != null` — essa guideline só existe nos dois layouts verticais), em vez de checar `xmlLayoutType` de novo ali dentro.
+
+Posicionamento usa exatamente as mesmas constantes/fórmula do lado Python (`ARTE_LARGURA_VERTICAL`/`ARTE_ALTURA_VERTICAL` = 1200/1920, `CAIXA_PRECO_Y0_PCT` = 0.16, `CAIXA_PRECO_ALTURA_PCT` = 0.14, `altura_foto` = 45% de `ARTE_ALTURA_VERTICAL`) — **hardcoded duplicado dos dois lados de propósito** (mesmo padrão já usado pro par horizontal `arteLarguraOriginal`/`arteAlturaOriginal` = 1280f/800f), não uma constante compartilhada entre os dois repos. Se um dia esses valores mudarem de um lado, tem que mudar no outro também — já é assim pro par horizontal, documentado como risco conhecido.
+
+A posição da caixa no servidor é **fixa** (% de `altura_foto`, não derivada de quantas linhas o nome ocupou) exatamente pra esse cálculo do lado do app poder confiar cegamente nela sem ter visibilidade nenhuma do que aconteceu na composição do lado do Python — se a posição da caixa no servidor um dia voltar a ser dinâmica (dependente do texto), esse código aqui desalinha.
+
+`FIT_CENTER` + tarja calculada do mesmo jeito que o par horizontal (`escalaFitCenter = minOf(view/arte na largura, view/arte na altura)`, tarja nos dois eixos porque a arte vertical pode não bater exatamente a proporção da tela do aparelho, diferente da horizontal que hoje casa 1:1 com o SK100) — `tarjaEsquerda`/`tarjaSuperior` deslocam a caixa calculada de volta pro espaço de coordenadas real da view.
+
+**Não testado ainda com produto de preço real vindo da integração** — testado com o mock `test_vertical` (ver abaixo) e preço fixo de teste; o caminho "preço real do Komprão/Zaffari renderizado na caixa da arte vertical" ainda não foi visto rodando ao vivo.
+
+### Mock `test_vertical` pra testar sem precisar de EAN real com integração vertical configurada
+
+Adicionado ao mesmo mecanismo de mocks por comando (`cmd` = EAN digitado/escaneado em minúsculas, ver `PlayerActivity.onBarcodeCaptured`, lista `test_normal`/`test_zaf_*`/`test_ame_*` etc. já existente) — `"test_vertical"` monta um `PriceProduct` com `xmlLayoutType = "vertical_image_top"`, `offer` no formato `"LEVE X PAGUE Y"` (reconhecido por `OfferIntelligence` sem precisar de nenhum código novo) e um `PricePack` pro card de unidade. Reaproveita o EAN do KitKat (7891000248768) já testado no produtos-imgs nesta sessão, pra poder exercitar o caminho real de busca de imagem/arte (não só dado 100% mockado).
+
+**Como disparar via ADB** (útil quando não dá pra digitar no scanner físico): broadcast dedicado, mais confiável que `adb shell input text` nesse hardware (Zebra) — testado e `input text` acabou abrindo a tela de "Scanner Configuration" do sistema em vez de digitar no campo esperado, provavelmente por causa de alguma tecla de atalho reservada:
+```bash
+adb shell am broadcast -a com.mupa.player.enterprise.SIMULATE_BARCODE --es ean test_vertical -p com.mupa.player.enterprise
+```
+Esse broadcast (`barcodeSimulationReceiver`) já existia no código antes desta sessão, sem guarda de permissão — funciona direto. **Diferente** do broadcast `ACTION_OPEN_SETTINGS` (abre o Settings do MPlayer): esse SIM tem `android:permission="...permission.OPEN_SETTINGS"` no manifest, e testado que `adb shell am broadcast` como usuário `shell` **não consegue** entregar esse broadcast (completa com `result=0` mas o receiver nunca roda — sem erro visível, só silenciosamente não funciona) — pra abrir o Settings via ADB, usar `adb shell am start -n com.mupa.player.enterprise/.ui.SettingsActivity` direto em vez do broadcast.
+
+### Teste real no ET45 físico: achados de ambiente (Zebra, não específicos deste app)
+
+- **Reinstalar um build assinado com chave diferente da já instalada falha com `INSTALL_FAILED_UPDATE_INCOMPATIBLE`** — precisa `adb uninstall com.mupa.player.enterprise` antes (apaga dados do app nesse aparelho).
+- **Esse ET45 em específico estava com o Argos (`com.mupa.agent.argos`, Device Owner) em modo kiosk/lock-task de verdade** (`dumpsys activity activities | grep -A5 LockTaskController` → `mLockTaskModeState=LOCKED`, com `com.mupa.agent.argos` como task `type=home`) — nesse estado, **até `adb uninstall` falha** com `DELETE_FAILED_APP_PINNED`. `force-stop` no Argos não resolveu (o Device Owner se re-arma sozinho). O que funcionou: destravar fisicamente no próprio aparelho (sequência/gesto específico do hardware, não documentado aqui) — depois disso `mLockTaskModeState` virou `NONE` e tanto `uninstall` quanto `install` funcionaram normalmente. Trocar a tela de bloqueio (PIN de acordar o aparelho) **não é a mesma coisa** que sair do lock-task — já rolou essa confusão nesta sessão, confirmar sempre com `dumpsys` antes de assumir que destravou.
+- **`adb reverse tcp:5050 tcp:5050`** é o jeito mais confiável de apontar o "Servidor de Imagens" do app pro `produtos-imgs` rodando local em dev — não depende do Wi-Fi do aparelho nem do IP da máquina de dev (que muda por DHCP), rotea pelo próprio cabo USB. Configurado no app em Configurações → "Servidor de Imagens (produtos-imgs)" → IP `127.0.0.1`, Porta `5050`.
+- **Conexão USB instável durante testes longos** (desconectou sozinha mais de uma vez, inclusive no meio de um `adb install` de ~80MB, causando `Broken pipe`/`device not found`) — não identificado se é o cabo, a porta ou o próprio aparelho; só reconectar e tentar de novo resolveu todas as vezes.
+
 ### `CENTER_CROP` → `FIT_CENTER` (decisão revertida, pedido explícito do usuário)
 
 Nesta mesma sessão a decisão tinha sido pelo caminho inverso — `CENTER_CROP` pra cobrir a tela toda sem tarja, aceitando cortar as bordas quando a proporção da arte (sempre 1344x768, ver `produtos-imgs` CLAUDE.md) não batesse com a da tela do terminal. Na prática esse corte já tinha comido conteúdo real: numa tela 1280x800, os ícones de benefício encostados na borda direita da arte (a 96.5% da largura) ficavam parcialmente cortados. Usuário pediu explicitamente que a arte **nunca** passe das bordas da tela, priorizando ver a peça inteira sobre preencher 100% da tela — trocado pra `FIT_CENTER`, que escala pelo MENOR fator entre largura/altura da view (em vez do maior, como o `CENTER_CROP`) e centraliza o resultado, sobrando uma tarja no eixo que não bateu a proporção em vez de cortar.

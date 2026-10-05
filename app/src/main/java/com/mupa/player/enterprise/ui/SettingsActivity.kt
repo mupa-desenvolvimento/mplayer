@@ -14,6 +14,7 @@ import com.mupa.player.enterprise.databinding.ActivitySettingsBinding
 import com.mupa.player.enterprise.managers.DeviceCache
 import com.mupa.player.enterprise.managers.DeviceCacheManager
 import com.mupa.player.enterprise.managers.DeviceIdentityManager
+import com.mupa.player.enterprise.managers.GertecScannerManager
 import com.mupa.player.enterprise.managers.ManifestManager
 import com.mupa.player.enterprise.managers.SettingsManager
 import com.mupa.player.enterprise.price.PriceConfig
@@ -107,8 +108,19 @@ class SettingsActivity : ComponentActivity() {
             binding.editTcServer.setText(
                 runCatching { SettingsManager(applicationContext).getTcServerAddress() }.getOrDefault(""),
             )
-            binding.switchGertecScanner.isChecked =
-                runCatching { SettingsManager(applicationContext).getGertecScannerEnabled() }.getOrDefault(false)
+            // SK100/Gertec: o leitor tem que ficar sempre ligado (pedido do usuário,
+            // 2026-10-04) — o toggle aqui vira só um indicador travado em vez de uma opção
+            // real, pra não dar a impressão de que dá pra desligar. Em qualquer outro
+            // terminal (G-BOT, X96, ST-103, sem esse leitor embarcado) o toggle continua
+            // normal. Ver PlayerActivity.onResume, que ignora o valor salvo e força
+            // ligado quando GertecScannerManager.isGertecDevice() é true.
+            if (GertecScannerManager.isGertecDevice()) {
+                binding.switchGertecScanner.isChecked = true
+                binding.switchGertecScanner.isEnabled = false
+            } else {
+                binding.switchGertecScanner.isChecked =
+                    runCatching { SettingsManager(applicationContext).getGertecScannerEnabled() }.getOrDefault(false)
+            }
             binding.editHeartbeatIdleMinutes.setText(
                 runCatching { SettingsManager(applicationContext).getHeartbeatIdleMinutes() }
                     .getOrDefault(SettingsManager.DEFAULT_HEARTBEAT_IDLE_MINUTES)
