@@ -78,6 +78,7 @@
             android:exported="true"
             android:launchMode="singleTop"
             android:screenOrientation="fullUser"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|keyboard|navigation"
             android:theme="@style/Theme.MupaPlayerEnterprise" />
 
         <activity
