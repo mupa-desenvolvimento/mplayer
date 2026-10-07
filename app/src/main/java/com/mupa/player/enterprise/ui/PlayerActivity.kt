@@ -339,12 +339,9 @@ class PlayerActivity : ComponentActivity() {
             playerEngine.stop()
             setSyncOverlayVisible(false)
             binding.inoperativeOverlay.visibility = View.VISIBLE
-            val displayReason = reason?.takeIf { it.isNotBlank() }
-                ?: "A reprodução de mídias deste dispositivo foi temporariamente suspensa."
-            binding.inoperativeReason.text = displayReason
             val devName = binding.deviceNameText.text.toString().takeIf { it.isNotBlank() } ?: deviceId
             binding.inoperativeDeviceDetails.text = "Dispositivo: $devName • ID: $deviceId"
-            Log.w("PlayerActivity", "Dispositivo inoperante ativo. Motivo: $displayReason")
+            Log.w("PlayerActivity", "Dispositivo inoperante ativo. Motivo interno: ${reason ?: "não especificado"}")
         }
     }
 

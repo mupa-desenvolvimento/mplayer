@@ -203,24 +203,14 @@
                 android:textStyle="bold" />
 
             <TextView
-                android:id="@+id/inoperativeReason"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="14dp"
-                android:gravity="center"
-                android:text="A reprodução de mídias deste dispositivo foi temporariamente suspensa."
-                android:textColor="#CBD5E1"
-                android:textSize="17sp" />
-
-            <TextView
                 android:id="@+id/inoperativeHelp"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="16dp"
                 android:gravity="center"
                 android:text="Entre em contato com o suporte ou administrador da sua conta."
-                android:textColor="#94A3B8"
-                android:textSize="13sp" />
+                android:textColor="#CBD5E1"
+                android:textSize="16sp" />
 
             <TextView
                 android:id="@+id/inoperativeDeviceDetails"
