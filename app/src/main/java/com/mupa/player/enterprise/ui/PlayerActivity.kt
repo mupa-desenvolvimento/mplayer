@@ -79,6 +79,7 @@ class PlayerActivity : ComponentActivity() {
     private var syncHideJob: Job? = null
     private var devMode = false
     private var demoMode = false
+    private var manifestEventsListener: com.mupa.player.enterprise.network.ManifestEventsListener? = null
 
     private var storagePermissionDeferred: CompletableDeferred<Boolean>? = null
     private val storagePermissionLauncher =
@@ -189,6 +190,8 @@ class PlayerActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        manifestEventsListener?.stop()
+        manifestEventsListener = null
         playerEngine.release()
         super.onDestroy()
     }
@@ -207,6 +210,22 @@ class PlayerActivity : ComponentActivity() {
         val cache = runCatching { DeviceCacheManager(applicationContext).load() }.getOrNull()
         binding.deviceNameText.text = cache?.deviceName?.ifBlank { deviceId } ?: deviceId
         companyId = cache?.company?.trim()?.ifBlank { null }
+        val tenantId = cache?.tenant?.trim()?.ifBlank { null }
+
+        manifestEventsListener = com.mupa.player.enterprise.network.ManifestEventsListener(
+            getDeviceId = { deviceId },
+            getTenantId = { tenantId },
+            onReloadRequested = { reason ->
+                Log.i("PlayerActivity", "Recarga de manifesto solicitada via manifest-events ($reason)")
+                lifecycleScope.launch {
+                    try {
+                        refreshInBackground()
+                    } catch (e: Exception) {
+                        Log.e("PlayerActivity", "Erro no refreshInBackground via manifest-events", e)
+                    }
+                }
+            }
+        ).also { it.start() }
 
         ensureStoragePermissionIfNeeded()
         tryStartOfflinePlayback()
