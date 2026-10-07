@@ -334,9 +334,37 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
+    private fun showInoperativeScreen(reason: String?) {
+        runOnUiThread {
+            playerEngine.stop()
+            setSyncOverlayVisible(false)
+            binding.inoperativeOverlay.visibility = View.VISIBLE
+            val displayReason = reason?.takeIf { it.isNotBlank() }
+                ?: "A reprodução de mídias deste dispositivo foi temporariamente suspensa."
+            binding.inoperativeReason.text = displayReason
+            val devName = binding.deviceNameText.text.toString().takeIf { it.isNotBlank() } ?: deviceId
+            binding.inoperativeDeviceDetails.text = "Dispositivo: $devName • ID: $deviceId"
+            Log.w("PlayerActivity", "Dispositivo inoperante ativo. Motivo: $displayReason")
+        }
+    }
+
+    private fun hideInoperativeScreen() {
+        runOnUiThread {
+            if (binding.inoperativeOverlay.visibility != View.GONE) {
+                binding.inoperativeOverlay.visibility = View.GONE
+                Log.i("PlayerActivity", "Dispositivo reativado. Ocultando tela de bloqueio.")
+            }
+        }
+    }
+
     private suspend fun tryStartOfflinePlayback(): Boolean {
         val offlineJson = manifestManager.loadOfflineManifest(deviceId).orEmpty().trim()
         if (offlineJson.isBlank()) return false
+        val inop = manifestManager.parseInoperativeInfo(offlineJson)
+        if (inop.isInoperative) {
+            showInoperativeScreen(inop.reason)
+            return true
+        }
         val items = manifestManager.parseItemsPublic(offlineJson)
         playlistName = manifestManager.parsePlaylistName(offlineJson) ?: playlistName
         itemNameById = items.mapNotNull { it.name?.let { n -> it.id to n } }.toMap()
@@ -430,6 +458,14 @@ class PlayerActivity : ComponentActivity() {
                 .trim()
         }
 
+        val inop = manifestManager.parseInoperativeInfo(remote)
+        if (inop.isInoperative) {
+            manifestManager.saveManifest(deviceId, remote)
+            showInoperativeScreen(inop.reason)
+            return
+        }
+        hideInoperativeScreen()
+
         val changed = !manifestManager.compareManifest(deviceId, remote)
         if (changed) {
             manifestManager.saveManifest(deviceId, remote)
@@ -501,6 +537,16 @@ class PlayerActivity : ComponentActivity() {
 
         val remote = runCatching { manifestManager.fetchManifest(deviceId) }.getOrNull()?.trim()
         if (remote.isNullOrBlank()) return false
+
+        val inop = manifestManager.parseInoperativeInfo(remote)
+        if (inop.isInoperative) {
+            manifestManager.saveManifest(deviceId, remote)
+            showInoperativeScreen(inop.reason)
+            return true
+        } else {
+            hideInoperativeScreen()
+        }
+
         val changed = !manifestManager.compareManifest(deviceId, remote)
         if (!changed) return true
 
@@ -609,6 +655,7 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private fun updatePlaylistIfActiveItemsChanged() {
+        if (binding.inoperativeOverlay.visibility == View.VISIBLE) return
         lifecycleScope.launch {
             val offlineJson = manifestManager.loadOfflineManifest(deviceId).orEmpty().trim()
             if (offlineJson.isBlank()) return@launch

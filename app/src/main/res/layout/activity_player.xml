@@ -166,6 +166,73 @@
         android:textColor="@color/enterprise_on_muted"
         android:textSize="11sp" />
 
+    <!-- Inoperative / Blocked Overlay -->
+    <androidx.constraintlayout.widget.ConstraintLayout
+        android:id="@+id/inoperativeOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#F00B0F14"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:padding="32dp"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="parent"
+            app:layout_constraintWidth_max="640dp">
+
+            <ImageView
+                android:id="@+id/inoperativeIcon"
+                android:layout_width="84dp"
+                android:layout_height="84dp"
+                android:src="@drawable/ic_inoperative_lock" />
+
+            <TextView
+                android:id="@+id/inoperativeTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:text="Dispositivo Inoperante"
+                android:textColor="#FFFFFF"
+                android:textSize="26sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/inoperativeReason"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:gravity="center"
+                android:text="A reprodução de mídias deste dispositivo foi temporariamente suspensa."
+                android:textColor="#CBD5E1"
+                android:textSize="17sp" />
+
+            <TextView
+                android:id="@+id/inoperativeHelp"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:gravity="center"
+                android:text="Entre em contato com o suporte ou administrador da sua conta."
+                android:textColor="#94A3B8"
+                android:textSize="13sp" />
+
+            <TextView
+                android:id="@+id/inoperativeDeviceDetails"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="28dp"
+                android:textColor="#64748B"
+                android:textSize="12sp"
+                android:text="ID: -" />
+        </LinearLayout>
+    </androidx.constraintlayout.widget.ConstraintLayout>
+
     <!-- Dev Mode Overlay Container -->
     <LinearLayout
         android:id="@+id/devOverlayContainer"

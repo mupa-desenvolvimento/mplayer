@@ -38,6 +38,11 @@ data class ManifestItem(
     val endTime: String?,
 )
 
+data class InoperativeInfo(
+    val isInoperative: Boolean,
+    val reason: String? = null,
+)
+
 data class MediaSyncProgress(
     val completedItems: Int,
     val totalItems: Int,
@@ -56,7 +61,7 @@ class ManifestManager(private val context: Context) {
         val token = BuildConfig.SUPABASE_TOKEN.trim()
         if (token.isBlank()) return@withContext ""
 
-        val url = "https://iurqddkuihjsmxubibao.supabase.co/functions/v1/device-api-v2/manifest"
+        val url = "https://iurqddkuihjsmxubibao.supabase.co/functions/v1/device-api/manifest"
         api.postJson(url = url, body = mapOf("serial" to deviceId)).string()
     }
 
@@ -249,6 +254,10 @@ class ManifestManager(private val context: Context) {
     }
 
     private fun parseItems(json: String): List<ManifestItem> {
+        val inoperative = parseInoperativeInfo(json)
+        if (inoperative.isInoperative) {
+            return emptyList()
+        }
         return try {
             val root = JSONObject(json)
             val manifestObj = root.optJSONObject("manifest") ?: root
@@ -380,6 +389,19 @@ class ManifestManager(private val context: Context) {
             val fromDevice = device?.optJSONObject("price_config")
             fromDevice?.toString()
         }.getOrNull()
+    }
+
+    fun parseInoperativeInfo(json: String): InoperativeInfo {
+        return runCatching {
+            val root = JSONObject(json)
+            val manifestObj = root.optJSONObject("manifest") ?: root
+            val isInoperative = manifestObj.optBoolean("is_inoperative", false) ||
+                root.optBoolean("is_inoperative", false)
+            val reason = manifestObj.optString("inoperative_reason", "").ifBlank {
+                root.optString("inoperative_reason", "")
+            }.takeIf { it.isNotBlank() }
+            InoperativeInfo(isInoperative, reason)
+        }.getOrDefault(InoperativeInfo(false, null))
     }
 
     private fun inferTypeFromUrl(url: String): String {
