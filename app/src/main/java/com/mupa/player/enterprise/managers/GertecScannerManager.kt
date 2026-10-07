@@ -66,6 +66,22 @@ import kotlinx.coroutines.withTimeoutOrNull
  *    com o hardware e nunca dava tempo da inicialização terminar.
  * 4. **Nunca desiste** (pedido original do usuário, "o leitor não pode
  *    desligar nunca") — sem teto de tentativas, só o backoff cresce.
+ *
+ * ## Ajuste em 2026-10-07 — "funcionava, desativou sozinho depois de parado"
+ *
+ * Relato de campo real (SK100 4001442606002108): o leitor lia normal e
+ * parou sozinho depois de ficar um tempo parado, sem ninguém mexer. Causa:
+ * o único chamador de [start] é `PlayerActivity.onResume()`, que nunca
+ * mais dispara num kiosk ligado o dia inteiro na mesma tela. Se o SDK
+ * cancelar a sessão sozinho DEPOIS de armar com sucesso (idle timeout do
+ * módulo físico, soluço de USB — causa exata ainda não confirmada, só o
+ * sintoma), [started] virava `false` e nada percebia: o loop de arme
+ * daquela tentativa já tinha terminado (`return@launch` após `ok=true`).
+ * O item 4 acima só cobria retries DENTRO de uma sequência de arme, não
+ * esse caso de "armou, funcionou, morreu sozinho depois". Fix: guarda o
+ * `Context` da última chamada de [start] ([lastContextRef]) pra o
+ * callback [ScannerCallback.cancelled] poder se re-armar sozinho sempre
+ * que isso acontecer, sem depender da Activity notar.
  */
 class GertecScannerManager(
     private val onBarcode: (String) -> Unit,
@@ -83,6 +99,21 @@ class GertecScannerManager(
     // Debounce de duplicados: "1 EAN por vez". O mesmo código dentro desta janela é ignorado.
     @Volatile private var lastCode: String? = null
     @Volatile private var lastCodeAtMs: Long = 0L
+
+    // Achado real de campo (2026-10-07, cliente, SK100 4001442606002108):
+    // "estava lendo normal, deixei parado e desativou sozinho". Causa: o
+    // único chamador de start() é PlayerActivity.onResume() — que nunca
+    // mais dispara num kiosk que fica ligado parado o dia inteiro. Se o
+    // SDK cancelar a sessão sozinho DEPOIS de já ter armado com sucesso
+    // (idle timeout do módulo físico, soluço de enumeração USB, etc. —
+    // ver cancelled() abaixo), `started` virava false e nada percebia:
+    // o armJob daquela tentativa já tinha terminado (`return@launch` no
+    // ok=true), então não tinha mais loop nenhum rodando pra notar. O
+    // item 4 do cabeçalho ("nunca desiste") só cobria retries DENTRO de
+    // uma sequência de arme — não esse caso de "armou, funcionou, morreu
+    // sozinho depois". Guarda o Context da última chamada de start() pra
+    // poder se re-armar sozinho, sem depender da Activity notar.
+    @Volatile private var lastContextRef: WeakReference<Context>? = null
 
     companion object {
         private const val TAG = "MPlayerScan"
@@ -116,6 +147,7 @@ class GertecScannerManager(
     fun start(context: Context) {
         if (started || armJob?.isActive == true) return
         val ctxRef = WeakReference(context)
+        lastContextRef = ctxRef
         armJob = scope.launch {
             var backoffMs = INITIAL_BACKOFF_MS
             var attempt = 0
@@ -207,12 +239,25 @@ class GertecScannerManager(
             Log.w(TAG, "gertec_sdk_cancelled causes=$causes")
             lastFailure = causes ?: "cancelled"
             started = false
+            // Re-arma sozinho (ver comentário de lastContextRef acima). Se
+            // isto disparou DENTRO de uma tentativa de arme ainda em curso
+            // (armJob ainda ativo), start() vira no-op pelo guard normal —
+            // só o loop já em andamento continua, sem duplicar. null quando
+            // stop() já limpou o Context (parada intencional) — não re-arma.
+            val ctx = lastContextRef?.get()
+            if (ctx != null) {
+                scope.launch {
+                    delay(INITIAL_BACKOFF_MS)
+                    start(ctx)
+                }
+            }
         }
     }
 
     fun stop() {
         armJob?.cancel()
         armJob = null
+        lastContextRef = null
         runCatching {
             codeScanner?.stopService()
         }.onFailure {
