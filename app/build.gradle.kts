@@ -26,8 +26,8 @@ android {
         applicationId = "com.mupa.player.enterprise"
         minSdk = 21
         targetSdk = 34
-        versionCode = 69
-        versionName = "1.1.52"
+        versionCode = 71
+        versionName = "1.1.54"
 
         // Toda a frota (G-BOT, X96, SK-100, ST-103) é ARM. Empacotar x86/x86_64 adicionava
         // ~54 MB de binários que nenhum dispositivo executa — peso puro para o OTA em rede
@@ -164,8 +164,11 @@ android {
 }
 
 dependencies {
-    // SDK Gertec EasyLayer / GerSDK (scanner do SK100 e outros terminais Gertec)
-    implementation(files("libs/GerSDK_v104.aar"))
+    // SDK Gertec EasyLayer / GerSDK (scanner do SK100 e outros terminais Gertec).
+    // v1.0.6 (2026-10-06): fix real do time da Gertec pro "leitor ligado mas não
+    // lê" (ver GertecScannerManager.kt) — mesma API pública do v1.0.4, troca
+    // direta. v104.aar mantido no repo só por precaução de rollback.
+    implementation(files("libs/GerSDK_v106.aar"))
 
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.core:core-splashscreen:1.0.1")

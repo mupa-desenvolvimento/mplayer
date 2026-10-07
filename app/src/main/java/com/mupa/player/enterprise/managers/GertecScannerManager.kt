@@ -2,16 +2,22 @@ package com.mupa.player.enterprise.managers
 
 import android.content.Context
 import android.os.Build
-import android.os.Handler
-import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import java.lang.ref.WeakReference
 import br.com.gertec.gdk.codescanner.CodeScanner
 import br.com.gertec.gdk.codescanner.ScannerCallback
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Ativa o leitor de código de barras integrado dos terminais Gertec (SK100 etc.)
- * via GerSDK V1.0.4 (EasyLayer Unificada Varejo).
+ * via GerSDK V1.0.6 (EasyLayer Unificada Varejo).
  *
  * Modo CDC: o leitor é iniciado com [CodeScanner.scanCode] passando a Activity —
  * exatamente como o sample oficial do SK100 (CodeScannerSKActivity). Cada código
@@ -25,6 +31,41 @@ import br.com.gertec.gdk.codescanner.ScannerCallback
  *
  * Cada código chega em [onBarcode] na thread do SDK — o chamador decide o post
  * para a main thread.
+ *
+ * ## Reescrito em 2026-10-06 — diagnóstico real do time da Gertec
+ *
+ * Relato de campo (cliente Koch) + análise do log `MPlayerScan:
+ * gertec_sdk_arm ciclo=N/20` pelo time da Gertec encontrou a causa raiz do
+ * "leitor ligado mas não lê": o ciclo antigo (re-arm fixo a cada ~5,2s,
+ * [ARM_GAP_MS] + o antigo `REARM_INTERVAL_MS`) **matava cada tentativa no
+ * meio da negociação com o scanner** — dos ~4s disponíveis antes do
+ * próximo `stopService()`, ~1,5-1,7s já eram só a enumeração USB do
+ * `/dev/ttyACM0`; a troca de dados real (~55 frames por ciclo) nunca
+ * terminava a tempo. Pior: como nada cancelava/esperava a tentativa
+ * anterior antes de iniciar a próxima, o log mostrou DUAS inicializações
+ * simultâneas na mesma porta serial em threads diferentes, e coroutines de
+ * ciclos antigos ainda vivas depois do "release" (ex.: `saveConfig`
+ * falhando com "Scanner not initialized" ~2s depois do fechamento).
+ *
+ * Mudanças reais (arquitetura sugerida pela Gertec, adaptada ao estilo
+ * deste arquivo):
+ * 1. **Uma tentativa de arme por vez** — `armJob` nunca é substituído por
+ *    outro enquanto `isActive`; [start] é um no-op se já há um em curso.
+ * 2. **Timeout de verdade por tentativa** ([INIT_TIMEOUT_MS], 10s, do
+ *    lado do app via `withTimeoutOrNull`) — confirmação via
+ *    `codeScanner.isRunning()` (reportado como confiável a partir do
+ *    GerSDK v1.0.6; antes "mentia"), em vez de só esperar uma leitura
+ *    real acontecer. **Achado em teste ao vivo**: a sobrecarga
+ *    `scanCode(Context, ScanConfig, String)` com `ALL_CODE_TYPES` lança
+ *    `NullPointerException` interna do SDK instantaneamente (parâmetro
+ *    "type") nesta versão — o leitor nem chegava a ligar. Voltou pra
+ *    `scanCode(Context)`, a mesma chamada simples do código original.
+ * 3. **Backoff exponencial** (2s, 4s, 8s... teto de [MAX_BACKOFF_MS])
+ *    entre tentativas que falham, em vez do intervalo fixo antigo — evita
+ *    ligar/desligar o módulo físico do scanner ~12x/minuto, que é hostil
+ *    com o hardware e nunca dava tempo da inicialização terminar.
+ * 4. **Nunca desiste** (pedido original do usuário, "o leitor não pode
+ *    desligar nunca") — sem teto de tentativas, só o backoff cresce.
  */
 class GertecScannerManager(
     private val onBarcode: (String) -> Unit,
@@ -32,37 +73,28 @@ class GertecScannerManager(
     private var codeScanner: CodeScanner? = null
     @Volatile private var started = false
 
-    // Ativação por CICLO DE RE-ARM.
-    //
-    // PROBLEMA DO BOOT: no primeiro scanCode() após o app subir, o leitor "liga" mas NÃO escaneia
-    // nenhum EAN. Fechar e abrir o app (às vezes MAIS DE UMA VEZ) faz passar a ler. A sequência
-    // que ativa é scanCode (sessão nasce morta) -> stopService (derruba a morta) -> scanCode de
-    // novo. O isRunning() do SDK MENTE (fica true sem decodificar), então não serve de sinal.
-    //
-    // Solução: automatizar o "fecha e abre" — re-armar em ciclo (stopService -> GAP -> scanCode)
-    // a cada REARM_INTERVAL_MS, até uma LEITURA REAL confirmar (started vira true no callback).
-    private val mainHandler = Handler(Looper.getMainLooper())
-    private var retryRunnable: Runnable? = null
-    private var verifyRunnable: Runnable? = null
-    private var armIteration = 0
-    // Evita armar duas vezes em paralelo (onResume pode chamar start() de novo durante o ciclo,
-    // quando started ainda é false).
-    @Volatile private var arming = false
-    // Reservado para desistência explícita (não usado no ciclo — mantido por compatibilidade).
-    @Volatile private var gaveUp = false
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var armJob: Job? = null
+
+    // Preenchido pelo callback cancelled() — null enquanto a tentativa atual
+    // ainda não terminou (nem com sucesso nem com falha).
+    @Volatile private var lastFailure: String? = null
 
     // Debounce de duplicados: "1 EAN por vez". O mesmo código dentro desta janela é ignorado.
     @Volatile private var lastCode: String? = null
     @Volatile private var lastCodeAtMs: Long = 0L
 
     companion object {
-        // Nº de ciclos de re-arm (cada ciclo = um "fecha e abre" automático) antes de parar.
-        private const val ARM_MAX_CYCLES = 20
-        // Intervalo entre ciclos: tempo dado à sessão recém-armada para produzir uma leitura
-        // antes de re-armar de novo.
-        private const val REARM_INTERVAL_MS = 4_000L
-        // Gap entre stopService() e scanCode() dentro de um ciclo — replica o "fechar e abrir".
-        private const val ARM_GAP_MS = 1_200L
+        private const val TAG = "MPlayerScan"
+
+        // Tempo máximo pra uma tentativa de arme terminar (sucesso ou falha) antes
+        // de desistir DESSA tentativa e tentar de novo com backoff. Medido a partir
+        // da abertura da sessão (chamada de scanCode), não de um valor arbitrário —
+        // cobre a enumeração USB (~1,5-1,7s) mais a negociação real com o scanner.
+        private const val INIT_TIMEOUT_MS = 10_000L
+        private const val POLL_INTERVAL_MS = 100L
+        private const val INITIAL_BACKOFF_MS = 2_000L
+        private const val MAX_BACKOFF_MS = 30_000L
         private const val DUP_WINDOW_MS = 1_500L
 
         fun isGertecDevice(): Boolean {
@@ -82,18 +114,78 @@ class GertecScannerManager(
     }
 
     fun start(context: Context) {
-        if (started || arming || gaveUp) return
-        arming = true
-        armIteration = 0
-        cancelPending()
-        armCycle(WeakReference(context))
+        if (started || armJob?.isActive == true) return
+        val ctxRef = WeakReference(context)
+        armJob = scope.launch {
+            var backoffMs = INITIAL_BACKOFF_MS
+            var attempt = 0
+            while (true) {
+                if (started) return@launch
+                val ctx = ctxRef.get() ?: return@launch // Activity foi embora
+
+                attempt++
+                val scanner = runCatching {
+                    codeScanner ?: CodeScanner.getInstance(buildCallback()).also { codeScanner = it }
+                }.getOrNull()
+                if (scanner == null) {
+                    Log.w(TAG, "gertec_sdk_getInstance_failed ciclo=$attempt")
+                    delay(backoffMs)
+                    backoffMs = (backoffMs * 2).coerceAtMost(MAX_BACKOFF_MS)
+                    continue
+                }
+
+                // Derruba qualquer sessão anterior antes de tentar de novo — sempre,
+                // mesmo na 1ª tentativa (a 1ª sessão do boot às vezes nasce morta).
+                runCatching { scanner.stopService() }
+
+                lastFailure = null
+                val startedAtMs = SystemClock.elapsedRealtime()
+                runCatching {
+                    // Achado real em teste ao vivo (2026-10-06, log via USB): a
+                    // sobrecarga scanCode(Context, ScanConfig, String) com
+                    // CodeScanner.ALL_CODE_TYPES lança NullPointerException
+                    // interna do SDK (br.com.gertec.retailnexus.internal.k7.a,
+                    // parâmetro "type") INSTANTANEAMENTE (0-3ms), antes de
+                    // qualquer tentativa de ligar o hardware — o leitor nem
+                    // chegava a acender a luz. Essa sobrecarga nunca foi usada
+                    // pelo código original (só scanCode(context), sem config)
+                    // — volta pra ela. O timeout agora é só o nosso
+                    // (INIT_TIMEOUT_MS via withTimeoutOrNull abaixo), sem
+                    // depender de ScanConfig.timeout.
+                    scanner.scanCode(ctx)
+                }.onFailure {
+                    Log.w(TAG, "gertec_sdk_scan_failed ciclo=$attempt err=${it.javaClass.simpleName}:${it.message}")
+                    lastFailure = it.message ?: it.javaClass.simpleName
+                    codeScanner = null // recria a instância na próxima tentativa
+                }
+
+                val ok = if (lastFailure != null) {
+                    false
+                } else {
+                    withTimeoutOrNull(INIT_TIMEOUT_MS) {
+                        while (!scanner.isRunning() && lastFailure == null) delay(POLL_INTERVAL_MS)
+                        scanner.isRunning()
+                    } ?: false
+                }
+                val elapsedMs = SystemClock.elapsedRealtime() - startedAtMs
+                Log.i(TAG, "gertec_sdk_arm ciclo=$attempt ok=$ok elapsed=${elapsedMs}ms falha=$lastFailure")
+
+                if (ok) {
+                    started = true
+                    return@launch
+                }
+
+                runCatching { scanner.stopService() }
+                delay(backoffMs)
+                backoffMs = (backoffMs * 2).coerceAtMost(MAX_BACKOFF_MS)
+            }
+        }
     }
 
     private fun buildCallback() = object : ScannerCallback {
         override fun result(barcodeType: String?, data: String?) {
-            // Uma leitura real confirma que a sessão está viva.
+            // Uma leitura real confirma que a sessão está viva (além do isRunning()).
             started = true
-            arming = false
             runCatching {
                 val code = data?.trim().orEmpty()
                 if (code.isBlank()) return@runCatching
@@ -104,79 +196,27 @@ class GertecScannerManager(
                 }
                 lastCode = code
                 lastCodeAtMs = now
-                Log.i("MPlayerScan", "gertec_sdk_scan type=$barcodeType data=$code")
+                Log.i(TAG, "gertec_sdk_scan type=$barcodeType data=$code")
                 onBarcode(code)
             }.onFailure {
-                Log.w("MPlayerScan", "gertec_sdk_result_failed err=${it.message}")
+                Log.w(TAG, "gertec_sdk_result_failed err=${it.message}")
             }
         }
 
         override fun cancelled(causes: String?) {
-            Log.w("MPlayerScan", "gertec_sdk_cancelled causes=$causes")
+            Log.w(TAG, "gertec_sdk_cancelled causes=$causes")
+            lastFailure = causes ?: "cancelled"
             started = false
         }
     }
 
-    // Um ciclo = um "fecha e abre" automático: stopService() -> GAP -> scanCode(). Repetimos em
-    // cadeia até uma leitura real confirmar (started vira true no callback) — igual o usuário
-    // fecha/abre o app "mais de uma vez" até o leitor pegar. O 1º ciclo cria a sessão (que pode
-    // nascer morta no boot); o stopService do ciclo seguinte derruba a morta e o scanCode abre uma
-    // nova, e assim por diante conforme o windowscannerservice/serial terminam de subir.
-    private fun armCycle(ctxRef: WeakReference<Context>) {
-        if (started) { arming = false; return }
-        val context = ctxRef.get() ?: run { arming = false; return } // Activity foi embora
-
-        val scanner = runCatching {
-            codeScanner ?: CodeScanner.getInstance(buildCallback()).also { codeScanner = it }
-        }.getOrNull()
-        if (scanner == null) { scheduleNextCycle(ctxRef); return }
-
-        // Derruba a sessão anterior (no boot, a 1ª nasce "morta" sem decodificar).
-        runCatching { scanner.stopService() }
-
-        val doScan = Runnable {
-            if (started) { arming = false; return@Runnable }
-            runCatching {
-                // Overload simples scanCode(Activity), igual ao sample oficial do SK100. Assíncrono.
-                scanner.scanCode(context)
-            }.onFailure {
-                Log.w("MPlayerScan", "gertec_sdk_scan_failed ciclo=$armIteration err=${it.javaClass.simpleName}:${it.message}")
-                codeScanner = null // recria a instância no próximo ciclo
-            }
-            armIteration++
-            Log.i("MPlayerScan", "gertec_sdk_arm ciclo=$armIteration/$ARM_MAX_CYCLES")
-            scheduleNextCycle(ctxRef)
-        }
-        verifyRunnable = doScan
-        mainHandler.postDelayed(doScan, ARM_GAP_MS)
-    }
-
-    private fun scheduleNextCycle(ctxRef: WeakReference<Context>) {
-        if (started) { arming = false; return } // uma leitura real encerrou o ciclo
-        // Sem teto: o leitor precisa ficar SEMPRE pronto pra ler, então continuamos re-armando
-        // indefinidamente até uma leitura real confirmar a sessão (started = true). Antes disso
-        // parava após ARM_MAX_CYCLES e deixava a última sessão "como estava", o que podia deixar
-        // o leitor morto se nenhum ciclo tivesse pego.
-        val r = Runnable { armCycle(ctxRef) }
-        retryRunnable = r
-        mainHandler.postDelayed(r, REARM_INTERVAL_MS)
-    }
-
-    private fun cancelPending() {
-        retryRunnable?.let { mainHandler.removeCallbacks(it) }
-        retryRunnable = null
-        verifyRunnable?.let { mainHandler.removeCallbacks(it) }
-        verifyRunnable = null
-    }
-
     fun stop() {
-        cancelPending()
-        gaveUp = false
-        arming = false
+        armJob?.cancel()
+        armJob = null
         runCatching {
             codeScanner?.stopService()
         }.onFailure {
-            Log.w("MPlayerScan", "gertec_sdk_stop_failed err=${it.message}")
+            Log.w(TAG, "gertec_sdk_stop_failed err=${it.message}")
         }
         started = false
     }
