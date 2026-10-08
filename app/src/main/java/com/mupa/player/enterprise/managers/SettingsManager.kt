@@ -171,11 +171,26 @@ class SettingsManager(private val context: Context) {
         persistBoolean(Keys.gertecScannerEnabled, LEGACY_KEY_GERTEC_SCANNER_ENABLED, enabled)
     }
 
+    // Achado real de campo (2026-10-08, MEFERI MC45 DER4BT125115002178):
+    // o default `true` aqui era INCONDICIONAL (todo aparelho, Gertec ou
+    // não), e o chamador (PlayerActivity.onResume) usa
+    // `GertecScannerManager.isGertecDevice() || getGertecScannerEnabled()`
+    // — como o lado direito do OR já vinha `true` por padrão em QUALQUER
+    // device, a checagem de `isGertecDevice()` nunca tinha efeito nenhum
+    // na prática. Resultado confirmado ao vivo via `adb logcat`: neste
+    // MC45 (sem hardware Gertec nenhum), `GertecScannerManager` ficava
+    // tentando se armar pra sempre, falhando a cada ~30s
+    // ("gertec_sdk_getInstance_failed"), gastando CPU/wakeups à toa num
+    // loop que nunca teria como funcionar. Fix: o default só vira `true`
+    // quando o aparelho É de fato Gertec (`isGertecDevice()`) — em
+    // qualquer outro, default `false`, preservando o comportamento
+    // "ativo sem configuração manual" só onde faz sentido. Um admin que
+    // precisar ligar manualmente num device fora da heurística ainda
+    // pode, via Configurações — só o DEFAULT mudou.
     suspend fun getGertecScannerEnabled(): Boolean {
-        // Padrão TRUE: o leitor Gertec deve ficar sempre ativo, pronto pra ler o código de
-        // barras, sem precisar de ativação manual em Configurações.
+        val default = GertecScannerManager.isGertecDevice()
         return context.settingsDataStore.data.first()[Keys.gertecScannerEnabled]
-            ?: legacyPrefs.getBoolean(LEGACY_KEY_GERTEC_SCANNER_ENABLED, true)
+            ?: legacyPrefs.getBoolean(LEGACY_KEY_GERTEC_SCANNER_ENABLED, default)
     }
 
     suspend fun setImageSearchEnabled(enabled: Boolean) {
