@@ -3705,7 +3705,8 @@ class PlayerActivity : ComponentActivity() {
                     if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
                         ttsReady = false
                     } else {
-                        tts?.setSpeechRate(1.02f)
+                        // Pedido do usuário (2026-10-09): +20% de velocidade (1.02 -> 1.224).
+                        tts?.setSpeechRate(1.224f)
                         tts?.setPitch(1.0f)
                         tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                             override fun onStart(utteranceId: String?) {}

@@ -37,17 +37,37 @@ de chamada à API de voz da Azure/Microsoft Cognitive Services).
 ```
 PlayerActivity (fala "De R$ 9,88 por R$ 7,59.")
   └─> PriceVoiceSynth.speak(texto)
-        1. arquivo local?  filesDir/tts_cache/<hash>.mp3           → toca, fim (zero rede)
-        2. linha na tabela (Supabase REST, leitura direta)?        → baixa do R2, toca, fim
-        3. Edge Function tts-synthesize (texto, voz)                → sintetiza+sobe+grava, devolve URL
-        4. qualquer falha em 1-3                                    → onFallback() = TextToSpeech nativo
+        arquivo local existe?  filesDir/tts_cache/<hash>.mp3
+          SIM → toca a voz Azure, fim (zero rede)
+          NÃO → onFallback() JÁ (TextToSpeech nativo, fala na hora)
+                + dispara busca em SEGUNDO PLANO, sem bloquear nada:
+                  1. linha na tabela (Supabase REST, leitura direta)?  → baixa do R2, grava local
+                  2. Edge Function tts-synthesize (texto, voz)          → sintetiza+sobe+grava, baixa, grava local
+                (próxima vez que esse MESMO texto for falado, já acha o
+                arquivo local e usa a voz Azure)
 ```
+
+**Revisão de 2026-10-09 (mesmo dia, depois do primeiro teste ao vivo)**:
+a versão original esperava a tabela via REST e, se não achasse, a Edge
+Function — EM SÉRIE, de forma síncrona — antes de cair pro TTS nativo.
+Em rede ruim/instável (timeouts de 5-8s por chamada, 2 chamadas em
+sequência), isso podia deixar o aparelho em silêncio por até ~26s num
+cache miss — reportado pelo usuário como "travando". Corrigido: **só o
+arquivo local é síncrono** (checagem instantânea, sem rede nenhuma); não
+achando, cai pro nativo IMEDIATAMENTE e a busca/síntese vira trabalho de
+fundo que só serve pra deixar cacheado pra próxima vez, nunca atrasa o
+que está sendo falado agora. Tem dedup (`prefetchInFlight`, um
+`ConcurrentHashMap.newKeySet`) pra não disparar N sínteses em paralelo se
+o mesmo produto novo for escaneado várias vezes seguidas antes da 1ª
+busca terminar.
 
 A CHAVE do cache é `sha256(voiceName + "|" + text)` — **não** o EAN nem o
 preço em si. Duas lojas diferentes anunciando a mesma frase ("De R$ 9,88
 por R$ 7,59.") reusam o MESMO arquivo de áudio. Isso é o que faz "não
 gastar": a Azure só é chamada na PRIMEIRA vez que uma frase exata aparece
-em QUALQUER dispositivo da frota inteira.
+em QUALQUER dispositivo da frota inteira — e mesmo essa primeira vez
+nunca atrasa o anúncio (fala nativo na hora, Azure fica pronta pra
+próxima).
 
 ### Banco (Supabase) — `supabase/migrations/20261009010000_create_mplayer_tts_audio_cache.sql`
 
@@ -185,3 +205,22 @@ local — nenhum valor real apareceu em nenhuma resposta desta sessão,
   tabela continuou em 1 — confirma que a 2ª vez NÃO chamou a Edge
   Function (nem a Azure), só reaproveitou o cache. Zero gasto novo na
   repetição, objetivo da feature validado em produção de verdade.
+- **Bug real de travamento achado pelo usuário no mesmo dia, em uso
+  real**: com a versão acima (espera síncrona de REST+Edge Function antes
+  do fallback), um cache miss em rede ruim podia deixar o aparelho até
+  ~26s em silêncio — sentido como "travando" no caixa. Corrigido (ver
+  seção Arquitetura, "Revisão de 2026-10-09") e testado ao vivo de novo,
+  v1.1.57 (74), no mesmo MC45: apaguei o arquivo local de um produto já
+  cacheado (`3ad618a5...`, "6 reais e 99 centavos") pra forçar um cache
+  miss de verdade, reescaneei o mesmo EAN (7898215157403) e confirmei no
+  logcat `GoogleTTSServiceImpl: TTS dispatch` disparando ~0,4s depois do
+  preço ser encontrado (zero espera de rede) — `AudioTrack` do processo
+  `com.google.android.tts` (não mais `com.mupa.player.enterprise` com
+  assinatura de `MediaPlayer`/`resetDrmState`), confirmando que foi
+  mesmo o motor nativo. Depois de alguns segundos, o arquivo local
+  reapareceu sozinho (`ls` no device) — confirma que a busca em segundo
+  plano funcionou. `created_at`/`use_count` da linha no Supabase
+  continuaram intactos — confirma que a busca em segundo plano achou o
+  cache já existente via REST (nível 2) e NÃO precisou chamar a Edge
+  Function/Azure de novo. Fallback imediato + recache em segundo plano +
+  zero gasto, os 3 validados juntos ao vivo.

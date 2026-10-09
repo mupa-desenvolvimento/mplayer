@@ -33,16 +33,20 @@ import java.util.concurrent.TimeUnit
  * `tts-synthesize` (supabase/functions/tts-synthesize) — a chave da Azure
  * e as credenciais do R2 nunca ficam no APK.
  *
- * 3 níveis de cache, do mais barato pro mais caro:
- *   1. Arquivo local (`filesDir/tts_cache/<hash>.mp3`) — zero rede.
- *   2. Linha já existente em `mplayer_tts_audio_cache` (Supabase REST,
- *      leitura direta) — outro device da frota já gerou esse mesmo texto.
- *   3. Edge Function `tts-synthesize` — ninguém gerou ainda; ela sintetiza
- *      e grava a linha nova pros próximos.
- *
- * Qualquer falha em qualquer nível (sem rede, timeout, Azure fora do ar)
- * cai pra [onFallback] — o chamador decide o que fazer (ex.: usar o
- * TextToSpeech nativo do Android, que nunca falta, só soa mais robótico).
+ * Só UM nível é síncrono — arquivo local (`filesDir/tts_cache/<hash>.mp3`,
+ * zero rede, checagem instantânea). Achando o arquivo, toca a voz Azure.
+ * NÃO achando, chama [onFallback] NA HORA (sem esperar rede nenhuma —
+ * achado real em produção, 2026-10-09: esperar a tabela via REST e depois
+ * a Edge Function, em sequência, podia levar até ~26s de silêncio num
+ * cache miss com rede ruim/instável, o que parecia o aparelho "travado"
+ * pro operador no caixa) e dispara uma busca/síntese em SEGUNDO PLANO
+ * (nível 2: tabela `mplayer_tts_audio_cache` via REST; nível 3, se nem
+ * isso achar: Edge Function `tts-synthesize`, que sintetiza na Azure e
+ * grava a linha nova) só para DEIXAR CACHEADO pra próxima vez — nunca
+ * afeta o que já foi falado agora. [onFallback] é o TextToSpeech nativo
+ * do Android (grátis, sempre disponível, só soa mais robótico); se ele
+ * também não estiver pronto, o chamador simplesmente não fala nada —
+ * nunca trava esperando.
  */
 class PriceVoiceSynth(context: Context) {
     private val appContext = context.applicationContext
@@ -54,14 +58,23 @@ class PriceVoiceSynth(context: Context) {
     ).build()
     private val cacheDir: File by lazy { File(appContext.filesDir, "tts_cache").apply { mkdirs() } }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // Escopo SEPARADO pro download/síntese em segundo plano — de propósito
+    // nunca cancelado por um speak() novo (um scan seguinte não deveria
+    // abortar o cache de um produto anterior ainda sendo buscado).
+    private val prefetchScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // Dedup: evita disparar N buscas/sínteses em paralelo pro MESMO texto
+    // se o operador escanear o mesmo produto novo várias vezes seguidas
+    // antes da 1ª busca terminar (cada uma custaria uma síntese Azure).
+    private val prefetchInFlight = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     @Volatile private var currentPlayer: MediaPlayer? = null
     private var speakJob: Job? = null
 
     /**
-     * Sintetiza (ou reusa do cache) e toca [text]. Chama [onFallback] na
-     * UI thread sempre que não conseguir tocar por essa via — o chamador
-     * decide o que fazer (ex.: usar o TTS nativo do Android).
+     * Toca [text] com a voz Azure SE já estiver cacheada localmente —
+     * checagem instantânea, sem rede. Senão, chama [onFallback] NA HORA
+     * (nunca espera rede) e dispara uma busca/síntese em segundo plano só
+     * pra deixar cacheado pra próxima vez.
      */
     fun speak(text: String, voiceName: String = DEFAULT_VOICE, volume: Float = 1f, onFallback: () -> Unit) {
         val trimmed = text.trim()
@@ -69,34 +82,48 @@ class PriceVoiceSynth(context: Context) {
             onFallback()
             return
         }
-        speakJob?.cancel()
-        stopCurrentPlayback()
-        speakJob = scope.launch {
-            val played = runCatching { speakInternal(trimmed, voiceName, volume.coerceIn(0f, 1f)) }
-                .onFailure { Log.w(TAG, "speak_failed: ${it.javaClass.simpleName}: ${it.message}") }
-                .getOrDefault(false)
-            if (!played) withContext(Dispatchers.Main) { onFallback() }
+        val hash = sha256Hex("$voiceName|$trimmed")
+        val localFile = File(cacheDir, "$hash.mp3")
+        if (localFile.exists() && localFile.length() > 0L) {
+            speakJob?.cancel()
+            stopCurrentPlayback()
+            speakJob = scope.launch {
+                val played = runCatching { playFile(localFile, volume.coerceIn(0f, 1f)) }
+                    .onFailure { Log.w(TAG, "play_failed: ${it.javaClass.simpleName}: ${it.message}") }
+                    .getOrDefault(false)
+                if (!played) withContext(Dispatchers.Main) { onFallback() }
+            }
+            return
         }
+        // Cache miss: fala com o que já tem (nativo) SEM esperar rede nenhuma.
+        onFallback()
+        prefetchInBackground(hash, trimmed, voiceName, localFile)
     }
 
-    /** Para qualquer reprodução em andamento (não cancela um fallback já disparado). */
+    /** Para qualquer reprodução em andamento (não cancela um fallback já disparado nem um prefetch em segundo plano). */
     fun stop() {
         speakJob?.cancel()
         speakJob = null
         stopCurrentPlayback()
     }
 
-    private suspend fun speakInternal(text: String, voiceName: String, volume: Float): Boolean {
-        val hash = sha256Hex("$voiceName|$text")
-        val localFile = File(cacheDir, "$hash.mp3")
-        if (!localFile.exists() || localFile.length() == 0L) {
-            val bytes = fetchAudioBytes(hash, text, voiceName) ?: return false
-            runCatching { localFile.writeBytes(bytes) }.onFailure { return playBytesDirect(bytes, volume) }
+    /** Busca (tabela/Edge Function) e grava o arquivo local — fire-and-forget, nunca afeta o que já foi falado. */
+    private fun prefetchInBackground(hash: String, text: String, voiceName: String, localFile: File) {
+        if (!prefetchInFlight.add(hash)) return // já tem uma busca rodando pro mesmo texto
+        prefetchScope.launch {
+            try {
+                val bytes = fetchAudioBytes(hash, text, voiceName) ?: return@launch
+                runCatching { localFile.writeBytes(bytes) }
+                    .onFailure { Log.w(TAG, "prefetch_write_failed: ${it.message}") }
+            } catch (e: Exception) {
+                Log.w(TAG, "prefetch_failed: ${e.javaClass.simpleName}: ${e.message}")
+            } finally {
+                prefetchInFlight.remove(hash)
+            }
         }
-        return playFile(localFile, volume)
     }
 
-    /** Nível 2 (tabela via REST) e, se não achar, nível 3 (Edge Function). */
+    /** Nível 2 (tabela via REST) e, se não achar, nível 3 (Edge Function) — só chamado em segundo plano. */
     private fun fetchAudioBytes(hash: String, text: String, voiceName: String): ByteArray? {
         resolvePublicUrlFromTable(hash)?.let { url -> downloadBytes(url)?.let { return it } }
         val url = requestSynthesis(text, voiceName) ?: return null
@@ -178,30 +205,6 @@ class PriceVoiceSynth(context: Context) {
             runCatching { file.delete() } // arquivo local pode estar corrompido — não deixa travado pra sempre
             false
         }
-    }
-
-    /** Só usado se a escrita em disco falhar (ex.: storage cheio) — toca sem persistir o cache local. */
-    private suspend fun playBytesDirect(bytes: ByteArray, volume: Float): Boolean = withContext(Dispatchers.Main) {
-        runCatching {
-            val tmp = File.createTempFile("tts_tmp_", ".mp3", appContext.cacheDir)
-            tmp.writeBytes(bytes)
-            stopCurrentPlayback()
-            val player = MediaPlayer().apply {
-                setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_ASSISTANT)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build(),
-                )
-                setDataSource(tmp.absolutePath)
-                setVolume(volume, volume)
-                prepare()
-                setOnCompletionListener { mp -> mp.release(); runCatching { tmp.delete() }; if (currentPlayer === mp) currentPlayer = null }
-                start()
-            }
-            currentPlayer = player
-            true
-        }.getOrElse { false }
     }
 
     private fun stopCurrentPlayback() {
