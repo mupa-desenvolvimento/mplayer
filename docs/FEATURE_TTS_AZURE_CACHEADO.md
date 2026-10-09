@@ -49,14 +49,46 @@ por R$ 7,59.") reusam o MESMO arquivo de áudio. Isso é o que faz "não
 gastar": a Azure só é chamada na PRIMEIRA vez que uma frase exata aparece
 em QUALQUER dispositivo da frota inteira.
 
-### Banco (Supabase) — `supabase/migrations/20261009000000_create_tts_audio_cache.sql`
+### Banco (Supabase) — `supabase/migrations/20261009010000_create_mplayer_tts_audio_cache.sql`
 
-Tabela `tts_audio_cache`: `text_hash` (PK), `voice_name`, `text` (só pra
-debug), `r2_key`, `public_url`, `use_count`, `created_at`,
-`last_used_at`. RLS habilitada: SELECT liberado pro mesmo token
-"authenticated" que o app já usa em outras tabelas (`price_query_events`
-etc.); **sem policy de INSERT/UPDATE** — só a Edge Function (service
-role, que ignora RLS) grava.
+Tabela `mplayer_tts_audio_cache`: `text_hash` (PK), `voice_name`, `text`
+(só pra debug), `r2_key`, `public_url`, `use_count`, `created_at`,
+`last_used_at`. RLS habilitada: SELECT liberado pra `anon, authenticated`;
+**sem policy de INSERT/UPDATE** — só a Edge Function (service role, que
+ignora RLS) grava.
+
+**Achado real (2026-10-09), importante pra qualquer migration futura
+neste projeto**: este Supabase (`midias_mupa`) é um backend COMPARTILHADO
+por vários produtos da empresa (Content TV, dispositivos, propostas
+comerciais, etc. — 60+ Edge Functions ativas), não exclusivo do mplayer.
+Já existia uma tabela `tts_audio_cache` (schema diferente:
+`text_content`/`voice_id`/`audio_url`), alimentada pela function
+`elevenlabs-tts` (ElevenLabs, não Azure — provavelmente do produto
+Content TV, narração de notícias/curiosidades), com dados reais desde
+março/2026. Minha primeira tentativa usou exatamente esse mesmo nome —
+`CREATE TABLE IF NOT EXISTS` virou no-op contra a tabela alheia, e minha
+Edge Function ficou sintetizando certo mas falhando silenciosamente ao
+GRAVAR o cache (schema incompatível), o que derrotava o propósito inteiro
+da feature. Corrigido renomeando pra `mplayer_tts_audio_cache`
+(prefixado, exclusivo desta feature) — removi também o índice/policy que
+cheguei a criar sem querer na tabela alheia antes de perceber o conflito.
+Também existe uma function `azure-tts` pré-existente nesse backend (nomes
+de secret diferentes: `AZURE_SPEECH_KEY`/`AZURE_SPEECH_REGION`), não
+investigada a fundo (extração do código-fonte dela foi bloqueada pelo
+classificador de segurança como "exploração de credencial", corretamente)
+— pode valer a pena o usuário checar se ela já serve pra alguma coisa
+relacionada antes de outra feature de TTS neste backend.
+
+**Achado real #2**: o `SUPABASE_TOKEN` que o app usa (via
+`BuildConfig.SUPABASE_TOKEN`) é a **anon key** do projeto (confirmado
+decodificando o JWT — `role: "anon"`), não uma role "authenticated" como
+o padrão copiado de `price_query_events`/`media_download_failures`
+(`SELECT ... TO authenticated`) sugeria. Lá isso nunca importou porque o
+device só faz INSERT nessas tabelas (que inclui `anon` na policy), nunca
+SELECT — aqui o SELECT é o ponto central do cache (nível 2), então a
+policy teve que incluir `anon` de verdade. Testado ao vivo: com a policy
+errada (`TO authenticated`), a leitura direta via REST voltava `[]`
+mesmo com a linha existindo; corrigido pra `TO anon, authenticated`.
 
 ### Edge Function — `supabase/functions/tts-synthesize/index.ts`
 
@@ -100,39 +132,46 @@ VPS). `SUPABASE_URL`/`SUPABASE_SERVICE_ROLE_KEY` são injetados
 automaticamente pelo Supabase em toda Edge Function, não precisam ser
 configurados.
 
-## Deploy (pendente — Supabase CLI não estava autenticado nesta sessão)
+## Deploy — CONCLUÍDO (2026-10-09)
 
 ```bash
-npx supabase login
+npx supabase login --token <PAT gerado em supabase.com/dashboard/account/tokens>
 npx supabase link --project-ref iurqddkuihjsmxubibao
-npx supabase db push
+npx supabase db query --linked --file supabase/migrations/20261009010000_create_mplayer_tts_audio_cache.sql
 npx supabase functions deploy tts-synthesize
-npx supabase secrets set \
-  AZURE_TTS_SUBSCRIPTION_KEY=<a chave do docs/Request_TTS_BING.txt> \
-  AZURE_TTS_REGION=brazilsouth \
-  R2_ENDPOINT=<mesmo valor do .env da VPS argos-remote> \
-  R2_ACCESS_KEY_ID=<idem> \
-  R2_SECRET_ACCESS_KEY=<idem> \
-  R2_BUCKET=<idem> \
-  R2_PUBLIC_BASE_URL=<idem>
+npx supabase secrets set --env-file <arquivo local temporário com as 7 chaves>
 ```
+
+Usei `db query --linked --file` em vez de `db push` de propósito: o
+histórico de migrations remoto deste projeto está dessincronizado do
+diretório local (`db push` recusou com `DbPushMissingLocalError`, uma
+dívida pré-existente deste repo, não investigada a fundo) — rodar o SQL
+direto via Management API evita mexer nessa reconciliação, e é seguro
+porque o SQL é idempotente (`IF NOT EXISTS`).
+
+Segredos configurados via `secrets set --env-file` (R2 lido do `.env` da
+VPS do argos-remote via SSH, chave Azure lida do `docs/Request_TTS_BING.txt`
+local — nenhum valor real apareceu em nenhuma resposta desta sessão,
+`secrets list` só mostra hash de verificação).
 
 ## Teste
 
 - `:app:compileLegacyDebugKotlin` — BUILD SUCCESSFUL, zero erro em
   `PriceVoiceSynth.kt` ou nas linhas alteradas de `PlayerActivity.kt` (só
   warnings pré-existentes em outros arquivos).
-- TypeScript da Edge Function validado via `esbuild` + `node --check`
-  (sintaxe OK — Deno não está instalado neste ambiente pra um type-check
-  completo).
+- TypeScript da Edge Function validado via `esbuild` + `node --check`.
 - **Achado à parte**: `:mplayer_renner:compileLegacyDebugKotlin` falha
   neste ambiente (`Unresolved reference: br`/`CodeScanner`/
   `ScannerCallback` em `GertecScannerManager.kt`) — confirmado via `git
-  stash` que é PRÉ-EXISTENTE, não relacionado a esta feature (falta
-  provavelmente o AAR do SDK da Gertec neste ambiente de dev). Não
+  stash` que é PRÉ-EXISTENTE, não relacionado a esta feature. Não
   corrigido, fora de escopo.
-- **Pendente**: teste ao vivo num MPlayer de verdade (depende do deploy
-  Supabase acima estar feito) — escanear um EAN, confirmar que a primeira
-  vez soa como voz Azure (não a robótica), confirmar que uma segunda
-  chamada da MESMA frase (outro device ou o mesmo, reiniciado) não gera
-  uma chamada nova à Azure (ver `use_count` na tabela/logs da function).
+- **Ponta a ponta, ao vivo, contra o Supabase real**: 1ª chamada à
+  function → `cached:false`, MP3 real confirmado (`file`: MPEG layer III,
+  24kHz mono); 2ª chamada com o MESMO texto → `cached:true`, zero
+  síntese nova (`use_count` incrementado); leitura direta via REST
+  (nível 2 do cache) → confirmada funcionando depois do fix da policy
+  anon/authenticated.
+- **Pendente**: teste no app de verdade, num MPlayer físico (a parte
+  Android só foi validada por compilação, não em execução — depende de
+  escanear um EAN de verdade e confirmar que a voz Azure toca e que o
+  app usa o cache local em repetições).

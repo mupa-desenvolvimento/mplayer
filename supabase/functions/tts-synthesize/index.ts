@@ -19,9 +19,15 @@ import { S3Client, PutObjectCommand } from "npm:@aws-sdk/client-s3@3.1142.0"
 // outra loja) cai direto no primeiro caminho — zero chamada nova à Azure.
 //
 // O app Android só chama esta function quando NEM o cache local (arquivo
-// em disco) NEM uma leitura direta de `tts_audio_cache` via REST (mais
-// barata que invocar a function) acharam o áudio — ver
+// em disco) NEM uma leitura direta de `mplayer_tts_audio_cache` via REST
+// (mais barata que invocar a function) acharam o áudio — ver
 // PriceVoiceSynth.kt no app.
+//
+// Nome da tabela PREFIXADO com "mplayer_" de propósito (achado real,
+// 2026-10-09): este Supabase é compartilhado por vários produtos da
+// empresa — já existia uma "tts_audio_cache" com schema diferente,
+// alimentada pela function "elevenlabs-tts" (provavelmente do produto
+// Content TV), sem relação nenhuma com esta feature.
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -134,7 +140,7 @@ serve(async (req) => {
     )
 
     const { data: existing } = await supabase
-      .from('tts_audio_cache')
+      .from('mplayer_tts_audio_cache')
       .select('public_url, use_count')
       .eq('text_hash', textHash)
       .maybeSingle()
@@ -142,7 +148,7 @@ serve(async (req) => {
     if (existing) {
       // Contagem de uso é só telemetria (não bloqueia a resposta se falhar).
       supabase
-        .from('tts_audio_cache')
+        .from('mplayer_tts_audio_cache')
         .update({ use_count: (existing.use_count ?? 1) + 1, last_used_at: new Date().toISOString() })
         .eq('text_hash', textHash)
         .then(() => {}, () => {})
@@ -165,7 +171,7 @@ serve(async (req) => {
     // a segunda só sobrescreve com os mesmos dados (texto/voz são a
     // chave, o resultado é determinístico).
     const { error: insertError } = await supabase
-      .from('tts_audio_cache')
+      .from('mplayer_tts_audio_cache')
       .upsert(
         { text_hash: textHash, voice_name: voiceName, text, r2_key: r2Key, public_url: publicUrl },
         { onConflict: 'text_hash' },

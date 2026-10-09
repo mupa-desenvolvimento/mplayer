@@ -35,8 +35,8 @@ import java.util.concurrent.TimeUnit
  *
  * 3 níveis de cache, do mais barato pro mais caro:
  *   1. Arquivo local (`filesDir/tts_cache/<hash>.mp3`) — zero rede.
- *   2. Linha já existente em `tts_audio_cache` (Supabase REST, leitura
- *      direta) — outro device da frota já gerou esse mesmo texto.
+ *   2. Linha já existente em `mplayer_tts_audio_cache` (Supabase REST,
+ *      leitura direta) — outro device da frota já gerou esse mesmo texto.
  *   3. Edge Function `tts-synthesize` — ninguém gerou ainda; ela sintetiza
  *      e grava a linha nova pros próximos.
  *
@@ -106,7 +106,7 @@ class PriceVoiceSynth(context: Context) {
     private fun resolvePublicUrlFromTable(hash: String): String? {
         val token = BuildConfig.SUPABASE_TOKEN.trim()
         if (token.isBlank()) return null
-        val url = "$SUPABASE_BASE_URL/rest/v1/tts_audio_cache?text_hash=eq.$hash&select=public_url&limit=1"
+        val url = "$SUPABASE_BASE_URL/rest/v1/mplayer_tts_audio_cache?text_hash=eq.$hash&select=public_url&limit=1"
         val req = Request.Builder()
             .url(url)
             .header("apikey", token)
