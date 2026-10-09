@@ -57,3 +57,6 @@ trae-debug-log-*
 dist/
 hard_reset_tool/
 tools/
+
+# Referência com segredo em texto puro (chave Azure) — nunca commitar
+docs/Request_TTS_BING.txt

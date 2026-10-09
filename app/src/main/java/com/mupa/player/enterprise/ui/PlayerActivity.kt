@@ -98,6 +98,7 @@ import com.mupa.player.enterprise.monitoring.DeviceEventSyncManager
 import com.mupa.player.enterprise.monitoring.MediaDownloadFailureSyncManager
 import com.mupa.player.enterprise.price.AdvantageType
 import com.mupa.player.enterprise.price.OfferIntelligence
+import com.mupa.player.enterprise.price.PriceVoiceSynth
 import com.mupa.player.enterprise.price.SmartDescription
 import androidx.core.widget.TextViewCompat
 import android.widget.TextView
@@ -220,6 +221,11 @@ class PlayerActivity : ComponentActivity() {
     private var priceAnimator: ValueAnimator? = null
     private var tts: TextToSpeech? = null
     private var ttsReady = false
+    // Voz Azure com cache compartilhado (ver PriceVoiceSynth) — substitui o
+    // TextToSpeech nativo acima nos 3 pontos que falam preço/produto; o
+    // nativo continua de pé só como fallback (sem rede, cache frio e a
+    // Edge Function fora do ar, por exemplo) pra nunca deixar a loja muda.
+    private val priceVoiceSynth by lazy { PriceVoiceSynth(applicationContext) }
     private var tone: ToneGenerator? = null
     private var lastSpokenEan: String = ""
     private var lastSpokenAtMs: Long = 0L
@@ -511,6 +517,7 @@ class PlayerActivity : ComponentActivity() {
         tts?.stop()
         tts?.shutdown()
         tts = null
+        priceVoiceSynth.stop()
         runCatching { tone?.release() }
         tone = null
         playerEngine.release()
@@ -3746,13 +3753,7 @@ class PlayerActivity : ComponentActivity() {
 
         val texto = fala.toString().trim()
         if (texto.isBlank()) return
-        val utteranceId = UUID.randomUUID().toString()
-        if (Build.VERSION.SDK_INT >= 21) {
-            tts?.speak(texto, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
-        } else {
-            @Suppress("DEPRECATION")
-            tts?.speak(texto, TextToSpeech.QUEUE_FLUSH, null)
-        }
+        speakWithVoiceSynth(texto)
     }
 
     /**
@@ -3771,13 +3772,7 @@ class PlayerActivity : ComponentActivity() {
         lastSpokenEan = product.ean
         lastSpokenAtMs = now
 
-        val utteranceId = UUID.randomUUID().toString()
-        if (Build.VERSION.SDK_INT >= 21) {
-            tts?.speak(textToSpeak, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
-        } else {
-            @Suppress("DEPRECATION")
-            tts?.speak(textToSpeak, TextToSpeech.QUEUE_FLUSH, null)
-        }
+        speakWithVoiceSynth(textToSpeak)
     }
 
     private fun speakNotFoundIfPossible(ean: String) {
@@ -3790,12 +3785,26 @@ class PlayerActivity : ComponentActivity() {
         lastNotFoundEan = normalized
         lastNotFoundAtMs = now
 
+        speakWithVoiceSynth("Produto não encontrado!")
+    }
+
+    /**
+     * Fala [texto] pela voz Azure cacheada (ver [PriceVoiceSynth]); se não
+     * conseguir por qualquer motivo (sem rede, cache frio + Edge Function
+     * fora do ar), cai pro TextToSpeech nativo do Android — a loja nunca
+     * fica muda, só soa mais robótica nesse caso raro.
+     */
+    private fun speakWithVoiceSynth(texto: String) {
+        priceVoiceSynth.speak(texto, onFallback = { speakNative(texto) })
+    }
+
+    private fun speakNative(texto: String) {
         val utteranceId = UUID.randomUUID().toString()
         if (Build.VERSION.SDK_INT >= 21) {
-            tts?.speak("Produto não encontrado!", TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+            tts?.speak(texto, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
         } else {
             @Suppress("DEPRECATION")
-            tts?.speak("Produto não encontrado!", TextToSpeech.QUEUE_FLUSH, null)
+            tts?.speak(texto, TextToSpeech.QUEUE_FLUSH, null)
         }
     }
 
