@@ -171,7 +171,17 @@ local — nenhum valor real apareceu em nenhuma resposta desta sessão,
   síntese nova (`use_count` incrementado); leitura direta via REST
   (nível 2 do cache) → confirmada funcionando depois do fix da policy
   anon/authenticated.
-- **Pendente**: teste no app de verdade, num MPlayer físico (a parte
-  Android só foi validada por compilação, não em execução — depende de
-  escanear um EAN de verdade e confirmar que a voz Azure toca e que o
-  app usa o cache local em repetições).
+- **Teste ao vivo em hardware real (2026-10-09)**: build debug v1.1.56
+  (73) instalado via `adb install -r` num MC45 real
+  (`DER4BT125115002178`). Escaneei um produto físico (gelatina Royal
+  cereja, leitor Se4070/MeWedge) — o preço falado ("6 reais e 99
+  centavos") gerou uma linha NOVA em `mplayer_tts_audio_cache`
+  (confirmado via query direta no Supabase), áudio tocou via
+  `MediaPlayer` (confirmado pelos logs `AudioTrack`/`MediaPlayerService`/
+  `resetDrmState` — assinatura bem diferente do `TextToSpeech` nativo),
+  ~2,6s de delay entre o scan e o início do áudio (compatível com
+  síntese nova: Edge Function → Azure → R2). Repeti o MESMO EAN logo
+  depois: áudio tocou em ~0,7s (quase instantâneo) e `use_count` na
+  tabela continuou em 1 — confirma que a 2ª vez NÃO chamou a Edge
+  Function (nem a Azure), só reaproveitou o cache. Zero gasto novo na
+  repetição, objetivo da feature validado em produção de verdade.
