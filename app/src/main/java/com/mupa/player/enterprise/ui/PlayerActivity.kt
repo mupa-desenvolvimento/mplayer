@@ -4054,20 +4054,28 @@ class PlayerActivity : ComponentActivity() {
             val primarySlot = productSlots.firstOrNull { !it.isPromo && !it.isClub && (it.field == "price" || it.label.contains("NORMAL", true)) }
             val basePriceForDeduplication = primarySlot?.value ?: product.price
             
-            val validSlots = productSlots.filter { slot ->
-                if (slot.value <= 0.0) return@filter false
+            val positiveSlots = productSlots.filter { it.value > 0.0 }
+            val dedupedSlots = positiveSlots.filter { slot ->
                 if (basePriceForDeduplication != null && slot.value == basePriceForDeduplication) {
-                    val isSecondary = slot.isPromo || slot.isClub || 
-                                     slot.field == "price_wholesale" || 
+                    val isSecondary = slot.isPromo || slot.isClub ||
+                                     slot.field == "price_wholesale" ||
                                      slot.field == "priceWholesale" ||
                                      slot.field == "price_club" ||
                                      slot.field == "priceClub" ||
                                      slot.field == "price_promotional" ||
                                      slot.field == "pricePromotional"
-                    if (isSecondary) return@filter false
+                    !isSecondary
+                } else {
+                    true
                 }
-                true
             }
+            // Nunca deixar a deduplicação esconder TODOS os preços: se a API só devolveu um
+            // slot e ele veio marcado como "secundário" (ex: PRECO_PDV sem PRECO_NORMAL — ver
+            // parseKompraoResponse), ele é o único preço que existe, não um duplicado a
+            // esconder. Nesse caso cai pra lista sem dedup em vez de ficar vazia (bug real:
+            // tela sem nenhum preço enquanto o TTS, que não passa por essa dedup, falava
+            // normalmente).
+            val validSlots = dedupedSlots.ifEmpty { positiveSlots }
             val bestValue = validSlots.minOfOrNull { it.value }
             val compact = validSlots.size >= 3
             lastRenderedPriceSlotCount = validSlots.size.coerceAtLeast(1)

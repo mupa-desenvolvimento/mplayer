@@ -2165,7 +2165,7 @@ class PriceQueryEngine(
             .build()
         httpMultiStep.newCall(req).execute().use { resp ->
             val body = resp.body?.string().orEmpty()
-            Log.d("MPlayerPrice", "komprao_price_resp ean=$ean status=${resp.code} body=${body.take(400)}")
+            Log.d("MPlayerPrice", "komprao_price_resp ean=$ean status=${resp.code} body=${body.take(2000)}")
             return runCatching { JSONObject(body) }.getOrElse { JSONObject() }
         }
     }

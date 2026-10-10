@@ -198,10 +198,10 @@ object OfferIntelligence {
         val reais = cents / 100
         val cent = cents % 100
         val reaisStr = if (reais == 1) "real" else "reais"
-        return if (cent == 0) {
-            "$reais $reaisStr"
-        } else {
-            "$reais $reaisStr e $cent centavos"
+        return when {
+            reais == 0 -> "$cent centavos"
+            cent == 0 -> "$reais $reaisStr"
+            else -> "$reais $reaisStr e $cent centavos"
         }
     }
 }
