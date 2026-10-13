@@ -281,6 +281,17 @@ class PriceQueryEngine(
                 .getOrNull()
         }
 
+        if (config.integration == "integra-unidasul") {
+            return@withContext runCatching { queryUnidasul(normalizedEan, config, filial) }
+                .onFailure {
+                    Log.w(
+                        "MPlayerPrice",
+                        "query_failed integration=integra-unidasul ean=$normalizedEan err=${it.javaClass.simpleName}:${it.message}",
+                    )
+                }
+                .getOrNull()
+        }
+
         val startedAt = System.currentTimeMillis()
         val (priceHost, pricePort) = resolvePriceEndpoint()
         val state = JSONObject()
@@ -2490,4 +2501,195 @@ class PriceQueryEngine(
 
     private fun formatMoneyBr(v: Double): String =
         "R$ " + String.format(Locale.US, "%.2f", v).replace(".", ",")
+
+    // ─────────────────────────────────────────────────────────────
+    // integra-unidasul  (terminal de consulta UnidaSul Distribuidora
+    // Alimentícia) — reverse-engenheirado de um app legado Kodular/App
+    // Inventor (App_TC_Unidasul.aia, fornecido pelo usuário em
+    // 2026-10-13, ver docs/FEATURE_INTEGRACAO_UNIDASUL.md pro
+    // levantamento completo). Mesmo padrão de servidor local do
+    // queryTcServer acima: endereço configurado em Configurações
+    // (SettingsManager unidasul_server_address, "ip" ou "ip:porta",
+    // porta default 5000 — é o que o app original sempre usou, nunca
+    // configurável nele).
+    //
+    // GET http://{endereco}/get_price?num_filial={filial}&ean={ean}
+    //
+    // O servidor da loja é uma ponte que raspa um sistema ASP.NET
+    // WebForms antigo da UnidaSul (os campos "lblXxx" são literalmente
+    // os IDs dos <asp:Label> da página raspada) e devolve JSON. Resposta
+    // real capturada em produção (filial 035):
+    // {
+    //   "elementos": {
+    //     "ean": "7896423456561",
+    //     "lblDcrProduto": "CHOC SNICKERS MOUSSE MARACUJA 42G",
+    //     "lblPreco": "3,79",                          // string, vírgula BR
+    //     "lblPrecoDC": "A partir de  3 Un:",           // rótulo da oferta por quantidade
+    //     "lblPrecoDC2": "3,33 cada",                   // valor da oferta por quantidade
+    //     "lblScanner": "Na compra de 3 ou mais unidades, você economiza: R$ 0,46 por unidade"
+    //     // demais campos (__VIEWSTATE, __EVENTTARGET, divCabecalho, tmrTemporizador, txtBarras,
+    //     // uplConsulta etc.) são artefatos do ASP.NET raspado, sem uso aqui.
+    //   },
+    //   "imagem_status": "disponivel" | "indisponivel",
+    //   "imagem_url": null | "/imagem-produto/<ean>" | "http://...",
+    //   "success": true
+    // }
+    // Erro de conexão com o servidor da filial: {"error": "...", "details": "...",
+    // "device_info": {...}} (sem "elementos" nem "success"). "Não encontrado": o
+    // app original detectava checando se lblPreco contém o texto literal "null".
+    //
+    // Achado de negócio (não técnico, confirmado com o usuário 2026-10-13): o app
+    // original CAPTURAVA lblPrecoDC/lblPrecoDC2/lblScanner (oferta por quantidade)
+    // mas tinha o bloco que EXIBIA isso na tela desativado — só mostrava o preço
+    // normal. Aqui vira um 2º price slot (mesmo padrão multi_price do Komprão/
+    // TCServer) em vez de descartar informação que o servidor já manda.
+    // ─────────────────────────────────────────────────────────────
+
+    private suspend fun queryUnidasul(ean: String, config: PriceConfig, filial: String): PriceProduct? {
+        val now = System.currentTimeMillis()
+        val cache = db.priceCacheDao().getByEan(ean)
+        val fromCache = cache != null && (now - cache.updatedAtEpochMs) <= config.cacheMinutes * 60 * 1000L
+
+        if (fromCache) {
+            val product = normalizeCachedProduct(parseProductFromCache(ean, cache))
+            insertEvent(ean = ean, filial = filial, responseTimeMs = 0L, fromCache = true, success = product != null)
+            return product
+        }
+
+        val address = SettingsManager(context).getUnidasulServerAddress()
+        if (address.isBlank()) {
+            Log.w("MPlayerPrice", "unidasul_address_not_configured ean=$ean")
+            return null
+        }
+        val baseAddr = address.removePrefix("http://").removePrefix("https://").trimEnd('/')
+        // address pode vir só "ip" (porta implícita 5000, igual o app original sempre usou)
+        // ou "ip:porta" explícito, pra não travar se algum dia mudar na loja.
+        val hostPort = if (baseAddr.contains(":")) baseAddr else "$baseAddr:5000"
+        // Servidor espera num_filial com 3 dígitos (ex.: "035", "086") — normaliza só quando
+        // o valor armazenado é puramente numérico e mais curto, nunca força em algo não-numérico.
+        val numFilial = filial.trim().let { f -> if (f.isNotEmpty() && f.all { it.isDigit() } && f.length < 3) f.padStart(3, '0') else f }
+        if (numFilial.isBlank()) {
+            Log.w("MPlayerPrice", "unidasul_filial_not_configured ean=$ean")
+            return null
+        }
+
+        val startedAt = System.currentTimeMillis()
+        var product: PriceProduct? = null
+        try {
+            val json = fetchUnidasulPrice(hostPort, numFilial, ean)
+            Log.d("MPlayerPrice", "unidasul_resp ean=$ean resp=${json?.toString()?.take(600)}")
+            product = json?.let { parseUnidasulResponse(ean, it, hostPort) }?.let { attachLocalImageIfExists(it) }
+
+            if (product != null) {
+                db.priceCacheDao().upsert(
+                    PriceCacheEntity(
+                        ean = ean,
+                        productJson = productToJson(product).toString(),
+                        updatedAtEpochMs = System.currentTimeMillis(),
+                    )
+                )
+            }
+        } catch (t: Throwable) {
+            Log.w("MPlayerPrice", "query_unidasul_failed ean=$ean addr=$hostPort err=${t.javaClass.simpleName}:${t.message}")
+            // Fallback para cache mesmo expirado quando o servidor da filial está inacessível
+            // (achado real do .aia: isso é comum — "f086srv01.filial.unidasul.local" fora do ar).
+            if (cache != null) {
+                product = normalizeCachedProduct(parseProductFromCache(ean, cache))?.copy(offline = true)
+            }
+        } finally {
+            val took = System.currentTimeMillis() - startedAt
+            insertEvent(ean = ean, filial = filial, responseTimeMs = took, fromCache = false, success = product != null)
+        }
+        return product
+    }
+
+    private fun fetchUnidasulPrice(hostPort: String, numFilial: String, ean: String): JSONObject? {
+        val url = "http://$hostPort/get_price?num_filial=$numFilial&ean=$ean"
+        val req = Request.Builder().url(url).header("accept", "application/json").get().build()
+        http.newCall(req).execute().use { resp ->
+            val body = resp.body?.string().orEmpty()
+            Log.d("MPlayerPrice", "unidasul_price_resp ean=$ean status=${resp.code} body=${body.take(600)}")
+            // Erro de conexão com o servidor da filial chega como 200 com {"error":...} no corpo
+            // (comportamento real observado no .aia) — por isso não filtra por resp.isSuccessful
+            // sozinho, deixa parseUnidasulResponse decidir pelo campo "error"/"success".
+            return runCatching { JSONObject(body) }.getOrNull()
+        }
+    }
+
+    // Fina casca com acesso a Context (cache de imagem local) em volta da função pura
+    // abaixo — mantém a lógica de parsing de verdade 100% testável sem Android.
+    private fun parseUnidasulResponse(ean: String, json: JSONObject, hostPort: String): PriceProduct? {
+        val parsed = parseUnidasulElementosJson(ean, json, hostPort) ?: return null
+        val localImagePath = localProductImagePathIfExists(ean)
+        return if (localImagePath != null) parsed.copy(image = localImagePath) else parsed
+    }
+}
+
+// Função pura (sem Context/AppDatabase) com a lógica de "regras de resposta" de verdade do
+// servidor da UnidaSul — extraída fora da classe de propósito pra dar pra testar direto com
+// as respostas REAIS capturadas em produção no App_TC_Unidasul.aia (ver
+// PriceQueryEngineUnidasulTest.kt), sem precisar instanciar PriceQueryEngine nem mockar
+// Android. `image` sempre sai null aqui (cache de imagem local é resolvido pelo wrapper
+// acima, que tem Context); `parseUnidasulResponse` é quem decide a versão final.
+internal fun parseUnidasulElementosJson(ean: String, json: JSONObject, hostPort: String): PriceProduct? {
+    if (json.has("error")) return null
+    if (!json.optBoolean("success", false)) return null
+    val elementos = json.optJSONObject("elementos") ?: return null
+
+    val precoStr = elementos.optString("lblPreco", "").trim()
+    if (precoStr.isBlank() || precoStr.equals("null", ignoreCase = true)) return null
+    val preco = precoStr.replace(".", "").replace(",", ".").toDoubleOrNull()?.takeIf { it > 0.0 } ?: return null
+
+    val description = elementos.optString("lblDcrProduto", "").trim().ifBlank { null }
+
+    // Oferta por quantidade ("A partir de 3 Un:" + "3,33 cada") — decisão do usuário
+    // (2026-10-13): vira um 2º slot em vez de ser descartada como no app original.
+    val precoDcLabel = elementos.optString("lblPrecoDC", "").trim().removeSuffix(":").trim()
+    val precoDc2Raw = elementos.optString("lblPrecoDC2", "").trim()
+    val precoQtd = Regex("[0-9]+(?:[.,][0-9]+)?").find(precoDc2Raw)
+        ?.value?.replace(".", "")?.replace(",", ".")?.toDoubleOrNull()
+        ?.takeIf { it > 0.0 && it < preco }
+
+    val slots = ArrayList<ProductPriceSlot>()
+    slots += ProductPriceSlot(label = "PREÇO NORMAL", value = preco, field = "price", isPromo = false, isClub = false)
+    if (precoQtd != null) {
+        slots += ProductPriceSlot(
+            label = precoDcLabel.ifBlank { "OFERTA POR QUANTIDADE" },
+            value = precoQtd,
+            field = "price_wholesale",
+            isPromo = true,
+            isClub = false,
+            fromValue = preco, // "de" riscado dentro do box, igual TCServer
+        )
+    }
+
+    val imagemStatus = json.optString("imagem_status", "")
+    val imagemUrlRaw = json.optString("imagem_url", "").trim().takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+    val clientImageUrl = if (imagemStatus == "disponivel" && imagemUrlRaw != null) {
+        if (imagemUrlRaw.startsWith("http")) imagemUrlRaw else "http://$hostPort${if (imagemUrlRaw.startsWith("/")) "" else "/"}$imagemUrlRaw"
+    } else null
+
+    return PriceProduct(
+        id = null,
+        ean = ean,
+        description = description,
+        price = preco,
+        originalPrice = null,
+        clubPrice = null,
+        priceClub = null,
+        priceWholesale = precoQtd,
+        pricePromotional = null,
+        priceFrom = null,
+        priceWeighable = null,
+        cardPrice = null,
+        stock = null,
+        image = null,
+        clientImageUrl = clientImageUrl,
+        offer = null,
+        packs = emptyList(),
+        theme = null,
+        offline = false,
+        priceSlots = slots,
+        xmlLayoutType = "multi_price",
+    )
 }

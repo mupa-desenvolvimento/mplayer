@@ -575,6 +575,89 @@
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
+            <!-- Card: UnidaSul (Consulta Preço via servidor local da loja) —
+                 reverse-engenheirado de App_TC_Unidasul.aia (2026-10-13), mesmo
+                 padrão do card TCServer acima. -->
+            <com.google.android.material.card.MaterialCardView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="16dp"
+                app:cardBackgroundColor="@color/enterprise_surface"
+                app:cardCornerRadius="12dp"
+                app:cardElevation="0dp"
+                app:strokeWidth="1dp"
+                app:strokeColor="#222C3D">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="16dp">
+
+                    <com.google.android.material.textview.MaterialTextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="UnidaSul (Consulta Preço via servidor da loja)"
+                        android:textColor="@color/mupa_cyan"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        android:layout_marginBottom="4dp"/>
+
+                    <com.google.android.material.textview.MaterialTextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Endereço do servidor local da filial (bridge pro sistema da UnidaSul). Porta padrão 5000 se não informada. Deixe vazio para desativar."
+                        android:textColor="#9CA3AF"
+                        android:textSize="12sp"
+                        android:layout_marginBottom="12dp"/>
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal">
+
+                        <com.google.android.material.textfield.TextInputLayout
+                            android:id="@+id/inputLayoutUnidasulServer"
+                            style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:hint="IP ou IP:Porta (ex: 192.168.0.10)"
+                            app:hintTextColor="@color/mupa_cyan"
+                            app:boxStrokeColor="@color/mupa_cyan">
+
+                            <com.google.android.material.textfield.TextInputEditText
+                                android:id="@+id/editUnidasulServer"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:inputType="text"
+                                android:textColor="@color/enterprise_on" />
+                        </com.google.android.material.textfield.TextInputLayout>
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/btnSaveUnidasulServer"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_gravity="center_vertical"
+                            android:layout_marginStart="12dp"
+                            android:text="Salvar"
+                            android:backgroundTint="@color/mupa_cyan"
+                            android:textColor="@color/enterprise_bg" />
+                    </LinearLayout>
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnTestUnidasulServer"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="Testar Conexão"
+                        style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                        android:textColor="@color/mupa_cyan"
+                        app:strokeColor="@color/mupa_cyan" />
+
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
             <!-- Card 3: Switches Modo Dev & Manutenção -->
             <com.google.android.material.card.MaterialCardView
                 android:layout_width="match_parent"

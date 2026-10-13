@@ -134,6 +134,10 @@ android {
             dimension = "api"
             minSdk = 24
         }
+        create("unidasul") {
+            dimension = "api"
+            minSdk = 24
+        }
     }
 
     compileOptions {
@@ -226,6 +230,9 @@ dependencies {
     // komprao também usa activity_camera_test.xml (mesmo layout do flavor modern) e precisa
     // da mesma dependência de engage-ui para o ViewBinding compilar (GestureOverlayView).
     add("kompraoImplementation", project(":engage-ui"))
+
+    // unidasul: mesmo motivo do komprao acima (activity_camera_test.xml/GestureOverlayView).
+    add("unidasulImplementation", project(":engage-ui"))
 
     // Unit testing dependencies
     testImplementation("junit:junit:4.13.2")

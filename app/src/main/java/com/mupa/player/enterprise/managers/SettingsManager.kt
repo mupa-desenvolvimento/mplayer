@@ -42,6 +42,7 @@ class SettingsManager(private val context: Context) {
         val devMode = booleanPreferencesKey("dev_mode")
         val demoMode = booleanPreferencesKey("demo_mode")
         val tcServerAddress = stringPreferencesKey("tc_server_address")
+        val unidasulServerAddress = stringPreferencesKey("unidasul_server_address")
         val gertecScannerEnabled = booleanPreferencesKey("gertec_scanner_enabled")
         val imageSearchEnabled = booleanPreferencesKey("image_search_enabled")
         val heartbeatIdleMinutes = intPreferencesKey("heartbeat_idle_minutes")
@@ -136,6 +137,18 @@ class SettingsManager(private val context: Context) {
 
     suspend fun getTcServerAddress(): String {
         return context.settingsDataStore.data.first()[Keys.tcServerAddress]?.trim().orEmpty()
+    }
+
+    // Servidor local da loja (UnidaSul) — mesmo padrão de tc_server_address acima,
+    // "ip" ou "ip:porta" (porta default 5000, ver PriceQueryEngine.queryUnidasul).
+    // Reverse-engenheirado de App_TC_Unidasul.aia (2026-10-13) — ver
+    // docs/FEATURE_INTEGRACAO_UNIDASUL.md.
+    suspend fun setUnidasulServerAddress(value: String) {
+        context.settingsDataStore.edit { it[Keys.unidasulServerAddress] = value.trim() }
+    }
+
+    suspend fun getUnidasulServerAddress(): String {
+        return context.settingsDataStore.data.first()[Keys.unidasulServerAddress]?.trim().orEmpty()
     }
 
     suspend fun setImageHost(value: String) {

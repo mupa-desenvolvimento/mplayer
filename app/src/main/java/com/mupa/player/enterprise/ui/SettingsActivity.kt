@@ -108,6 +108,9 @@ class SettingsActivity : ComponentActivity() {
             binding.editTcServer.setText(
                 runCatching { SettingsManager(applicationContext).getTcServerAddress() }.getOrDefault(""),
             )
+            binding.editUnidasulServer.setText(
+                runCatching { SettingsManager(applicationContext).getUnidasulServerAddress() }.getOrDefault(""),
+            )
             // SK100/Gertec: o leitor tem que ficar sempre ligado (pedido do usuário,
             // 2026-10-04) — o toggle aqui vira só um indicador travado em vez de uma opção
             // real, pra não dar a impressão de que dá pra desligar. Em qualquer outro
@@ -326,6 +329,65 @@ class SettingsActivity : ComponentActivity() {
                             val prod = Regex("\"produtos\"\\s*:\\s*(\\d+)").find(text)?.groupValues?.get(1) ?: "?"
                             binding.txtSyncProgress.text = "Conexão OK! TCServer Mupa online ($prod produtos)."
                             Toast.makeText(this@SettingsActivity, "TCServer Mupa conectado!", Toast.LENGTH_SHORT).show()
+                        } else {
+                            binding.txtSyncProgress.text = "Conectou (HTTP $code), mas resposta inesperada."
+                        }
+                    }.onFailure { e ->
+                        binding.txtSyncProgress.text = "Falha na conexão: ${e.message}"
+                        Toast.makeText(this@SettingsActivity, "Não foi possível conectar.", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        }
+
+        binding.btnSaveUnidasulServer.setOnClickListener {
+            val address = binding.editUnidasulServer.text.toString().trim()
+            if (address.isNotBlank() && !address.matches(Regex("""^[\w.\-]+(:\d{1,5})?$"""))) {
+                Toast.makeText(this, "Formato inválido. Use IP ou IP:Porta (ex: 192.168.0.10:5000)", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            lifecycleScope.launch {
+                SettingsManager(applicationContext).setUnidasulServerAddress(address)
+                val msg = if (address.isBlank()) {
+                    "UnidaSul desativado. Consulta volta a usar as APIs."
+                } else {
+                    "UnidaSul salvo: $address. Consulta de preço usará o servidor da loja."
+                }
+                Toast.makeText(this@SettingsActivity, msg, Toast.LENGTH_LONG).show()
+            }
+        }
+
+        // Sem endpoint de health dedicado no servidor da UnidaSul (achado do .aia — só existe
+        // /get_price) — testa batendo nele mesmo com um EAN qualquer; qualquer JSON de volta
+        // com "success" ou "error" já prova que o bridge da loja está respondendo.
+        binding.btnTestUnidasulServer.setOnClickListener {
+            val address = binding.editUnidasulServer.text.toString().trim()
+            if (address.isBlank()) {
+                Toast.makeText(this, "Digite o endereço do servidor da UnidaSul primeiro.", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            val baseAddr = address.removePrefix("http://").removePrefix("https://").trimEnd('/')
+            val hostPort = if (baseAddr.contains(":")) baseAddr else "$baseAddr:5000"
+            binding.txtSyncProgress.visibility = View.VISIBLE
+            binding.txtSyncProgress.text = "Testando conexão com $hostPort..."
+            lifecycleScope.launch(Dispatchers.IO) {
+                val result = runCatching {
+                    val url = java.net.URL("http://$hostPort/get_price?num_filial=000&ean=0000000000000")
+                    val conn = url.openConnection() as java.net.HttpURLConnection
+                    conn.connectTimeout = 3000
+                    conn.readTimeout = 3000
+                    conn.requestMethod = "GET"
+                    val code = conn.responseCode
+                    val text = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                        ?.bufferedReader()?.use { it.readText() }.orEmpty()
+                    conn.disconnect()
+                    code to text
+                }
+                withContext(Dispatchers.Main) {
+                    result.onSuccess { (code, text) ->
+                        if (text.contains("\"success\"") || text.contains("\"error\"")) {
+                            binding.txtSyncProgress.text = "Conexão OK! Servidor da loja respondeu (HTTP $code)."
+                            Toast.makeText(this@SettingsActivity, "Servidor UnidaSul conectado!", Toast.LENGTH_SHORT).show()
                         } else {
                             binding.txtSyncProgress.text = "Conectou (HTTP $code), mas resposta inesperada."
                         }
