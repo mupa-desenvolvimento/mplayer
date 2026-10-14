@@ -26,7 +26,7 @@ android {
         applicationId = "com.mupa.player.enterprise"
         minSdk = 21
         targetSdk = 34
-        versionCode = 74
+        versionCode = 75
         versionName = "1.1.57"
 
         // Toda a frota (G-BOT, X96, SK-100, ST-103) é ARM. Empacotar x86/x86_64 adicionava
