@@ -444,6 +444,14 @@ class PlayerActivity : ComponentActivity() {
                 // endereço foi removido nas configurações: volta para a config do manifesto
                 priceConfig = null
             }
+            val hadUnidasulServer = unidasulServerAddress.isNotBlank()
+            refreshUnidasulServerAddress()
+            if (shouldForceUnidasulIntegration()) {
+                ensureUnidasulDefaultPriceConfigIfNeeded()
+            } else if (hadUnidasulServer) {
+                // endereço foi removido nas configurações: volta para a config do manifesto
+                priceConfig = null
+            }
             updateDeviceWatermark()
             updateDevModeUI()
             val cache = runCatching { DeviceCacheManager(applicationContext).load() }.getOrNull()
@@ -563,6 +571,10 @@ class PlayerActivity : ComponentActivity() {
         lifecycleScope.launch {
             refreshTcServerAddress()
             ensureTcServerDefaultPriceConfigIfNeeded()
+        }
+        lifecycleScope.launch {
+            refreshUnidasulServerAddress()
+            ensureUnidasulDefaultPriceConfigIfNeeded()
         }
 
         ensureStoragePermissionIfNeeded()
@@ -2150,6 +2162,11 @@ class PlayerActivity : ComponentActivity() {
             Log.i("MPlayerPrice", "price_config_applied forced_integration=integra-tcserver")
             return
         }
+        if (shouldForceUnidasulIntegration()) {
+            ensureUnidasulDefaultPriceConfigIfNeeded()
+            Log.i("MPlayerPrice", "price_config_applied forced_integration=integra-unidasul")
+            return
+        }
         val json = manifestManager.parsePriceConfigJson(manifestJson) ?: return
         val cfg = runCatching { PriceConfigParser.parse(json) }.getOrNull() ?: return
         if (shouldForceAssaiIntegration()) {
@@ -2248,6 +2265,38 @@ class PlayerActivity : ComponentActivity() {
             analyticsUploadUrl = null,
         )
         Log.i("MPlayerPrice", "price_config_default_tcserver_applied address=$tcServerAddress")
+    }
+
+    // UnidaSul: mesmo padrão exato do TCServer acima — endereço do servidor da
+    // loja configurado manualmente em Configurações (SettingsManager
+    // unidasul_server_address). Achado real (2026-10-14, teste ao vivo com
+    // device na rede do cliente): esse "force" nunca tinha sido escrito —
+    // PriceQueryEngine.queryUnidasul() e os testes unitários já existiam e
+    // funcionavam, mas nada em PlayerActivity jamais setava
+    // priceConfig.integration="integra-unidasul", então toda consulta real
+    // (scan no PlayerActivity) nunca chegava nessa integração — só o botão
+    // "Testar" de Configurações (que bate direto no servidor, sem passar por
+    // priceConfig) dava a falsa impressão de que a conexão funcionava.
+    @Volatile private var unidasulServerAddress: String = ""
+
+    private suspend fun refreshUnidasulServerAddress() {
+        unidasulServerAddress = runCatching {
+            SettingsManager(applicationContext).getUnidasulServerAddress()
+        }.getOrDefault("")
+    }
+
+    private fun shouldForceUnidasulIntegration(): Boolean = unidasulServerAddress.isNotBlank()
+
+    private fun ensureUnidasulDefaultPriceConfigIfNeeded() {
+        if (!shouldForceUnidasulIntegration()) return
+        priceConfig = PriceConfig(
+            integration = "integra-unidasul",
+            timeoutMs = 8000L,
+            cacheMinutes = 10,
+            steps = emptyList(),
+            analyticsUploadUrl = null,
+        )
+        Log.i("MPlayerPrice", "price_config_default_unidasul_applied address=$unidasulServerAddress")
     }
 
     private fun ensureKompraoDefaultPriceConfigIfNeeded() {

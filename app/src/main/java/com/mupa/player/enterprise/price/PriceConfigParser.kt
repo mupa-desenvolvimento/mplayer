@@ -70,7 +70,7 @@ object PriceConfigParser {
             )
         }
 
-        val allowEmptySteps = integration == "integra-assai" || integration == "integra-americana" || integration == "integra-zaffari" || integration == "integra-komprao" || integration == "integra-tcserver"
+        val allowEmptySteps = integration == "integra-assai" || integration == "integra-americana" || integration == "integra-zaffari" || integration == "integra-komprao" || integration == "integra-tcserver" || integration == "integra-unidasul"
         if (steps.isEmpty() && !allowEmptySteps) return null
 
         val layoutObj = root.optJSONObject("layout")

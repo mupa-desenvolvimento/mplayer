@@ -1,6 +1,7 @@
 # Integração UnidaSul (terminal de consulta de preço)
 
-Data: 2026-10-13
+Data: 2026-10-13 (criação) · **Update 2026-10-14: bug real corrigido e
+testado ao vivo pela primeira vez, ver seção no fim do documento.**
 
 ## Pedido
 
@@ -261,6 +262,75 @@ usuário de "não deixar nenhuma falha")
 
 ## Próximos passos sugeridos (não executados, aguardando pedido)
 
-- Teste ao vivo numa loja/filial real com o servidor local ligado.
 - Decidir se o APK `unidasul` entra no Catálogo de Software (canal
   beta primeiro, como de costume).
+
+## Update 2026-10-14 — bug real: integração nunca era ativada
+
+Pedido do usuário: "não está consultando, estou com o dispositivo
+conectado, na rede do cliente... debuga pra nós" — primeiro teste ao
+vivo de verdade, com device físico na rede da loja e o servidor
+UnidaSul real (`10.80.2.1:5000`, filial 080).
+
+**Diagnóstico**: `adb logcat` mostrou, na leitura real de um EAN,
+`barcode_captured ean=78931329 hasCfg=false integration=null` — o
+`priceConfig` nunca chegava a ser preenchido, então `PriceQueryEngine`
+nunca tentava a integração UnidaSul (nem logava erro nenhum — por
+isso parecia simplesmente "não fazer nada").
+
+**Causa raiz**: o passo 5 de "Como configurar num device" (acima)
+estava descrevendo um mecanismo que nunca foi implementado de
+verdade. Todas as outras integrações têm uma função em
+`PlayerActivity.kt` que ativa `priceConfig` de verdade quando a
+condição bate — `ensureAssaiDefaultPriceConfigIfNeeded()`/
+`ensureAmericanasDefaultPriceConfigIfNeeded()`/
+`ensureZaffariDefaultPriceConfigIfNeeded()`/
+`ensureKompraoDefaultPriceConfigIfNeeded()` (por `companyId`) e
+`ensureTcServerDefaultPriceConfigIfNeeded()` (por endereço configurado
+em Configurações, exatamente o mesmo padrão do UnidaSul). A UnidaSul
+era a ÚNICA integração sem esse "force" — `queryUnidasul()` no
+`PriceQueryEngine` e os 10 testes unitários estavam certos e prontos,
+mas nada em `PlayerActivity` jamais setava
+`priceConfig.integration = "integra-unidasul"`. O botão "Testar" de
+Configurações dava falsa confiança porque ele bate direto no servidor
+via `HttpURLConnection`, sem passar pelo `priceConfig` — por isso
+"testar conexão" sempre funcionou enquanto a consulta de preço real
+nunca funcionou.
+
+**Fix** (mesmo padrão exato do TCServer, só duplicado pro UnidaSul):
+- `PlayerActivity.kt`: `unidasulServerAddress`/
+  `refreshUnidasulServerAddress()`/`shouldForceUnidasulIntegration()`/
+  `ensureUnidasulDefaultPriceConfigIfNeeded()` — novos, espelham
+  exatamente o bloco já existente do TCServer. Chamados nos 2 mesmos
+  pontos que o TCServer já era chamado (`startLoop()` e o refresh
+  periódico que roda a cada retomada da tela), incluindo a lógica de
+  "endereço removido nas configurações → volta pra config do
+  manifesto".
+  `applyPriceConfigFromManifestJson()`: checa
+  `shouldForceUnidasulIntegration()` logo depois do TCServer, antes de
+  cair no parser genérico.
+- `PriceConfigParser.kt`: `"integra-unidasul"` adicionado em
+  `allowEmptySteps` (defesa extra — sem isso, se algum dia um
+  `price_config` vindo do manifesto tivesse
+  `integration:"integra-unidasul"` com `steps` vazio, o parser
+  descartava a config inteira retornando `null`).
+
+**Testado ao vivo, ponta a ponta, pela primeira vez** (device físico
+na rede do cliente, servidor real `10.80.2.1:5000`, filial 080):
+1. Antes do fix: `hasCfg=false integration=null` — confirmado o bug
+   via logcat, reproduzido exatamente como o usuário relatou.
+2. Depois do fix (`assembleUnidasulDebug` + `adb install -r`):
+   `price_config_default_unidasul_applied address=10.80.2.1` no boot,
+   depois `hasCfg=true integration=integra-unidasul` na leitura do
+   mesmo EAN (78931329) → `unidasul_resp` com produto real
+   ("CIGARRO LM BLUE LABEL KS RCB 20 UN", R$ 13,75) →
+   `schedule_return reason=tts_done` (TTS falou o preço, fluxo
+   completo até o fim).
+3. Confirmado também, direto por `curl` no device via `adb shell`
+   (fora do app), que o servidor da loja responde certinho no formato
+   documentado — rede e servidor nunca foram o problema, só a ativação
+   da integração no app.
+
+Testado só com ESTE device/filial; outras filiais da UnidaSul usam o
+mesmo mecanismo (config local por device em Configurações), nenhuma
+mudança adicional deveria ser necessária pra elas.
