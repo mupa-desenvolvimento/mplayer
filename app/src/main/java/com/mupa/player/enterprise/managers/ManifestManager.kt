@@ -512,4 +512,14 @@ class ManifestManager(private val context: Context) {
             runCatching { tmp.delete() }
         }
     }
+
+    fun parseTenantId(manifestJson: String): String? {
+        val trimmed = manifestJson.trim()
+        if (trimmed.isBlank()) return null
+        return runCatching {
+            val root = JSONObject(trimmed)
+            val dev = root.optJSONObject("device")
+            dev?.optString("tenant_id")?.takeIf { it.isNotBlank() && it != "null" }
+        }.getOrNull()
+    }
 }

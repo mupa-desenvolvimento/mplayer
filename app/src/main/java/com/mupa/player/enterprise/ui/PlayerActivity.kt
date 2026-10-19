@@ -79,6 +79,7 @@ class PlayerActivity : ComponentActivity() {
     private var syncHideJob: Job? = null
     private var devMode = false
     private var demoMode = false
+    private var currentTenantId: String? = null
     private var manifestEventsListener: com.mupa.player.enterprise.network.ManifestEventsListener? = null
 
     private var storagePermissionDeferred: CompletableDeferred<Boolean>? = null
@@ -210,11 +211,11 @@ class PlayerActivity : ComponentActivity() {
         val cache = runCatching { DeviceCacheManager(applicationContext).load() }.getOrNull()
         binding.deviceNameText.text = cache?.deviceName?.ifBlank { deviceId } ?: deviceId
         companyId = cache?.company?.trim()?.ifBlank { null }
-        val tenantId = cache?.tenant?.trim()?.ifBlank { null }
+        currentTenantId = cache?.tenant?.trim()?.ifBlank { null }
 
         manifestEventsListener = com.mupa.player.enterprise.network.ManifestEventsListener(
             getDeviceId = { deviceId },
-            getTenantId = { tenantId },
+            getTenantId = { currentTenantId },
             onReloadRequested = { reason ->
                 Log.i("PlayerActivity", "Recarga de manifesto solicitada via manifest-events ($reason)")
                 lifecycleScope.launch {
@@ -456,6 +457,7 @@ class PlayerActivity : ComponentActivity() {
         }
 
         val inop = manifestManager.parseInoperativeInfo(remote)
+        syncTenantFromManifest(remote)
         if (inop.isInoperative) {
             manifestManager.saveManifest(deviceId, remote)
             showInoperativeScreen(inop.reason)
@@ -526,6 +528,19 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
+    private suspend fun syncTenantFromManifest(manifestJson: String) {
+        val parsedTenant = manifestManager.parseTenantId(manifestJson)
+        if (!parsedTenant.isNullOrBlank() && parsedTenant != currentTenantId) {
+            Log.i("PlayerActivity", "Tenant atualizado a partir do manifesto: $parsedTenant")
+            currentTenantId = parsedTenant
+            runCatching {
+                val cm = DeviceCacheManager(applicationContext)
+                val c = cm.load()
+                if (c != null) cm.save(c.copy(tenant = parsedTenant))
+            }
+        }
+    }
+
     private suspend fun refreshInBackground(): Boolean {
         if (!isOnline()) return false
         runCatching {
@@ -534,6 +549,8 @@ class PlayerActivity : ComponentActivity() {
 
         val remote = runCatching { manifestManager.fetchManifest(deviceId) }.getOrNull()?.trim()
         if (remote.isNullOrBlank()) return false
+
+        syncTenantFromManifest(remote)
 
         val inop = manifestManager.parseInoperativeInfo(remote)
         if (inop.isInoperative) {
@@ -545,7 +562,11 @@ class PlayerActivity : ComponentActivity() {
         }
 
         val changed = !manifestManager.compareManifest(deviceId, remote)
-        if (!changed) return true
+        Log.i("PlayerActivity", "refreshInBackground: manifesto comparado. changed=$changed")
+        if (!changed) {
+            Log.d("PlayerActivity", "Manifesto idêntico ao local. Conteúdo mantido.")
+            return true
+        }
 
         manifestManager.saveManifest(deviceId, remote)
         playlistName = manifestManager.parsePlaylistName(remote) ?: playlistName
