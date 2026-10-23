@@ -2467,6 +2467,16 @@ class PlayerActivity : ComponentActivity() {
 
                 val localPath = localFromProduct ?: engine?.getLocalProductImagePathIfExists(expectedEan)
 
+                // Pedido do usuário (2026-10-23): `product.hasArt` é só o que a ÚLTIMA consulta
+                // encontrou — pode estar desatualizado (cache da arte evictado, arquivo apagado
+                // etc.). Sem isso, `localPath` caía silenciosamente pra foto normal
+                // (`getLocalProductImagePathIfExists`, cache SEM o sufixo "_arte") enquanto
+                // `updatePriceBadge` continuava recebendo `hasArt=true` do cache — o layout de
+                // arte (badge sobreposto, painel escondido) era aplicado em cima da foto normal,
+                // sem a área reservada pro preço. Só confia em "tem arte" quando o arquivo que a
+                // própria arte referencia (`product.image`) realmente existe agora.
+                val effectiveHasArt = product.hasArt && localFromProduct != null
+
                 // Renderiza o preço imediatamente com a imagem local (se houver);
                 // o download da imagem remota acontece em segundo plano depois.
                 // Respeita o toggle imageSearchEnabled (busca de imagem pode ser desligada).
@@ -2478,7 +2488,7 @@ class PlayerActivity : ComponentActivity() {
                 // a arte pode ter sido gerada depois da última consulta (ver
                 // PriceQueryEngine.preloadProductImageAndTheme, que só re-baixa a foto se
                 // realmente precisar).
-                val needsBackgroundImageFetch = imageSearchEnabled && (localPath.isNullOrBlank() || imageStale || !product.hasArt)
+                val needsBackgroundImageFetch = imageSearchEnabled && (localPath.isNullOrBlank() || imageStale || !effectiveHasArt)
                 var finalImagePath: String? = localPath
                 val finalTheme: PriceTheme? = product.theme
 
@@ -2590,7 +2600,7 @@ class PlayerActivity : ComponentActivity() {
                     renderOffer(product, offerContainer, offerText)
                     renderPacks(product.packs, packsContainer)
 
-                    val updatedProduct = product.copy(theme = finalTheme)
+                    val updatedProduct = product.copy(theme = finalTheme, hasArt = effectiveHasArt)
                     val accentHex = if (priceConfig?.layout?.colorMode == "solid" && !priceConfig?.layout?.solidColor.isNullOrEmpty()) {
                         priceConfig?.layout?.solidColor
                     } else {
@@ -3373,13 +3383,35 @@ class PlayerActivity : ComponentActivity() {
         // a 3ª faixa (tipicamente a oferta clube, o preço mais baixo dos três) sempre que a API
         // retornava PRECO_NORMAL + PRECO_PDV + PRECO_CLUBE_KOCH juntos. Sem priceSlots
         // (integrações mais simples), cai no preço único de sempre.
-        val slots = product.priceSlots?.filter { it.value > 0.0 }?.take(3)
-        val rows: List<Pair<String?, Double>> =
+        // Mesma dedup + ordem de populatePriceSlots/speakSlotsIfPossible (ver comentários lá):
+        // produto em oferta aparece primeiro, e o box de preço cheio não se repete quando já
+        // aparece riscado dentro do box de oferta — sem isso, com oferta + 2 moedas o take(3)
+        // cortava silenciosamente uma das conversões (achado real, 2026-10-21, EAN 7891010980061:
+        // só o dólar aparecia, o peso ficava de fora).
+        val dedupedArteSlots = product.priceSlots?.filter { it.value > 0.0 }?.let { s ->
+            val promoFromValues = s.filter { it.isPromo }.mapNotNull { it.fromValue }
+            if (promoFromValues.isEmpty()) s else s.filterNot { !it.isPromo && !it.isClub && it.value in promoFromValues }
+        }?.sortedBy { if (it.isPromo) 0 else 1 }
+        val slots = dedupedArteSlots?.take(3)
+        // Pedido do usuário (2026-10-23, EAN de teste Topz Bastonetes): o dedup acima remove o
+        // slot "Preço Normal" quando ele é igual ao `fromValue` da oferta, assumindo que ele
+        // continua visível riscado DENTRO do box de oferta — só que, ao contrário de
+        // `populatePriceSlots` (tem `slotFromPrice`), este badge nunca desenhava esse "De: X"
+        // riscado. Resultado real: o preço normal sumia da tela por completo, sem aparecer em
+        // lugar nenhum. Agora cada linha carrega seu `fromValue` pra desenhar o riscado abaixo.
+        val rows: List<ArteBadgeRow> =
             if (!slots.isNullOrEmpty()) {
-                slots.map { it.label to it.value }
+                slots.map { ArteBadgeRow(it.label, it.value, it.currencySymbol, it.fromValue) }
             } else {
-                listOf(null to price)
+                listOf(ArteBadgeRow(null, price, "R$", null))
             }
+
+        // Pedido do usuário (2026-10-23): com 3 faixas de preço, o card (ancorado pelo TOPO,
+        // ver cálculo de `yDesejado`/`yMaximo` abaixo) ficava alto o bastante pra `yMaximo`
+        // empurrar o card pra cima da área reservada, invadindo o nome do produto — igual ao
+        // mesmo problema já corrigido no layout sem arte (`emphasizePriceSlot`/`compact`). Reduz
+        // 30% a fonte do preço (moeda/inteiro/decimal) em TODAS as linhas quando há 3 faixas.
+        val compactShrink = if (rows.size >= 3) 0.7f else 1.0f
 
         val container = LinearLayout(this).apply {
             tag = PRICE_ART_BADGE_TAG
@@ -3396,7 +3428,7 @@ class PlayerActivity : ComponentActivity() {
             }
         }
 
-        rows.forEachIndexed { index, (label, value) ->
+        rows.forEachIndexed { index, (label, value, symbol, fromValue) ->
             if (index > 0) {
                 // "match_parent" dentro de um LinearLayout "wrap_content" mede contra a TELA, não
                 // contra os irmãos — estica o card inteiro. Por isso medimos a largura que o card
@@ -3429,13 +3461,27 @@ class PlayerActivity : ComponentActivity() {
                     },
                 )
             }
+            // "De: X" riscado (pedido do usuário, 2026-10-23) — sem isso, o preço normal
+            // deduplicado acima (ver `dedupedArteSlots`) não aparecia em lugar nenhum da tela.
+            if (fromValue != null && fromValue > value) {
+                container.addView(
+                    MaterialTextView(this).apply {
+                        text = "De: ${formatCurrency(fromValue)}"
+                        setTextColor(adjustAlpha(textColor, 0.75f))
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f * scale)
+                        includeFontPadding = false
+                        paintFlags = paintFlags or Paint.STRIKE_THRU_TEXT_FLAG
+                    },
+                )
+            }
             val precoView = MaterialTextView(this).apply {
                 text = buildPriceSpannable(
                     value = value,
                     textColor = textColor,
-                    cifraoSp = (if (isVerticalArtLayout) 17f else 19.8f) * scale,
-                    valueSp = (if (isVerticalArtLayout) 92f else 105.6f) * scale,
-                    decimalsSp = (if (isVerticalArtLayout) 46f else 52.8f) * scale,
+                    cifraoSp = (if (isVerticalArtLayout) 17f else 19.8f) * scale * compactShrink,
+                    valueSp = (if (isVerticalArtLayout) 92f else 105.6f) * scale * compactShrink,
+                    decimalsSp = (if (isVerticalArtLayout) 46f else 52.8f) * scale * compactShrink,
+                    currencySymbol = symbol,
                 )
                 typeface = BrandTypography.poppinsExtraBold(this@PlayerActivity)
                     ?: android.graphics.Typeface.create(typeface, android.graphics.Typeface.BOLD)
@@ -3591,6 +3637,13 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
+    private data class ArteBadgeRow(
+        val label: String?,
+        val value: Double,
+        val symbol: String,
+        val fromValue: Double?,
+    )
+
     private data class FullBleedOriginalState(
         val params: ConstraintLayout.LayoutParams,
         val paddingLeft: Int,
@@ -3608,8 +3661,9 @@ class PlayerActivity : ComponentActivity() {
         cifraoSp: Float,
         valueSp: Float,
         decimalsSp: Float,
+        currencySymbol: String = "R$",
     ): SpannableStringBuilder {
-        val formatted = formatCurrency(value) // ex.: "R$ 10,49"
+        val formatted = formatCurrency(value, currencySymbol) // ex.: "R$ 10,49" ou "US$ 2,99"
         val spannable = SpannableStringBuilder(formatted)
         spannable.setSpan(ForegroundColorSpan(textColor), 0, formatted.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
 
@@ -3796,7 +3850,16 @@ class PlayerActivity : ComponentActivity() {
                 if (rotulo.isNotBlank()) fala.append("$rotulo, ")
                 fala.append("$valor. ")
             } else {
-                // Preço normal: fala apenas o valor
+                // Preço normal: com só 1 tipo de preço na tela, fala só o valor (não precisa
+                // dizer "Preço Normal" se não há outro preço pra confundir). Pedido do usuário
+                // (2026-10-23): com 2+ tipos (ex.: Oferta + Preço Normal + Oferta Clube K),
+                // precede cada um pelo rótulo também aqui — sem isso, só os valores de
+                // promo/clube eram anunciados com nome, e o normal ficava um número solto no
+                // meio da fala, sem dar pra saber qual preço é qual.
+                if (validos.size > 1) {
+                    val rotulo = slot.label.trim().trimEnd(':', '.').trim()
+                    if (rotulo.isNotBlank()) fala.append("$rotulo, ")
+                }
                 fala.append("$valor. ")
             }
         }
@@ -4309,18 +4372,22 @@ class PlayerActivity : ComponentActivity() {
             digits == 3 -> 0.66f
             else -> 0.55f
         }
+        // Pedido do usuário (2026-10-23): com 3+ tipos (compact), o valor do preço ainda
+        // estourava a caixa — reduz mais 30% (em cima do tamanho "compact" já existente),
+        // em todos os slots (melhor preço e secundários), não só na fonte "fit" por dígitos.
+        val compactShrink = if (compact) 0.7f else 1.0f
         if (isBest) {
             label.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 15f else 18f)
             label.alpha = 1f
-            currency?.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 33f else 43f) * fit)
-            integer.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 83f else 110f) * fit)
-            decimal.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 45f else 58f) * fit)
+            currency?.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 33f else 43f) * fit * compactShrink)
+            integer.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 83f else 110f) * fit * compactShrink)
+            decimal.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 45f else 58f) * fit * compactShrink)
         } else {
             label.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 12f else 14f)
             label.alpha = 0.85f
-            currency?.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 23f else 28f) * fit)
-            integer.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 50f else 65f) * fit)
-            decimal.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 28f else 35f) * fit)
+            currency?.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 23f else 28f) * fit * compactShrink)
+            integer.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 50f else 65f) * fit * compactShrink)
+            decimal.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 28f else 35f) * fit * compactShrink)
         }
     }
 
@@ -4488,12 +4555,24 @@ class PlayerActivity : ComponentActivity() {
         // Helper to check if a value is valid (not null, > 0.0)
         fun isValid(value: Double?): Boolean = value != null && value > 0.0
 
-        val normalVal = product.price
-        val promoVal = product.pricePromotional
-        val clubVal = product.priceClub ?: product.clubPrice
+        // Pedido do usuário (2026-10-23): esses layouts "específicos" (price_check_*) são de
+        // antes do priceSlots[] existir e só olhavam os campos escalares do produto
+        // (product.price/pricePromotional/priceClub/...) — a integração Komprão nem sempre
+        // preenche esses campos (o detalhe completo vem em priceSlots[]). Com o `hasArt` certo
+        // (não mascara mais isso com o badge da arte, que já lia priceSlots[] direto), só a
+        // Oferta aparecia aqui porque era o único campo escalar preenchido. Deriva de
+        // priceSlots[] quando existir, caindo pros campos escalares só se não tiver.
+        val slotNormal = product.priceSlots?.firstOrNull { !it.isPromo && !it.isClub && !it.field.contains("wholesale", true) && !it.field.contains("atacado", true) }
+        val slotPromo = product.priceSlots?.firstOrNull { it.isPromo }
+        val slotClub = product.priceSlots?.firstOrNull { it.isClub }
+        val slotWholesale = product.priceSlots?.firstOrNull { it.field.contains("wholesale", true) || it.field.contains("atacado", true) }
+
+        val normalVal = slotNormal?.value ?: product.price
+        val promoVal = slotPromo?.value ?: product.pricePromotional
+        val clubVal = slotClub?.value ?: (product.priceClub ?: product.clubPrice)
         val cardVal = product.cardPrice
-        val wholesaleVal = product.priceWholesale
-        val fromVal = product.priceFrom ?: product.originalPrice
+        val wholesaleVal = slotWholesale?.value ?: product.priceWholesale
+        val fromVal = slotPromo?.fromValue ?: (product.priceFrom ?: product.originalPrice)
 
         when (layoutType) {
             "price_check_normal" -> {
