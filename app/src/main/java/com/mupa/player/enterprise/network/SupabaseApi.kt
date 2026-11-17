@@ -22,4 +22,17 @@ interface SupabaseApi {
         @Query("select") select: String = "*",
         @Query("code") codeEq: String,
     ): ResponseBody
+
+    /** GET livre em PostgREST — a URL já vem com os filtros montados. */
+    @Headers("Accept: application/json")
+    @GET
+    suspend fun getRaw(@Url url: String): ResponseBody
+
+    /** UPSERT em PostgREST — a URL deve incluir `?on_conflict=<coluna_unica>`. */
+    @Headers("Content-Type: application/json", "Accept: application/json", "Prefer: return=minimal,resolution=merge-duplicates")
+    @POST
+    suspend fun upsertJson(
+        @Url url: String,
+        @Body body: Map<String, @JvmSuppressWildcards Any?>,
+    ): ResponseBody
 }

@@ -16,11 +16,13 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.lifecycleScope
+import com.mupa.player.enterprise.BuildConfig
 import com.mupa.player.enterprise.databinding.ActivitySplashBinding
 import com.mupa.player.enterprise.managers.DeviceCacheManager
 import com.mupa.player.enterprise.managers.DeviceIdentityManager
 import com.mupa.player.enterprise.services.DeviceValidationResult
 import com.mupa.player.enterprise.services.DeviceValidationService
+import java.io.File
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -77,7 +79,9 @@ class SplashActivity : ComponentActivity() {
             val cachedRegistered = cached?.takeIf { it.deviceRegistered }?.deviceId?.trim().orEmpty()
 
             binding.stepText.text = "2 Validando cadastro"
-            val nextIntent = if (isOnline()) {
+            val nextIntent = if (forceRegistrationRequested()) {
+                Intent(this@SplashActivity, DeviceRegistrationActivity::class.java)
+            } else if (isOnline()) {
                 when (val result = DeviceValidationService(applicationContext).validateDevice(deviceId)) {
                     is DeviceValidationResult.Found -> {
                         val serial = result.cache.deviceId.ifBlank { deviceId }
@@ -118,6 +122,17 @@ class SplashActivity : ComponentActivity() {
             startActivity(nextIntent)
             finish()
         }
+    }
+
+    /**
+     * SÓ em build debug: com o arquivo `force_registration` na pasta externa do app
+     * (/sdcard/Android/data/com.mupa.player.enterprise/files/), abre a tela de cadastro mesmo com o serial já
+     * cadastrado no servidor — única forma de ver o assistente num aparelho já registrado sem apagar o cadastro
+     * real. Apague o arquivo ao terminar. O release ignora.
+     */
+    private fun forceRegistrationRequested(): Boolean {
+        if (!BuildConfig.DEBUG) return false
+        return runCatching { File(getExternalFilesDir(null), "force_registration").isFile }.getOrDefault(false)
     }
 
     private fun isOnline(): Boolean {
