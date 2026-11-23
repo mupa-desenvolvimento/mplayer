@@ -2026,13 +2026,22 @@ class PlayerActivity : ComponentActivity() {
         )
     }
 
+    // Contador do toque "secreto" na engrenagem (invisível, alpha=0.0 no layout): só abre o
+    // diálogo de senha depois de 5 toques seguidos dentro de 2s um do outro — evita que um toque
+    // acidental na área (ela é invisível, mas continua recebendo toque) já revele o acesso restrito.
+    private var settingsGearTapCount = 0
+    private val resetSettingsGearTapCount = Runnable { settingsGearTapCount = 0 }
+
     private fun setupDevModeToggle() {
         binding.btnSettingsGear.setOnClickListener {
-            showAdminAccessDialog()
-        }
-        binding.btnSettingsGear.setOnLongClickListener {
-            showAdminAccessDialog()
-            true
+            settingsGearTapCount++
+            mainHandler.removeCallbacks(resetSettingsGearTapCount)
+            if (settingsGearTapCount >= 5) {
+                settingsGearTapCount = 0
+                showAdminAccessDialog()
+            } else {
+                mainHandler.postDelayed(resetSettingsGearTapCount, 2000L)
+            }
         }
 
         binding.deviceIdWatermark.setOnLongClickListener {
