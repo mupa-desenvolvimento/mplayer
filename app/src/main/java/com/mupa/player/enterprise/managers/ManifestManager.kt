@@ -9,12 +9,14 @@ import com.mupa.player.enterprise.storage.db.ManifestEntity
 import com.mupa.player.enterprise.storage.db.MediaDownloadFailureEntity
 import com.mupa.player.enterprise.storage.db.MediaEntity
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import retrofit2.HttpException
 import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.atomic.AtomicInteger
@@ -24,6 +26,18 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+
+/**
+ * Resultado de [ManifestManager.fetchManifest] — distingue sucesso, erro HTTP (com o código e a
+ * mensagem reais do servidor) e erro de rede, em vez de descartar tudo num `String` vazio como
+ * antes. Permite ao chamador decidir o backoff certo (ex.: 404/400/401 são determinísticos, não
+ * adianta re-tentar rápido) e mostrar o motivo real na tela em vez de um genérico "tentando de novo".
+ */
+sealed class ManifestFetchResult {
+    data class Success(val json: String) : ManifestFetchResult()
+    data class HttpError(val code: Int, val message: String) : ManifestFetchResult()
+    data class NetworkError(val message: String) : ManifestFetchResult()
+}
 
 data class ManifestItem(
     val id: String,
@@ -54,12 +68,24 @@ class ManifestManager(private val context: Context) {
     private val db = AppDatabase.get(context)
     private val okHttp = TlsCompat.newClient()
 
-    suspend fun fetchManifest(deviceId: String): String = withContext(Dispatchers.IO) {
+    suspend fun fetchManifest(deviceId: String): ManifestFetchResult = withContext(Dispatchers.IO) {
         val token = BuildConfig.SUPABASE_TOKEN.trim()
-        if (token.isBlank()) return@withContext ""
+        if (token.isBlank()) return@withContext ManifestFetchResult.NetworkError("missing_supabase_token")
 
         val url = "https://iurqddkuihjsmxubibao.supabase.co/functions/v1/device-api-v2/manifest"
-        api.postJson(url = url, body = mapOf("serial" to deviceId)).string()
+        try {
+            val json = api.postJson(url = url, body = mapOf("serial" to deviceId)).string()
+            ManifestFetchResult.Success(json)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: HttpException) {
+            val rawBody = runCatching { e.response()?.errorBody()?.string() }.getOrNull().orEmpty()
+            val parsedMessage = runCatching { JSONObject(rawBody).optString("error") }.getOrNull()?.takeIf { it.isNotBlank() }
+            val message = parsedMessage ?: rawBody.takeIf { it.isNotBlank() } ?: (e.message() ?: "HTTP ${e.code()}")
+            ManifestFetchResult.HttpError(e.code(), message)
+        } catch (e: Exception) {
+            ManifestFetchResult.NetworkError(e.message ?: e::class.java.simpleName)
+        }
     }
 
     suspend fun saveManifest(deviceId: String, json: String) = withContext(Dispatchers.IO) {

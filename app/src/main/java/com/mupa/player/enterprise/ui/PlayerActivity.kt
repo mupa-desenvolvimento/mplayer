@@ -73,6 +73,7 @@ import com.mupa.player.enterprise.demo.DemoProduct
 import com.mupa.player.enterprise.demo.DemoProductRepository
 import com.mupa.player.enterprise.managers.DeviceCacheManager
 import com.mupa.player.enterprise.managers.DeviceIdentityManager
+import com.mupa.player.enterprise.managers.ManifestFetchResult
 import com.mupa.player.enterprise.managers.ManifestManager
 import com.mupa.player.enterprise.managers.MediaSyncProgress
 import com.mupa.player.enterprise.managers.SettingsManager
@@ -780,6 +781,26 @@ class PlayerActivity : ComponentActivity() {
         return false
     }
 
+    // Backoff exponencial com jitter pro retry do manifesto — evita que uma falha determinística
+    // (404/400/401, nunca vai se resolver sozinha) ou uma falha generalizada de backend vire um
+    // "thundering herd" contra a Edge Function (caso real: um único SK-210 preso num 404 disparou
+    // 17.499 chamadas num dia inteiro com o delay fixo de 3s antigo). Dobra a cada tentativa a
+    // partir de 3s, teto de 300s, jitter de ±20% pra não sincronizar os retries da frota inteira.
+    private fun manifestBackoffDelayMs(attempt: Int): Long {
+        val base = 3_000L
+        val doubled = base * (1L shl attempt.coerceIn(0, 10))
+        val capped = doubled.coerceAtMost(300_000L)
+        val jitterRange = (capped / 5).coerceAtLeast(1L)
+        val jitter = (-jitterRange..jitterRange).random()
+        return (capped + jitter).coerceAtLeast(1_000L)
+    }
+
+    private fun describeManifestFetchError(result: ManifestFetchResult): String = when (result) {
+        is ManifestFetchResult.HttpError -> "HTTP ${result.code}: ${result.message}"
+        is ManifestFetchResult.NetworkError -> "Erro de rede: ${result.message}"
+        is ManifestFetchResult.Success -> ""
+    }
+
     private suspend fun initialSyncAndPlayback() {
         setSyncOverlayVisible(true)
         updateSyncTexts(
@@ -814,11 +835,9 @@ class PlayerActivity : ComponentActivity() {
             }
         }
 
-        var remote = runCatching { manifestManager.fetchManifest(deviceId) }
-            .onFailure { Log.w("MPlayerSync", "fetch_manifest_failed deviceId=$deviceId", it) }
-            .getOrDefault("")
-            .trim()
-        while (remote.isBlank()) {
+        var fetchResult = manifestManager.fetchManifest(deviceId)
+        var backoffAttempt = 0
+        while (fetchResult !is ManifestFetchResult.Success || fetchResult.json.isBlank()) {
             if (playerEngine.getCurrentItemId() != null) {
                 setSyncOverlayVisible(false)
                 return
@@ -834,14 +853,17 @@ class PlayerActivity : ComponentActivity() {
                 setSyncOverlayVisible(false)
                 return
             }
+            val delayMs = manifestBackoffDelayMs(backoffAttempt)
+            backoffAttempt++
+            Log.w("MPlayerSync", "fetch_manifest_failed deviceId=$deviceId result=$fetchResult nextRetryMs=$delayMs")
             updateSyncTexts(
                 status = "Não foi possível obter a programação. Tentando novamente...",
                 countText = "",
                 fileText = "",
-                detailText = "",
+                detailText = "${describeManifestFetchError(fetchResult)} · nova tentativa em ${delayMs / 1000}s",
                 progressPercent = null,
             )
-            delay(3000L)
+            delay(delayMs)
             if (!isOnline()) {
                 while (!isOnline()) {
                     updateSyncTexts(
@@ -853,12 +875,11 @@ class PlayerActivity : ComponentActivity() {
                     )
                     delay(3000L)
                 }
+                backoffAttempt = 0 // rede voltou: o problema pode ter sido só a queda, recomeça do delay mínimo
             }
-            remote = runCatching { manifestManager.fetchManifest(deviceId) }
-                .onFailure { Log.w("MPlayerSync", "fetch_manifest_failed deviceId=$deviceId", it) }
-                .getOrDefault("")
-                .trim()
+            fetchResult = manifestManager.fetchManifest(deviceId)
         }
+        val remote = fetchResult.json.trim()
 
         val changed = !manifestManager.compareManifest(deviceId, remote)
         if (changed) {
@@ -1035,8 +1056,12 @@ class PlayerActivity : ComponentActivity() {
 
         ensureAudienceStarted()
 
-        val remote = runCatching { manifestManager.fetchManifest(deviceId) }.getOrNull()?.trim()
-        if (remote.isNullOrBlank()) return false
+        val fetchResult = manifestManager.fetchManifest(deviceId)
+        if (fetchResult !is ManifestFetchResult.Success || fetchResult.json.isBlank()) {
+            Log.w("MPlayerSync", "refresh_in_background_failed deviceId=$deviceId result=$fetchResult")
+            return false
+        }
+        val remote = fetchResult.json.trim()
         val changed = !manifestManager.compareManifest(deviceId, remote)
         if (!changed) return true
 

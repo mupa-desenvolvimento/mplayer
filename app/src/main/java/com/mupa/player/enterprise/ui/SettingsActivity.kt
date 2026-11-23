@@ -15,6 +15,7 @@ import com.mupa.player.enterprise.managers.DeviceCache
 import com.mupa.player.enterprise.managers.DeviceCacheManager
 import com.mupa.player.enterprise.managers.DeviceIdentityManager
 import com.mupa.player.enterprise.managers.GertecScannerManager
+import com.mupa.player.enterprise.managers.ManifestFetchResult
 import com.mupa.player.enterprise.managers.ManifestManager
 import com.mupa.player.enterprise.managers.SettingsManager
 import com.mupa.player.enterprise.price.PriceConfig
@@ -531,20 +532,19 @@ class SettingsActivity : ComponentActivity() {
             binding.txtSyncProgress.visibility = View.VISIBLE
             binding.txtSyncProgress.text = "Baixando manifesto..."
             lifecycleScope.launch {
-                val success = runCatching {
-                    val mgr = ManifestManager(applicationContext)
-                    val raw = mgr.fetchManifest(deviceId)
-                    if (raw.isNotBlank()) {
-                        mgr.saveManifest(deviceId, raw)
-                        true
-                    } else false
-                }.getOrDefault(false)
-                
-                if (success) {
-                    binding.txtSyncProgress.text = "Manifesto baixado com sucesso!"
-                    loadDeviceInformation()
-                } else {
-                    binding.txtSyncProgress.text = "Falha ao baixar o manifesto."
+                val mgr = ManifestManager(applicationContext)
+                when (val result = mgr.fetchManifest(deviceId)) {
+                    is ManifestFetchResult.Success -> {
+                        if (result.json.isNotBlank()) {
+                            mgr.saveManifest(deviceId, result.json)
+                            binding.txtSyncProgress.text = "Manifesto baixado com sucesso!"
+                            loadDeviceInformation()
+                        } else {
+                            binding.txtSyncProgress.text = "Falha ao baixar o manifesto: resposta vazia."
+                        }
+                    }
+                    is ManifestFetchResult.HttpError -> binding.txtSyncProgress.text = "Falha ao baixar o manifesto: HTTP ${result.code} ${result.message}"
+                    is ManifestFetchResult.NetworkError -> binding.txtSyncProgress.text = "Falha ao baixar o manifesto: ${result.message}"
                 }
             }
         }
@@ -554,8 +554,9 @@ class SettingsActivity : ComponentActivity() {
             binding.txtSyncProgress.text = "Iniciando teste de sincronização..."
             lifecycleScope.launch {
                 val mgr = ManifestManager(applicationContext)
-                val raw = runCatching { mgr.fetchManifest(deviceId) }.getOrNull()
-                if (!raw.isNullOrBlank()) {
+                val fetchResult = mgr.fetchManifest(deviceId)
+                if (fetchResult is ManifestFetchResult.Success && fetchResult.json.isNotBlank()) {
+                    val raw = fetchResult.json
                     mgr.saveManifest(deviceId, raw)
                     binding.txtSyncProgress.text = "Manifesto baixado. Verificando mídias..."
                     runCatching {
@@ -574,7 +575,7 @@ class SettingsActivity : ComponentActivity() {
                         binding.txtSyncProgress.text = "Erro na sincronização: ${error.message}"
                     }
                 } else {
-                    binding.txtSyncProgress.text = "Falha no download inicial do manifesto."
+                    binding.txtSyncProgress.text = "Falha no download inicial do manifesto: ${describeManifestFetchErrorForDisplay(fetchResult)}"
                 }
             }
         }
@@ -744,6 +745,12 @@ class SettingsActivity : ComponentActivity() {
                 }
                 .show()
         }
+    }
+
+    private fun describeManifestFetchErrorForDisplay(result: ManifestFetchResult): String = when (result) {
+        is ManifestFetchResult.HttpError -> "HTTP ${result.code} ${result.message}"
+        is ManifestFetchResult.NetworkError -> result.message
+        is ManifestFetchResult.Success -> "resposta vazia"
     }
 
     private fun showManifestTextDialog(text: String) {
