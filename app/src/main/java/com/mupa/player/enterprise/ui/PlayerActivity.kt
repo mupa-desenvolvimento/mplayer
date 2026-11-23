@@ -1344,78 +1344,16 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Pedido do usuário (2026-11-23): nunca mais bloquear a tela inteira (nem o card no rodapé)
+     * pra avisar que está carregando/sincronizando conteúdo novo — um único indicador discreto
+     * no canto superior direito (o mesmo [syncPillContainer] que já existia pro sync em segundo
+     * plano) substitui os dois comportamentos antigos. `syncOverlay`/`syncContent` continuam no
+     * layout (há outras views dentro dele, como `deviceNameText`, lidas por
+     * [showInoperativeScreen]) mas nunca mais ficam visíveis — fica tudo delegado pro pill.
+     */
     private fun setSyncOverlayVisible(visible: Boolean) {
-        syncHideJob?.cancel()
-        binding.syncOverlay.animate().cancel()
-
-        if (visible) {
-            val isMediaPlaying = playerEngine.getCurrentItemId() != null
-            if (isMediaPlaying) {
-                // Sincronizando com mídias rodando ao fundo -> Pequeno card na parte inferior
-                val overlayParams = binding.syncOverlay.layoutParams as android.widget.FrameLayout.LayoutParams
-                overlayParams.height = android.widget.FrameLayout.LayoutParams.WRAP_CONTENT
-                overlayParams.gravity = android.view.Gravity.BOTTOM
-                binding.syncOverlay.layoutParams = overlayParams
-
-                binding.syncOverlay.setBackgroundColor(android.graphics.Color.TRANSPARENT)
-                binding.syncContent.setBackgroundResource(com.mupa.player.enterprise.R.drawable.bg_sync_card)
-                
-                val params = binding.syncContent.layoutParams as androidx.constraintlayout.widget.ConstraintLayout.LayoutParams
-                params.topToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET
-                params.bottomToBottom = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                params.bottomMargin = dpToPx(16)
-                binding.syncContent.layoutParams = params
-                
-                binding.syncLogo.visibility = View.GONE
-
-                // Compact padding and smaller font sizes
-                binding.syncContent.setPadding(dpToPx(16), dpToPx(8), dpToPx(16), dpToPx(8))
-                binding.syncStatusText.textSize = 13f
-                binding.syncCountText.textSize = 11f
-                binding.syncFileText.textSize = 11f
-                binding.syncDetailText.textSize = 10f
-            } else {
-                // Tela cheia
-                val overlayParams = binding.syncOverlay.layoutParams as android.widget.FrameLayout.LayoutParams
-                overlayParams.height = android.widget.FrameLayout.LayoutParams.MATCH_PARENT
-                overlayParams.gravity = android.view.Gravity.NO_GRAVITY
-                binding.syncOverlay.layoutParams = overlayParams
-
-                binding.syncOverlay.setBackgroundResource(com.mupa.player.enterprise.R.color.enterprise_bg)
-                binding.syncContent.background = null
-                
-                val params = binding.syncContent.layoutParams as androidx.constraintlayout.widget.ConstraintLayout.LayoutParams
-                params.topToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                params.bottomToBottom = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                params.bottomMargin = 0
-                binding.syncContent.layoutParams = params
-                
-                binding.syncLogo.visibility = View.VISIBLE
-
-                // Standard padding and font sizes
-                binding.syncContent.setPadding(dpToPx(28), dpToPx(28), dpToPx(28), dpToPx(28))
-                binding.syncStatusText.textSize = 20f
-                binding.syncCountText.textSize = 14f
-                binding.syncFileText.textSize = 14f
-                binding.syncDetailText.textSize = 12f
-            }
-
-            if (binding.syncOverlay.visibility != View.VISIBLE) {
-                binding.syncOverlay.visibility = View.VISIBLE
-                binding.syncOverlay.alpha = 0f
-                binding.syncOverlay.animate().alpha(1f).setDuration(180).start()
-            } else if (binding.syncOverlay.alpha < 1f) {
-                binding.syncOverlay.animate().alpha(1f).setDuration(180).start()
-            }
-        } else {
-            syncHideJob =
-                lifecycleScope.launch {
-                    delay(700L)
-                    binding.syncOverlay.animate().alpha(0f).setDuration(220).withEndAction {
-                        binding.syncOverlay.visibility = View.GONE
-                    }.start()
-                }
-        }
+        setSyncPillVisible(visible)
     }
 
     private fun setupHiddenBarcodeInput(input: EditText) {
@@ -4038,21 +3976,14 @@ class PlayerActivity : ComponentActivity() {
         detailText: String,
         progressPercent: Int?,
     ) {
-        binding.syncStatusText.text = status
-        binding.syncCountText.text = countText
-        binding.syncFileText.text = fileText
-        binding.syncDetailText.text = detailText
-
-        binding.syncCountText.visibility = if (countText.isNotBlank()) View.VISIBLE else View.GONE
-        binding.syncFileText.visibility = if (fileText.isNotBlank()) View.VISIBLE else View.GONE
-        binding.syncDetailText.visibility = if (detailText.isNotBlank()) View.VISIBLE else View.GONE
-
-        val p = progressPercent
-        if (p == null) {
-            binding.syncProgressBar.isIndeterminate = true
+        // syncOverlay nunca mais fica visível (ver setSyncOverlayVisible) — só o pill (canto
+        // superior direito) é mostrado, com a mensagem principal (status).
+        binding.syncPillText.text = status
+        if (progressPercent != null && progressPercent in 0..100) {
+            binding.syncPillProgressBar.isIndeterminate = false
+            binding.syncPillProgressBar.progress = progressPercent
         } else {
-            binding.syncProgressBar.isIndeterminate = false
-            binding.syncProgressBar.progress = p
+            binding.syncPillProgressBar.isIndeterminate = true
         }
     }
 
