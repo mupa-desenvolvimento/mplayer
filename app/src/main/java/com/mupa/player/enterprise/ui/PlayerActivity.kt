@@ -2035,6 +2035,7 @@ class PlayerActivity : ComponentActivity() {
     private fun setupDevModeToggle() {
         binding.btnSettingsGear.setOnClickListener {
             settingsGearTapCount++
+            android.util.Log.i("SettingsGear", "tap count=$settingsGearTapCount")
             mainHandler.removeCallbacks(resetSettingsGearTapCount)
             if (settingsGearTapCount >= 5) {
                 settingsGearTapCount = 0
