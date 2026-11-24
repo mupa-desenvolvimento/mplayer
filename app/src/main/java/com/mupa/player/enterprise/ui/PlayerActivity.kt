@@ -890,6 +890,8 @@ class PlayerActivity : ComponentActivity() {
         itemNameById = manifestManager.parseItemsPublic(remote).mapNotNull { it.name?.let { n -> it.id to n } }.toMap()
         applyPriceConfigFromManifestJson(remote)
         applyTransitionConfigFromManifestJson(remote)
+        priceEngine?.updateSponsoredLookups(manifestManager.parseSponsoredLookups(remote))
+        lifecycleScope.launch { runCatching { priceEngine?.precacheSponsoredLookups() } }
 
         val items = manifestManager.parseItemsPublic(remote)
         var playlist = buildLocalPlaylist(items)
@@ -1070,6 +1072,8 @@ class PlayerActivity : ComponentActivity() {
         itemNameById = manifestManager.parseItemsPublic(remote).mapNotNull { it.name?.let { n -> it.id to n } }.toMap()
         applyPriceConfigFromManifestJson(remote)
         applyTransitionConfigFromManifestJson(remote)
+        priceEngine?.updateSponsoredLookups(manifestManager.parseSponsoredLookups(remote))
+        lifecycleScope.launch { runCatching { priceEngine?.precacheSponsoredLookups() } }
         // Sincronização pós-inicialização: discreta via Pill, sem overlay invasivo na tela
         val isPlaying = playerEngine.getCurrentItemId() != null
         if (!isPlaying) {

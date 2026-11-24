@@ -13,6 +13,7 @@ import android.util.Log
 import com.mupa.player.enterprise.BuildConfig
 import com.mupa.player.enterprise.managers.DeviceCacheManager
 import com.mupa.player.enterprise.managers.SettingsManager
+import com.mupa.player.enterprise.managers.SponsoredLookupItem
 import com.mupa.player.enterprise.network.TlsCompat
 import com.mupa.player.enterprise.storage.db.AppDatabase
 import com.mupa.player.enterprise.storage.db.MissingProductImageEntity
@@ -40,6 +41,13 @@ class PriceQueryEngine(
     private val deviceId: String,
 ) {
     private val db = AppDatabase.get(context)
+
+    // Consulta Patrocinada (docs/2026-11-23-mplayer-android-sponsored-lookup.md): lista atual de
+    // peças vindas do manifesto (atualizada a cada fetch/refresh via updateSponsoredLookups) e um
+    // índice round-robin — cada consulta de preço avança pra próxima peça, ciclando.
+    @Volatile
+    private var sponsoredLookups: List<SponsoredLookupItem> = emptyList()
+    private val sponsoredLookupIndex = java.util.concurrent.atomic.AtomicInteger(0)
 
     // Timeouts agressivos: a prioridade nº1 do terminal é devolver o preço o mais rápido
     // possível. Se a rede estiver ruim, é melhor falhar rápido (e cair pro cache/offline) do
@@ -985,6 +993,14 @@ class PriceQueryEngine(
         val normalizedEan = ean.trim()
         if (normalizedEan.isBlank()) return@withContext PreloadedImage(null, null, false)
 
+        // Consulta Patrocinada (docs/2026-11-23-mplayer-android-sponsored-lookup.md): se o
+        // manifesto trouxe peças pra alguma Tag deste dispositivo, elas têm prioridade sobre a
+        // arte por produto — pula o resto da função inteiro (arte por produto, VTEX, Komprão)
+        // quando ativa; sem peças (lista vazia), segue o fluxo de sempre sem nenhuma mudança.
+        resolveActiveSponsoredLookup()?.let { path ->
+            return@withContext PreloadedImage(path, null, hasArt = true)
+        }
+
         val cachedProduct = db.priceCacheDao().getByEan(normalizedEan)?.let { cache ->
             runCatching { parseProductFromCache(normalizedEan, cache) }.getOrNull()
         }
@@ -1404,6 +1420,57 @@ class PriceQueryEngine(
             productsDir().listFiles()
                 ?.firstOrNull { it.isFile && it.length() > 0L && it.nameWithoutExtension == normalized }
         return any?.absolutePath
+    }
+
+    private fun sponsoredLookupCacheKey(id: String) = "sponsored_lookup_$id"
+
+    /** Chamado a cada manifesto novo (fetch inicial ou refresh em segundo plano) — ver
+     * PlayerActivity. Só troca a lista em memória; o download/cache acontece em
+     * [precacheSponsoredLookups], chamado à parte (não bloqueia o parse do manifesto). */
+    fun updateSponsoredLookups(items: List<SponsoredLookupItem>) {
+        sponsoredLookups = items
+    }
+
+    /**
+     * Pré-baixa TODAS as peças da lista atual (não só a que vai ser mostrada na próxima consulta)
+     * — contrato exige exibição instantânea no momento do scan, sem latência de rede
+     * (docs/2026-11-23-mplayer-android-sponsored-lookup.md, §4.1). Cada peça é independente
+     * (`runCatching` por item): uma falha não derruba as outras.
+     */
+    suspend fun precacheSponsoredLookups() = withContext(Dispatchers.IO) {
+        val screenMaxDim = maxOf(
+            context.resources.displayMetrics.widthPixels,
+            context.resources.displayMetrics.heightPixels,
+        )
+        for (item in sponsoredLookups) {
+            runCatching {
+                downloadProductImageIfNeeded(
+                    ean = sponsoredLookupCacheKey(item.id),
+                    rawUrl = item.url,
+                    maxDim = screenMaxDim,
+                )
+            }
+        }
+    }
+
+    /** Round-robin: cada chamada avança pra próxima peça da lista atual, ciclando. `null` se a
+     * lista estiver vazia (sem Tag patrocinada pra este dispositivo) ou se a peça escolhida ainda
+     * não tiver sido baixada (ex. logo após o pareamento, antes do primeiro
+     * [precacheSponsoredLookups] terminar) — nesse caso baixa na hora, pra não perder o scan. */
+    private suspend fun resolveActiveSponsoredLookup(): String? {
+        val items = sponsoredLookups
+        if (items.isEmpty()) return null
+        val idx = sponsoredLookupIndex.getAndUpdate { (it + 1) % items.size }.mod(items.size)
+        val item = items[idx]
+        val cacheKey = sponsoredLookupCacheKey(item.id)
+        localProductImageFile(cacheKey)?.let { return it.absolutePath }
+        val screenMaxDim = maxOf(
+            context.resources.displayMetrics.widthPixels,
+            context.resources.displayMetrics.heightPixels,
+        )
+        return runCatching {
+            downloadProductImageIfNeeded(ean = cacheKey, rawUrl = item.url, maxDim = screenMaxDim)
+        }.getOrNull()
     }
 
     /** Arquivo de imagem local do [ean], se existir (independente da idade). */

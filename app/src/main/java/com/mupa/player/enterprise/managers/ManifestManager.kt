@@ -54,6 +54,18 @@ data class ManifestItem(
     val endTime: String?,
 )
 
+// Consulta Patrocinada (docs/2026-11-23-mplayer-android-sponsored-lookup.md, Mupa Connect):
+// peças publicitárias vinculadas a Tags do dispositivo, entregues na raiz do manifesto —
+// substitui o endpoint /patrocinio-ativo (nunca chegou a existir em produção) do recurso
+// "Telas Patrocinadas" por empresa/orientação (ver PriceQueryEngine.fetchActiveSponsor).
+data class SponsoredLookupItem(
+    val id: String,
+    val url: String,
+    val tagId: String,
+    val tagName: String,
+    val updatedAt: String,
+)
+
 data class MediaSyncProgress(
     val completedItems: Int,
     val totalItems: Int,
@@ -410,6 +422,33 @@ class ManifestManager(private val context: Context) {
             val manifestObj = root.optJSONObject("manifest") ?: root
             manifestObj.optString("name", "").takeIf { it.isNotBlank() }
         }.getOrNull()
+    }
+
+    /** Lê `sponsored_lookups` da raiz do manifesto (docs/2026-11-23-mplayer-android-sponsored-
+     * lookup.md) — contrato garante presença sempre (array vazio sem patrocínio ativo), mas o
+     * parsing aqui é defensivo (lista vazia em qualquer formato inesperado, nunca exceção). */
+    fun parseSponsoredLookups(json: String): List<SponsoredLookupItem> {
+        return runCatching {
+            val root = JSONObject(json)
+            val arr = root.optJSONArray("sponsored_lookups")
+                ?: root.optJSONObject("manifest")?.optJSONArray("sponsored_lookups")
+                ?: JSONArray()
+            val out = ArrayList<SponsoredLookupItem>(arr.length())
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val id = obj.optString("id", "").trim()
+                val url = obj.optString("url", "").trim()
+                if (id.isBlank() || url.isBlank()) continue
+                out += SponsoredLookupItem(
+                    id = id,
+                    url = url,
+                    tagId = obj.optString("tag_id", "").trim(),
+                    tagName = obj.optString("tag_name", "").trim(),
+                    updatedAt = obj.optString("updated_at", "").trim(),
+                )
+            }
+            out
+        }.getOrDefault(emptyList())
     }
 
     fun parsePriceConfigJson(json: String): String? {
