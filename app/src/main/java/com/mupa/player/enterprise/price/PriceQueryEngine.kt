@@ -49,6 +49,15 @@ class PriceQueryEngine(
     private var sponsoredLookups: List<SponsoredLookupItem> = emptyList()
     private val sponsoredLookupIndex = java.util.concurrent.atomic.AtomicInteger(0)
 
+    /** true quando o manifesto trouxe alguma peça de Consulta Patrocinada pra este dispositivo —
+     * usado por [com.mupa.player.enterprise.ui.PlayerActivity] pra garantir que o fetch em
+     * segundo plano (único lugar onde a prioridade da Consulta Patrocinada é aplicada, ver
+     * [preloadProductImageAndTheme]) SEMPRE rode, mesmo quando o produto já tem arte publicitária
+     * própria fresca em cache (achado real, 2026-11-24: esses produtos pulavam o fetch em
+     * segundo plano inteiro — `needsBackgroundImageFetch=false` — e ficavam presos no layout de
+     * arte por produto, nunca mostrando a peça patrocinada). */
+    fun hasSponsoredLookupsConfigured(): Boolean = sponsoredLookups.isNotEmpty()
+
     // Timeouts agressivos: a prioridade nº1 do terminal é devolver o preço o mais rápido
     // possível. Se a rede estiver ruim, é melhor falhar rápido (e cair pro cache/offline) do
     // que deixar o cliente esperando 10s+ no padrão do OkHttp.
@@ -77,6 +86,18 @@ class PriceQueryEngine(
         .writeTimeout(15, TimeUnit.SECONDS)
         .callTimeout(75, TimeUnit.SECONDS)
         .build()
+
+    // Client dedicado só pro lookup de imagem/arte genérico do srv-mupa (fetchProductImageMetaInner,
+    // step=null) — achado real em campo (2026-11-13, filial UnidaSul): a rede de algumas lojas
+    // bloqueia/redireciona esse servidor (2.25.239.153:5050) sem nunca responder, e os 4s do
+    // client `http` acima atrasavam a foto de verdade (vinda da própria API do cliente) em TODO
+    // scan. Pedido do usuário: timeout bem mais curto só pra essa checagem, que é um "bônus"
+    // (arte publicitária), não o preço em si.
+    private val httpImageMeta = TlsCompat.apply(OkHttpClient.Builder())
+        .connectTimeout(2, TimeUnit.SECONDS)
+        .readTimeout(2, TimeUnit.SECONDS)
+        .callTimeout(3, TimeUnit.SECONDS)
+        .build()
     private val sessionState = JSONObject()
 
     // Escopo separado para gravações de analytics (insertEvent) que não devem atrasar o
@@ -87,6 +108,16 @@ class PriceQueryEngine(
         // Cache de imagem de produto: válido por 60 min. Passado isso, a imagem local ainda é
         // exibida na hora (rápido), mas um novo download roda em background pra atualizar.
         private const val IMAGE_CACHE_TTL_MS = 60L * 60L * 1000L
+
+        // Consulta Patrocinada: o backend (Mupa Connect, docs/2026-11-23-mplayer-android-
+        // sponsored-lookup.md) não envia uma região por peça (ao contrário de Telas
+        // Patrocinadas, que tem `regiao` por campanha) — decisão do usuário (2026-11-24, 2ª
+        // rodada): usar uma posição FIXA por enquanto, pensada pra caber na "área em branco"
+        // que os criativos de referência (Unilever/Nestlé) reservam do lado direito da peça,
+        // com margem pra não colar nos cantos nem no topo (onde costuma ter a faixa de
+        // logo/marca). Ajustável aqui sem mexer em mais nada caso não caiba bem num criativo
+        // real.
+        private val SPONSORED_LOOKUP_DEFAULT_REGION = SponsorRegion(x0 = 0.32f, x1 = 0.96f, y0 = 0.14f, y1 = 0.92f)
     }
 
     // Pré-autentica em background para que o token esteja em cache antes do primeiro scan
@@ -184,6 +215,25 @@ class PriceQueryEngine(
         val dark: String?,
     )
 
+    /** Região reservada (frações 0..1 da tela) onde o badge de preço deve ser desenhado por cima
+     * de uma tela patrocinada — ver docs/SPEC_PATROCINIO_PRODUTOS_IMGS.md. Mesmo formato que a
+     * arte vertical já usa hoje (caixaX0Pct/caixaX1Pct/caixaY0Pct/caixaY1Pct em PlayerActivity),
+     * só que vindo do backend em vez de ser uma constante fixa no código. */
+    data class SponsorRegion(
+        val x0: Float,
+        val x1: Float,
+        val y0: Float,
+        val y1: Float,
+    )
+
+    private data class SponsorCampaign(
+        val imageUrl: String,
+        val region: SponsorRegion,
+        val themeSignature: String?,
+        val campaignId: String,
+        val expiresAtEpochMs: Long?,
+    )
+
     /** Resultado de [preloadProductImageAndTheme]: caminho local da imagem baixada (crua ou
      * arte), tema de cores associado (se houver), e se essa imagem é a arte publicitária
      * gerada por IA (produtos-imgs/Gemini) — usado para decidir o badge de preço sobreposto. */
@@ -191,6 +241,15 @@ class PriceQueryEngine(
         val path: String?,
         val theme: PriceTheme?,
         val hasArt: Boolean = false,
+        val sponsorRegion: SponsorRegion? = null,
+        // Consulta Patrocinada (achado real de bancada, 2026-11-24, 2ª rodada): diferente de
+        // Telas Patrocinadas (hasArt=true só mostra o badge de preço, a arte já traz nome/foto
+        // embutidos), aqui a peça é um anúncio genérico da marca SEM nada do produto desenhado —
+        // o app precisa compor foto+nome+preço por cima dela, dentro da área reservada
+        // (sponsorRegion). `isSponsoredLookup` distingue esse modo de composição do modo
+        // "só badge de preço" de Telas Patrocinadas, mesmo os dois usando hasArt=true.
+        val isSponsoredLookup: Boolean = false,
+        val productPhotoPath: String? = null,
     )
 
     suspend fun query(
@@ -995,10 +1054,82 @@ class PriceQueryEngine(
 
         // Consulta Patrocinada (docs/2026-11-23-mplayer-android-sponsored-lookup.md): se o
         // manifesto trouxe peças pra alguma Tag deste dispositivo, elas têm prioridade sobre a
-        // arte por produto — pula o resto da função inteiro (arte por produto, VTEX, Komprão)
-        // quando ativa; sem peças (lista vazia), segue o fluxo de sempre sem nenhuma mudança.
-        resolveActiveSponsoredLookup()?.let { path ->
-            return@withContext PreloadedImage(path, null, hasArt = true)
+        // foto do produto — igual às Telas Patrocinadas por empresa (fallback logo abaixo, hoje
+        // morto em produção porque o endpoint /patrocinio-ativo nunca existiu).
+        //
+        // 2ª rodada (achado real de bancada, 2026-11-24, referência visual do usuário): a peça
+        // é um anúncio genérico da MARCA, mas o espaço reservado (a "área oval") é pra mostrar
+        // foto+nome+preço REAIS do produto consultado por cima da peça — não do lado, nem
+        // escondido. hasArt=true + sponsorRegion ativa o modo full-bleed (a peça ocupa a tela
+        // toda, sem o split de painel esquerdo/direito) — mas, ao contrário de Telas
+        // Patrocinadas (hasArt=true normal, que só desenha um badge de preço porque a arte já
+        // traz nome/foto embutidos), aqui também precisamos da foto+nome reais: `isSponsoredLookup
+        // = true` sinaliza pra updatePriceBadge compor os três juntos (ver ali).
+        //
+        // 3ª rodada (pedido do usuário, 2026-11-24: "precisa mostrar a imagem do produto"): ao
+        // contrário da 1ª versão (só reaproveitava o cache, sem foto quando o produto nunca tinha
+        // sido consultado), agora roda o fluxo normal INTEIRO (arte/VTEX/Komprão/Mupa — extraído
+        // pra [resolveNormalPreloadedImage]) em paralelo, exatamente como se não houvesse
+        // patrocínio — só pra conseguir uma foto de verdade pra compor dentro da área reservada.
+        // O resultado dessa resolução nunca vira o que aparece em tela (a peça patrocinada sempre
+        // vence como fundo); é usado só como fonte da foto do produto.
+        val sponsoredAdPath = resolveActiveSponsoredLookup()
+        val normalResult = resolveNormalPreloadedImage(normalizedEan, config, isOnline)
+        if (sponsoredAdPath != null) {
+            // Se o fluxo normal achou/gerou ARTE publicitária (hasArt=true), esse arquivo é uma
+            // peça de campanha própria do produto (fundo+badge desenhados), não uma foto simples
+            // — não serve de thumbnail. E se a checagem de rede (passo 0/1/2/3) falhar à toa (ex.
+            // backend fora do ar), [resolveNormalPreloadedImage] descarta até uma foto antiga já
+            // cacheada em disco (comportamento de sempre — reconsulta pra ver se a arte ficou
+            // pronta, sem fallback pra foto velha). Pra Consulta Patrocinada essa foto é só
+            // decorativa (o preço real continua vindo da consulta de verdade), então vale mais
+            // mostrar uma foto desatualizada do que nenhuma: cai pro arquivo local já cacheado
+            // (sem sufixo "_arte"), mesmo vencido, sempre que o fluxo normal não devolveu uma
+            // foto plana utilizável.
+            var plainProductPhoto = normalResult.path.takeIf { !normalResult.hasArt }
+                ?: localProductImagePathIfExists(normalizedEan)
+            // 4ª rodada (achado real de bancada, 2026-11-25): quando o produto já tem ARTE
+            // publicitária fresca em cache (comum — qualquer EAN já consultado antes sem
+            // patrocínio ganha uma), [resolveNormalPreloadedImage] retorna logo no passo 0 (arte)
+            // e NUNCA chega aos passos 1-3 (foto crua Komprão/VTEX/Mupa) — então plainProductPhoto
+            // fica null mesmo quando uma foto de verdade está a um fetch de distância. Busca ela
+            // agora, só pra essa foto (nunca pra arte), reusando os mesmos passos 1-3 extraídos em
+            // [fetchPlainProductPhoto].
+            if (plainProductPhoto == null && isOnline) {
+                plainProductPhoto = runCatching { fetchPlainProductPhoto(normalizedEan, config) }.getOrNull()
+            }
+            Log.d(
+                "MPlayerSponsoredLookup",
+                "resolve ean=$normalizedEan adPath=$sponsoredAdPath normalResultPath=${normalResult.path} " +
+                    "normalResultHasArt=${normalResult.hasArt} plainProductPhoto=$plainProductPhoto",
+            )
+            return@withContext PreloadedImage(
+                path = sponsoredAdPath,
+                theme = null,
+                hasArt = true,
+                sponsorRegion = SPONSORED_LOOKUP_DEFAULT_REGION,
+                isSponsoredLookup = true,
+                productPhotoPath = plainProductPhoto,
+            )
+        }
+        normalResult
+    }
+
+    /** Resolução "normal" (sem patrocínio) de foto/arte/tema por EAN — extraído de
+     * [preloadProductImageAndTheme] pra poder rodar mesmo quando uma Consulta Patrocinada está
+     * ativa (ver ali): o resultado vira a foto do produto a compor dentro da peça patrocinada,
+     * em vez do que normalmente apareceria sozinho em tela. */
+    private suspend fun resolveNormalPreloadedImage(
+        normalizedEan: String,
+        config: PriceConfig,
+        isOnline: Boolean,
+    ): PreloadedImage {
+        // Telas Patrocinadas (Retail Media) por empresa/orientação — mantido como fallback, mas
+        // sem efeito prático em produção hoje (ver resolveActiveSponsor: endpoint inexistente).
+        val sponsorOrientacao = if (isDeviceVertical()) "vertical" else "horizontal"
+        resolveActiveSponsor(sponsorOrientacao)?.let { (path, campaign) ->
+            val sponsorTheme = campaign.themeSignature?.let { PriceTheme(signature = it, light = null, dark = null) }
+            return PreloadedImage(path, sponsorTheme, hasArt = true, sponsorRegion = campaign.region)
         }
 
         val cachedProduct = db.priceCacheDao().getByEan(normalizedEan)?.let { cache ->
@@ -1013,9 +1144,9 @@ class PriceQueryEngine(
         // faz um GET barato só pra checar se a arte já ficou pronta, sem rebaixar a foto de novo
         // (downloadProductImageIfNeeded já reaproveita o arquivo fresco internamente).
         if (existing != null && isProductImageFresh(normalizedEan) && cachedHasArt) {
-            return@withContext PreloadedImage(existing, null, true)
+            return PreloadedImage(existing, null, true)
         }
-        if (!isOnline) return@withContext PreloadedImage(existing, null, cachedHasArt)
+        if (!isOnline) return PreloadedImage(existing, null, cachedHasArt)
 
         suspend fun saveToCacheAndReturn(path: String, t: PriceTheme?, hasArt: Boolean): PreloadedImage {
             val cache = db.priceCacheDao().getByEan(normalizedEan)
@@ -1041,16 +1172,28 @@ class PriceQueryEngine(
         // tem prioridade sobre qualquer outra fonte de imagem — é a peça de campanha completa,
         // com espaço reservado para o badge de preço ser sobreposto (ver PlayerActivity).
         // É uma funcionalidade exclusiva da Mupa, então sempre consulta o endpoint fixo,
-        // independente de haver um step "lookup_image" customizado por integração.
+        // independente de haver um step "lookup_image" customizado por integração — EXCETO pra
+        // UnidaSul (pedido do usuário, 2026-11-13): a rede de algumas lojas bloqueia/redireciona
+        // o srv-mupa sem nunca responder, atrasando ~4s TODO scan só pra nunca achar arte mesmo
+        // (produto de terceiro, Mupa nunca gerou arte pra ele). Pula direto pro passo 1 (foto da
+        // própria API da UnidaSul, via ImagemUrl/clientImageUrl).
         //
         // Orientação do terminal (ver isDeviceVertical): o produtos-imgs mantém duas artes
         // independentes por produto (horizontal <ean>.webp / vertical <ean>_vertical.webp) —
         // pedimos só a que combina com o terminal físico deste aparelho, nunca as duas.
         val orientacao = if (isDeviceVertical()) "vertical" else "horizontal"
-        val step3 = config.steps.firstOrNull { it.type == "lookup_image" }
-        var meta = fetchProductImageMeta(ean = normalizedEan, step = step3, orientacao = orientacao)
-        if (meta?.arteUrl.isNullOrBlank() && step3 != null) {
-            meta = fetchProductImageMeta(ean = normalizedEan, step = null, orientacao = orientacao)
+        val skipMupaImageSearch = config.integration == "integra-unidasul"
+        // "Modo Publicidade das Imagens" (pedido do usuário, 2026-11-17): flag por dispositivo,
+        // só pra este passo 0 (arte de IA) — diferente de skipMupaImageSearch acima, que também
+        // pula o passo 3 (e é específico da UnidaSul, por motivo de rede, não de preferência).
+        val adArtworkEnabled = runCatching { SettingsManager(context).getAdArtworkEnabled() }.getOrDefault(true)
+        var meta: ProductImageMeta? = null
+        val step3 = if (skipMupaImageSearch) null else config.steps.firstOrNull { it.type == "lookup_image" }
+        if (!skipMupaImageSearch && adArtworkEnabled) {
+            meta = fetchProductImageMeta(ean = normalizedEan, step = step3, orientacao = orientacao)
+            if (meta?.arteUrl.isNullOrBlank() && step3 != null) {
+                meta = fetchProductImageMeta(ean = normalizedEan, step = null, orientacao = orientacao)
+            }
         }
         val arteUrl = meta?.arteUrl
         if (!arteUrl.isNullOrBlank()) {
@@ -1077,7 +1220,7 @@ class PriceQueryEngine(
                     meta?.let {
                         PriceTheme(signature = it.signature, light = it.light, dark = it.dark)
                     }?.takeIf { it.signature != null || it.dark != null || it.light != null }
-                return@withContext saveToCacheAndReturn(arteLocal, arteTheme, true)
+                return saveToCacheAndReturn(arteLocal, arteTheme, true)
             }
         }
 
@@ -1092,7 +1235,7 @@ class PriceQueryEngine(
                 // (o endpoint grava a foto crua também, se ainda não tiver), pra que a PRÓXIMA
                 // consulta desse EAN (passo 0 acima) já encontre 'imagem_url_arte' pronta.
                 requestArtGeneration(ean = normalizedEan, imagePath = clientLocal)
-                return@withContext saveToCacheAndReturn(clientLocal, null, false)
+                return saveToCacheAndReturn(clientLocal, null, false)
             }
         }
 
@@ -1114,27 +1257,32 @@ class PriceQueryEngine(
                     // upload + geração da arte, pra que a PRÓXIMA consulta (passo 0 acima) já
                     // encontre 'imagem_url_arte' pronta e mostre o layout novo com o preço.
                     requestArtGeneration(ean = normalizedEan, imagePath = kompraoLocal)
-                    return@withContext saveToCacheAndReturn(kompraoLocal, null, false)
+                    return saveToCacheAndReturn(kompraoLocal, null, false)
                 }
             } else {
                 Log.w("MPlayerPrice", "komprao_image_skip sku=$sku hasToken=${token.isNotBlank()}")
             }
         }
 
-        // 3. Fallback to normal VTEX and Mupa image flow
-        val vtexUrl = fetchVtexImageUrlFromApiProdutos(ean = normalizedEan)
-        val vtexLocal = vtexUrl?.let { downloadProductImageIfNeeded(ean = normalizedEan, rawUrl = it) }
-        if (vtexLocal != null) return@withContext saveToCacheAndReturn(vtexLocal, null, false)
+        // 3. Fallback to normal VTEX and Mupa image flow — pedido do usuário (2026-11-13):
+        // pulado inteiro pra UnidaSul, mesma razão do passo 0 (busca de imagem na Mupa nunca
+        // deve rodar pra esse cliente, só a foto que vem da própria API dele no passo 1 acima).
+        var mupaLocal: String? = null
+        if (!skipMupaImageSearch) {
+            val vtexUrl = fetchVtexImageUrlFromApiProdutos(ean = normalizedEan)
+            val vtexLocal = vtexUrl?.let { downloadProductImageIfNeeded(ean = normalizedEan, rawUrl = it) }
+            if (vtexLocal != null) return saveToCacheAndReturn(vtexLocal, null, false)
 
-        // 2ª opção garantida: imagem crua da API da Mupa (srv-mupa), reaproveitando o 'meta'
-        // já buscado no passo 0 acima (evita uma segunda chamada de rede quando possível).
-        var mupaLocal = meta?.imageUrl?.let { downloadProductImageIfNeeded(ean = normalizedEan, rawUrl = it) }
-        if (mupaLocal == null && step3 != null && meta?.imageUrl == null) {
-            val fallbackMeta = fetchProductImageMeta(ean = normalizedEan, step = null)
-            val fallbackLocal = fallbackMeta?.imageUrl?.let { downloadProductImageIfNeeded(ean = normalizedEan, rawUrl = it) }
-            if (fallbackLocal != null) {
-                meta = fallbackMeta
-                mupaLocal = fallbackLocal
+            // 2ª opção garantida: imagem crua da API da Mupa (srv-mupa), reaproveitando o 'meta'
+            // já buscado no passo 0 acima (evita uma segunda chamada de rede quando possível).
+            mupaLocal = meta?.imageUrl?.let { downloadProductImageIfNeeded(ean = normalizedEan, rawUrl = it) }
+            if (mupaLocal == null && step3 != null && meta?.imageUrl == null) {
+                val fallbackMeta = fetchProductImageMeta(ean = normalizedEan, step = null)
+                val fallbackLocal = fallbackMeta?.imageUrl?.let { downloadProductImageIfNeeded(ean = normalizedEan, rawUrl = it) }
+                if (fallbackLocal != null) {
+                    meta = fallbackMeta
+                    mupaLocal = fallbackLocal
+                }
             }
         }
         val theme =
@@ -1145,12 +1293,67 @@ class PriceQueryEngine(
                     dark = it.dark,
                 )
             }?.takeIf { it.signature != null || it.dark != null || it.light != null }
-        if (mupaLocal != null) return@withContext saveToCacheAndReturn(mupaLocal, theme, false)
+        if (mupaLocal != null) return saveToCacheAndReturn(mupaLocal, theme, false)
 
         // Todas as fontes falharam: registra o EAN para um técnico resolver manualmente depois.
         // Fire-and-forget — não afeta o retorno nem a velocidade da consulta de preço.
         reportMissingImage(normalizedEan)
-        PreloadedImage(null, null, false)
+        return PreloadedImage(null, null, false)
+    }
+
+    /**
+     * Busca só uma FOTO CRUA do produto (nunca arte publicitária) — passos 1-3 de
+     * [resolveNormalPreloadedImage] (foto própria do cliente, API do Komprão, VTEX/Mupa),
+     * sem o passo 0 (arte) que normalmente roda primeiro e pode retornar antes de chegar aqui.
+     * Usado pela Consulta Patrocinada ([preloadProductImageAndTheme]) quando o fluxo normal já
+     * achou/tem arte em cache para o EAN — a arte nunca serve de thumbnail, então essa foto
+     * precisa ser buscada à parte.
+     */
+    private suspend fun fetchPlainProductPhoto(normalizedEan: String, config: PriceConfig): String? {
+        val cachedProduct = db.priceCacheDao().getByEan(normalizedEan)?.let { cache ->
+            runCatching { parseProductFromCache(normalizedEan, cache) }.getOrNull()
+        }
+        val skipMupaImageSearch = config.integration == "integra-unidasul"
+
+        // 1. Foto própria do cliente (API dele, não a Mupa)
+        val clientImageUrl = cachedProduct?.clientImageUrl
+        if (!clientImageUrl.isNullOrBlank() && clientImageUrl.startsWith("http")) {
+            val clientLocal = runCatching { downloadProductImageIfNeeded(ean = normalizedEan, rawUrl = clientImageUrl) }.getOrNull()
+            if (clientLocal != null) {
+                requestArtGeneration(ean = normalizedEan, imagePath = clientLocal)
+                return clientLocal
+            }
+        }
+
+        // 2. API de imagem do Komprão (OnWay), por SKU
+        val isKomprao = config.integration.contains("komprao", ignoreCase = true) || config.integration.contains("komprão", ignoreCase = true)
+        if (isKomprao) {
+            val sku = cachedProduct?.id ?: normalizedEan
+            val token = obterTokenKomprao()
+            if (sku.isNotBlank() && token.isNotBlank()) {
+                val kompraoUrl = "https://apionway.superkoch.com.br/on-way/product/image/$sku"
+                val headers = mapOf("accept" to "image/jpeg", "Authorization" to "Bearer $token")
+                val kompraoLocal = runCatching {
+                    downloadProductImageIfNeeded(ean = normalizedEan, rawUrl = kompraoUrl, headers = headers)
+                }.getOrNull()
+                if (kompraoLocal != null) {
+                    requestArtGeneration(ean = normalizedEan, imagePath = kompraoLocal)
+                    return kompraoLocal
+                }
+            }
+        }
+
+        // 3. Fallback VTEX / foto crua da Mupa (srv-mupa)
+        if (!skipMupaImageSearch) {
+            val vtexUrl = fetchVtexImageUrlFromApiProdutos(ean = normalizedEan)
+            val vtexLocal = vtexUrl?.let { downloadProductImageIfNeeded(ean = normalizedEan, rawUrl = it) }
+            if (vtexLocal != null) return vtexLocal
+
+            val meta = fetchProductImageMeta(ean = normalizedEan, step = null)
+            val mupaLocal = meta?.imageUrl?.let { downloadProductImageIfNeeded(ean = normalizedEan, rawUrl = it) }
+            if (mupaLocal != null) return mupaLocal
+        }
+        return null
     }
 
     /**
@@ -1273,7 +1476,7 @@ class PriceQueryEngine(
                         .header("accept", "application/json")
                         .get()
                         .build()
-                    http.newCall(req).execute().use { r ->
+                    httpImageMeta.newCall(req).execute().use { r ->
                         if (!r.isSuccessful) throw IllegalStateException("product_image_http_${r.code}")
                         val text = r.body?.string().orEmpty()
                         JSONObject(text)
@@ -1295,6 +1498,216 @@ class PriceQueryEngine(
                 dark = dark,
             )
         }
+    }
+
+    /**
+     * Telas Patrocinadas (Retail Media) — ver docs/SPEC_PATROCINIO_PRODUTOS_IMGS.md. Diferente da
+     * arte por produto (step 0 de preloadProductImageAndTheme, 1 imagem por EAN), uma campanha
+     * patrocinada é 1 imagem por EMPRESA/orientação que fica fixa enquanto QUALQUER produto é
+     * consultado — por isso usa uma chave de cache própria (companyId, não EAN) e é checada só
+     * 1x por janela de 60 min (mesmo TTL da imagem normal), nunca a cada scan.
+     */
+    private fun sponsorCacheKey(companyId: String, orientacao: String) = "sponsor_${companyId}_${orientacao}"
+
+    private fun sponsorMetaFile(cacheKey: String): File = File(productsDir(), "$cacheKey.json")
+
+    private fun saveSponsorMeta(cacheKey: String, campaign: SponsorCampaign) {
+        runCatching {
+            val json = JSONObject().apply {
+                put("imageUrl", campaign.imageUrl)
+                put("regionX0", campaign.region.x0)
+                put("regionX1", campaign.region.x1)
+                put("regionY0", campaign.region.y0)
+                put("regionY1", campaign.region.y1)
+                put("themeSignature", campaign.themeSignature)
+                put("campaignId", campaign.campaignId)
+                put("expiresAtEpochMs", campaign.expiresAtEpochMs)
+            }
+            sponsorMetaFile(cacheKey).writeText(json.toString())
+        }
+    }
+
+    private fun loadSponsorMeta(cacheKey: String): SponsorCampaign? {
+        return runCatching {
+            val file = sponsorMetaFile(cacheKey)
+            if (!file.exists()) return null
+            val json = JSONObject(file.readText())
+            SponsorCampaign(
+                imageUrl = json.optString("imageUrl"),
+                region = SponsorRegion(
+                    x0 = json.optDouble("regionX0", 0.0).toFloat(),
+                    x1 = json.optDouble("regionX1", 1.0).toFloat(),
+                    y0 = json.optDouble("regionY0", 0.0).toFloat(),
+                    y1 = json.optDouble("regionY1", 1.0).toFloat(),
+                ),
+                themeSignature = json.optString("themeSignature").ifBlank { null },
+                campaignId = json.optString("campaignId"),
+                expiresAtEpochMs = if (json.has("expiresAtEpochMs") && !json.isNull("expiresAtEpochMs")) json.optLong("expiresAtEpochMs") else null,
+            )
+        }.getOrNull()
+    }
+
+    /**
+     * Modo de teste local (sem depender do endpoint real /patrocinio-ativo, que ainda não existe
+     * em nenhum backend): em build debug, se existir um arquivo
+     * `sponsor_test.json` + `sponsor_test.webp|jpg|png` na pasta de produtos do app, usa esses
+     * dados como se fosse a resposta do servidor. Só pra validar o pipeline A1/A2 em hardware
+     * real antes do backend existir — nunca roda em build release.
+     */
+    private fun loadLocalTestSponsor(): SponsorCampaign? {
+        if (!BuildConfig.DEBUG) return null
+        return runCatching {
+            val metaFile = File(productsDir(), "sponsor_test.json")
+            if (!metaFile.exists()) return null
+            val imageFile = productsDir().listFiles()
+                ?.firstOrNull { it.isFile && it.nameWithoutExtension == "sponsor_test" && it.extension != "json" }
+                ?: return null
+            val json = JSONObject(metaFile.readText())
+            SponsorCampaign(
+                imageUrl = "file://${imageFile.absolutePath}",
+                region = SponsorRegion(
+                    x0 = json.optDouble("regionX0", 0.05).toFloat(),
+                    x1 = json.optDouble("regionX1", 0.55).toFloat(),
+                    y0 = json.optDouble("regionY0", 0.80).toFloat(),
+                    y1 = json.optDouble("regionY1", 0.94).toFloat(),
+                ),
+                themeSignature = json.optString("themeSignature").ifBlank { null },
+                campaignId = "teste_local",
+                expiresAtEpochMs = null,
+            )
+        }.getOrNull()
+    }
+
+    private suspend fun fetchActiveSponsor(companyId: String, orientacao: String): SponsorCampaign? {
+        return runCatching {
+            val baseUrl = SettingsManager(context).getImageServerBaseUrl()
+            val url = "$baseUrl/patrocinio-ativo?companyId=$companyId&orientacao=$orientacao"
+            val req = Request.Builder().url(url).header("accept", "application/json").get().build()
+            val json = httpImageMeta.newCall(req).execute().use { r ->
+                if (!r.isSuccessful) throw IllegalStateException("sponsor_http_${r.code}")
+                JSONObject(r.body?.string().orEmpty())
+            }
+            if (!json.optBoolean("ativo", false)) return null
+            val regiao = json.optJSONObject("regiao") ?: return null
+            SponsorCampaign(
+                imageUrl = json.optString("imagemUrl", "").trim(),
+                region = SponsorRegion(
+                    x0 = regiao.optDouble("x0", 0.0).toFloat(),
+                    x1 = regiao.optDouble("x1", 1.0).toFloat(),
+                    y0 = regiao.optDouble("y0", 0.0).toFloat(),
+                    y1 = regiao.optDouble("y1", 1.0).toFloat(),
+                ),
+                themeSignature = json.optString("corAssinatura", "").trim().ifBlank { null },
+                campaignId = json.optString("campanhaId", "").trim(),
+                // SimpleDateFormat, não java.time.Instant: minSdk 24 do flavor komprao não tem
+                // desugaring habilitado, e java.time só existe nativo a partir do 26.
+                expiresAtEpochMs = json.optString("expiraEm", "").trim().ifBlank { null }?.let { raw ->
+                    runCatching {
+                        java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US)
+                            .apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }
+                            .parse(raw)?.time
+                    }.getOrNull()
+                },
+            )
+        }.onFailure {
+            Log.w("MPlayerScan", "fetch_active_sponsor_failed companyId=$companyId err=${it.javaClass.simpleName}:${it.message}")
+        }.getOrNull()
+    }
+
+    /**
+     * Resolve a campanha patrocinada ativa para este dispositivo (se houver), baixando e
+     * cacheando a imagem localmente (mesma função de sempre, `downloadProductImageIfNeeded`, só
+     * com uma chave de cache por empresa em vez de por EAN — reaproveita o TTL de 60 min, o
+     * redimensionamento e a lógica de reuso de arquivo vencido sem duplicar nada). Só bate rede
+     * quando o cache local não existe ou venceu; dentro da janela, serve do disco.
+     */
+    private suspend fun resolveActiveSponsor(orientacao: String): Pair<String, SponsorCampaign>? {
+        val testSponsor = loadLocalTestSponsor()
+        if (testSponsor != null) {
+            return testSponsor.imageUrl.removePrefix("file://") to testSponsor
+        }
+
+        val companyId = resolveCompanyId()?.trim().orEmpty()
+        if (companyId.isBlank()) return null
+        val cacheKey = sponsorCacheKey(companyId, orientacao)
+
+        val cachedMeta = loadSponsorMeta(cacheKey)
+        val cachedImage = localProductImageFile(cacheKey)
+        val now = System.currentTimeMillis()
+        val cacheStillFresh = cachedMeta != null && cachedImage != null && isProductImageFresh(cacheKey) &&
+            (cachedMeta.expiresAtEpochMs == null || cachedMeta.expiresAtEpochMs > now)
+        if (cacheStillFresh) {
+            return cachedImage!!.absolutePath to cachedMeta!!
+        }
+
+        val fresh = fetchActiveSponsor(companyId, orientacao)
+        if (fresh == null || fresh.imageUrl.isBlank()) {
+            // Sem campanha ativa (ou falha de rede): remove cache local pra não ficar servindo
+            // uma campanha encerrada indefinidamente quando o servidor confirma que acabou.
+            runCatching { localProductImageFile(cacheKey)?.delete() }
+            runCatching { sponsorMetaFile(cacheKey).delete() }
+            return null
+        }
+        val screenMaxDim = maxOf(
+            context.resources.displayMetrics.widthPixels,
+            context.resources.displayMetrics.heightPixels,
+        )
+        val localPath = runCatching {
+            downloadProductImageIfNeeded(ean = cacheKey, rawUrl = fresh.imageUrl, maxDim = screenMaxDim)
+        }.getOrNull() ?: return null
+        saveSponsorMeta(cacheKey, fresh)
+        return localPath to fresh
+    }
+
+    private fun sponsoredLookupCacheKey(id: String) = "sponsored_lookup_$id"
+
+    /** Chamado a cada manifesto novo (fetch inicial ou refresh em segundo plano) — ver
+     * PlayerActivity. Só troca a lista em memória; o download/cache acontece em
+     * [precacheSponsoredLookups], chamado à parte (não bloqueia o parse do manifesto). */
+    fun updateSponsoredLookups(items: List<SponsoredLookupItem>) {
+        sponsoredLookups = items
+    }
+
+    /**
+     * Pré-baixa TODAS as peças da lista atual (não só a que vai ser mostrada na próxima consulta)
+     * — contrato exige exibição instantânea no momento do scan, sem latência de rede
+     * (docs/2026-11-23-mplayer-android-sponsored-lookup.md, §4.1). Cada peça é independente
+     * (`runCatching` por item): uma falha não derruba as outras.
+     */
+    suspend fun precacheSponsoredLookups() = withContext(Dispatchers.IO) {
+        val screenMaxDim = maxOf(
+            context.resources.displayMetrics.widthPixels,
+            context.resources.displayMetrics.heightPixels,
+        )
+        for (item in sponsoredLookups) {
+            runCatching {
+                downloadProductImageIfNeeded(
+                    ean = sponsoredLookupCacheKey(item.id),
+                    rawUrl = item.url,
+                    maxDim = screenMaxDim,
+                )
+            }
+        }
+    }
+
+    /** Round-robin: cada chamada avança pra próxima peça da lista atual, ciclando. `null` se a
+     * lista estiver vazia (sem Tag patrocinada pra este dispositivo) ou se a peça escolhida ainda
+     * não tiver sido baixada (ex. logo após o pareamento, antes do primeiro
+     * [precacheSponsoredLookups] terminar) — nesse caso baixa na hora, pra não perder o scan. */
+    private suspend fun resolveActiveSponsoredLookup(): String? {
+        val items = sponsoredLookups
+        if (items.isEmpty()) return null
+        val idx = sponsoredLookupIndex.getAndUpdate { (it + 1) % items.size }.mod(items.size)
+        val item = items[idx]
+        val cacheKey = sponsoredLookupCacheKey(item.id)
+        localProductImageFile(cacheKey)?.let { return it.absolutePath }
+        val screenMaxDim = maxOf(
+            context.resources.displayMetrics.widthPixels,
+            context.resources.displayMetrics.heightPixels,
+        )
+        return runCatching {
+            downloadProductImageIfNeeded(ean = cacheKey, rawUrl = item.url, maxDim = screenMaxDim)
+        }.getOrNull()
     }
 
     /**
@@ -1420,57 +1833,6 @@ class PriceQueryEngine(
             productsDir().listFiles()
                 ?.firstOrNull { it.isFile && it.length() > 0L && it.nameWithoutExtension == normalized }
         return any?.absolutePath
-    }
-
-    private fun sponsoredLookupCacheKey(id: String) = "sponsored_lookup_$id"
-
-    /** Chamado a cada manifesto novo (fetch inicial ou refresh em segundo plano) — ver
-     * PlayerActivity. Só troca a lista em memória; o download/cache acontece em
-     * [precacheSponsoredLookups], chamado à parte (não bloqueia o parse do manifesto). */
-    fun updateSponsoredLookups(items: List<SponsoredLookupItem>) {
-        sponsoredLookups = items
-    }
-
-    /**
-     * Pré-baixa TODAS as peças da lista atual (não só a que vai ser mostrada na próxima consulta)
-     * — contrato exige exibição instantânea no momento do scan, sem latência de rede
-     * (docs/2026-11-23-mplayer-android-sponsored-lookup.md, §4.1). Cada peça é independente
-     * (`runCatching` por item): uma falha não derruba as outras.
-     */
-    suspend fun precacheSponsoredLookups() = withContext(Dispatchers.IO) {
-        val screenMaxDim = maxOf(
-            context.resources.displayMetrics.widthPixels,
-            context.resources.displayMetrics.heightPixels,
-        )
-        for (item in sponsoredLookups) {
-            runCatching {
-                downloadProductImageIfNeeded(
-                    ean = sponsoredLookupCacheKey(item.id),
-                    rawUrl = item.url,
-                    maxDim = screenMaxDim,
-                )
-            }
-        }
-    }
-
-    /** Round-robin: cada chamada avança pra próxima peça da lista atual, ciclando. `null` se a
-     * lista estiver vazia (sem Tag patrocinada pra este dispositivo) ou se a peça escolhida ainda
-     * não tiver sido baixada (ex. logo após o pareamento, antes do primeiro
-     * [precacheSponsoredLookups] terminar) — nesse caso baixa na hora, pra não perder o scan. */
-    private suspend fun resolveActiveSponsoredLookup(): String? {
-        val items = sponsoredLookups
-        if (items.isEmpty()) return null
-        val idx = sponsoredLookupIndex.getAndUpdate { (it + 1) % items.size }.mod(items.size)
-        val item = items[idx]
-        val cacheKey = sponsoredLookupCacheKey(item.id)
-        localProductImageFile(cacheKey)?.let { return it.absolutePath }
-        val screenMaxDim = maxOf(
-            context.resources.displayMetrics.widthPixels,
-            context.resources.displayMetrics.heightPixels,
-        )
-        return runCatching {
-            downloadProductImageIfNeeded(ean = cacheKey, rawUrl = item.url, maxDim = screenMaxDim)
-        }.getOrNull()
     }
 
     /** Arquivo de imagem local do [ean], se existir (independente da idade). */
@@ -1766,7 +2128,9 @@ class PriceQueryEngine(
                     val field = s.optString("field", "")
                     val isPromo = s.optBoolean("isPromo", false) || s.optBoolean("is_promo", false) || parseBoolean(s.opt("isPromo")) || parseBoolean(s.opt("is_promo"))
                     val isClub = s.optBoolean("isClub", false) || s.optBoolean("is_club", false) || parseBoolean(s.opt("isClub")) || parseBoolean(s.opt("is_club"))
-                    list += ProductPriceSlot(label = label, value = value, field = field, isPromo = isPromo, isClub = isClub)
+                    val fromValue = s.optDouble("fromValue", Double.NaN).takeIf { !it.isNaN() }
+                    val currencySymbol = s.optString("currencySymbol", "").ifBlank { "R$" }
+                    list += ProductPriceSlot(label = label, value = value, field = field, isPromo = isPromo, isClub = isClub, fromValue = fromValue, currencySymbol = currencySymbol)
                 }
                 list
             } else {
@@ -2073,6 +2437,12 @@ class PriceQueryEngine(
                     .put("field", s.field)
                     .put("isPromo", s.isPromo)
                     .put("isClub", s.isClub)
+                    // Bug real (2026-11-17): faltavam aqui — um produto recarregado do cache
+                    // (ver query(), fromCache) perdia o símbolo de moeda (voltava pro "R$" padrão
+                    // de ProductPriceSlot em QUALQUER slot, inclusive Dólar/Peso) e o "De: X"
+                    // riscado, mesmo com os dois presentes na consulta original.
+                    .put("fromValue", s.fromValue)
+                    .put("currencySymbol", s.currencySymbol)
             )
         }
 
@@ -2351,18 +2721,32 @@ class PriceQueryEngine(
     }
 
     // ─────────────────────────────────────────────────────────────
-    // integra-tcserver  (Gertec TCServer — protocolo TCP de terminal
-    // de consulta, porta padrão 6500)
+    // integra-tcserver  (Gertec TCServer — servidor de consulta de preço
+    // local da loja)
     //
-    // Handshake:  conecta → servidor envia "#ok"
-    //             terminal envia "#<tipo>|<versão>"
-    //             servidor envia "#alwayslive"
-    //             terminal envia "#alwayslive_ok"
-    // Consulta:   terminal envia "#<ean>"
-    //             servidor responde "#<DESCRIÇÃO>|<PREÇO>" ou "#nfound"
+    // Achado real (2026-10-21, testado localmente com o .jar oficial da
+    // Gertec): o TCServer fala, em teoria, um protocolo TCP binário na
+    // porta 6500 para terminais físicos Gertec (handshake "#ok" →
+    // identificação do terminal → "#alwayslive"/"#alwayslive_ok" →
+    // "#<ean>" → "#<DESCRIÇÃO>|<PREÇO>" ou "#nfound") — mas essa build
+    // trava o listener INTEIRO (para de aceitar qualquer conexão nova,
+    // de qualquer terminal) ao receber uma identificação que não
+    // reconhece, sem logar exceção nenhuma. Risco demais pra produção
+    // (um app novo poderia derrubar o atendimento de todos os terminais
+    // físicos da loja).
+    //
+    // Em vez disso, usamos o endpoint HTTP que o próprio TCServer já
+    // expõe (embedded Jetty): GET /barcode?param=<ean>. É o mesmo
+    // endpoint que a página de consulta web do TCServer usa (ver
+    // webroot/index.jsp no .tc-server da instalação) e pelo qual o
+    // TCServer encaminha a consulta ao backend de preços configurado
+    // (tcxml/price_checker.xml) — ponto de integração real e estável,
+    // testado sem travar nada, não um atalho. Retorna HTML
+    // (webroot/product.jsp ou webroot/notfound.jsp), não JSON.
     //
     // Endereço configurado em Configurações (SettingsManager
-    // tc_server_address, formato "ip:porta"; porta default 6500).
+    // tc_server_address, formato "ip:porta"; porta = a do servidor HTTP
+    // do TCServer, tipicamente 8080 — não a 6500 do protocolo TCP).
     // ─────────────────────────────────────────────────────────────
 
     private suspend fun queryTcServer(ean: String, config: PriceConfig, filial: String): PriceProduct? {
@@ -2387,9 +2771,10 @@ class PriceQueryEngine(
         val startedAt = System.currentTimeMillis()
         var product: PriceProduct? = null
         try {
-            val json = fetchTcServerPrice(baseAddr, ean)
-            Log.d("MPlayerPrice", "tcserver_resp ean=$ean resp=${json?.toString()?.take(300)}")
-            product = json?.let { parseTcServerResponse(ean, it) }?.let { attachLocalImageIfExists(it) }
+            val html = fetchTcServerBarcodeHtml(baseAddr, ean)
+            Log.d("MPlayerPrice", "tcserver_resp ean=$ean resp=${html?.take(300)}")
+            product = html?.let { parseTcServerHtml(ean, it) }?.let { attachLocalImageIfExists(it) }
+            product = product?.let { appendForeignCurrencySlots(baseAddr, it) }
 
             if (product != null) {
                 db.priceCacheDao().upsert(
@@ -2413,151 +2798,82 @@ class PriceQueryEngine(
         return product
     }
 
-    /** GET http://{addr}/consulta?ean={ean} — retorna o JSON do TCServer Mupa (ou null se 404). */
-    private fun fetchTcServerPrice(addr: String, ean: String): JSONObject? {
-        val url = "http://$addr/consulta?ean=$ean"
-        val req = Request.Builder().url(url).header("accept", "application/json").get().build()
+    /**
+     * GET http://{addr}/barcode?param={ean} — retorna o HTML do TCServer
+     * (webroot/product.jsp quando encontrado, webroot/notfound.jsp quando não).
+     */
+    private fun fetchTcServerBarcodeHtml(addr: String, ean: String): String? {
+        val url = "http://$addr/barcode?param=$ean"
+        val req = Request.Builder().url(url).get().build()
         http.newCall(req).execute().use { resp ->
-            val body = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) {
-                // 404 = produto não encontrado (resposta esperada, não é erro de rede)
                 Log.d("MPlayerPrice", "tcserver_http_status=${resp.code} ean=$ean")
                 return null
             }
-            return runCatching { JSONObject(body) }.getOrNull()
+            return resp.body?.string()
         }
     }
 
-    private fun parseTcServerResponse(ean: String, json: JSONObject): PriceProduct? {
-        if (!json.optBoolean("encontrado", false)) return null
+    // Formato real de webroot/product.jsp (testado ao vivo contra o .jar da Gertec):
+    //   Codigo de barras: <ean>
+    //   Descricao: <descrição>
+    //   Label1: <rótulo1>
+    //   Preco1: <preço1>
+    //   Label2: <rótulo2>        (opcional)
+    //   Preco2: <preço2>         (opcional)
+    // webroot/notfound.jsp: 'O produto "<ean>" nao foi encontrado'
+    private fun parseTcServerHtml(ean: String, html: String): PriceProduct? {
+        if (html.contains("nao foi encontrado")) return null
 
-        fun num(key: String): Double? =
-            if (json.isNull(key)) null else json.optDouble(key, -1.0).takeIf { it > 0 }
+        fun field(name: String): String? =
+            Regex("$name:\\s*([^<]*)").find(html)?.groupValues?.get(1)?.trim()?.ifBlank { null }
 
-        val preco = num("preco") ?: return null
-        val precoPromo = num("preco_promo")?.takeIf { it < preco }
-        val precoClube = num("preco_clube")?.takeIf { it < preco }
-        val description = json.optString("descricao", "").ifBlank { null }
+        val description = field("Descricao") ?: return null
+        val preco1 = field("Preco1")?.replace(",", ".")?.toDoubleOrNull() ?: return null
+        val label1 = field("Label1")
+        val preco2 = field("Preco2")?.replace(",", ".")?.toDoubleOrNull()
+        val precoPromo = preco2?.takeIf { it < preco1 }
 
-        // Slots na ordem: PREÇO NORMAL → EM PROMOÇÃO → CLUBE
         val slots = ArrayList<ProductPriceSlot>()
         slots += ProductPriceSlot(
-            label = "PREÇO NORMAL",
-            value = preco,
+            label = label1?.uppercase()?.ifBlank { null } ?: "PREÇO NORMAL",
+            value = preco1,
             field = "price",
             isPromo = false,
             isClub = false,
         )
         if (precoPromo != null) {
+            // Label2 do TCServer é config de loja (ex: "Custom price", LABEL2 em
+            // config.properties) — não é um texto de marketing pro cliente final, por isso
+            // ignorado aqui a favor de um rótulo fixo "EM OFERTA" (achado real, 2026-10-21,
+            // EAN 7891010980061: Label2="Custom price", Preco2=19,32 < Preco1=22,49).
             slots += ProductPriceSlot(
-                label = "EM PROMOÇÃO",
+                label = "EM OFERTA",
                 value = precoPromo,
                 field = "price_wholesale",
                 isPromo = true,
                 isClub = false,
-                fromValue = preco,  // "de" riscado dentro do box de promoção
+                fromValue = preco1,  // "de" riscado dentro do box de promoção
             )
         }
-        if (precoClube != null) {
-            slots += ProductPriceSlot(
-                label = "CLUBE",
-                value = precoClube,
-                field = "price_club",
-                isPromo = false,
-                isClub = true,
-            )
-        }
-
-        // ── Campos extras dinâmicos vindos do TCServer Mupa ──
-        // preços viram slots (com "de" riscado dentro do box); ofertas viram frases
-        val ofertaFrases = ArrayList<String>()
-        val extrasArr = json.optJSONArray("extras")
-        if (extrasArr != null) {
-            for (i in 0 until extrasArr.length()) {
-                val ex = extrasArr.optJSONObject(i) ?: continue
-                val tipo = ex.optString("tipo")
-                val label = ex.optString("label").trim()
-                when (tipo) {
-                    "preco_simples" -> {
-                        val v = ex.optDouble("valor", -1.0).takeIf { it > 0 } ?: continue
-                        slots += ProductPriceSlot(
-                            label = label.ifBlank { "PREÇO" },
-                            value = v,
-                            field = "price_extra",
-                            isPromo = v < preco,
-                            isClub = false,
-                        )
-                    }
-                    "de_por" -> {
-                        val de = ex.optDouble("de", -1.0).takeIf { it > 0 }
-                        val por = ex.optDouble("por", -1.0).takeIf { it > 0 } ?: continue
-                        slots += ProductPriceSlot(
-                            label = label.ifBlank { "OFERTA" },
-                            value = por,
-                            field = "price_wholesale",
-                            isPromo = true,
-                            isClub = false,
-                            fromValue = de?.takeIf { it > por },  // "de" riscado dentro do box
-                        )
-                    }
-                    "leve_pague" -> {
-                        val leve = ex.optInt("leve", 0)
-                        val pague = ex.optInt("pague", 0)
-                        if (leve > 0 && pague > 0) {
-                            ofertaFrases += label.ifBlank { "LEVE $leve PAGUE $pague" }
-                        }
-                    }
-                    "compre_pague" -> {
-                        val qtd = ex.optInt("qtd", 0)
-                        val valor = ex.optDouble("valor", -1.0).takeIf { it > 0 }
-                        if (qtd > 0 && valor != null) {
-                            ofertaFrases += label.ifBlank {
-                                "NA COMPRA DE $qtd, PAGUE ${formatMoneyBr(valor)}"
-                            }
-                        }
-                    }
-                    "desconto_progressivo" -> {
-                        val item = ex.optInt("item", 0)
-                        val percent = ex.optDouble("percent", -1.0).takeIf { it > 0 }
-                        if (item > 0 && percent != null) {
-                            ofertaFrases += label.ifBlank {
-                                "NO ${item}º ITEM, ${percent.toInt()}% DE DESCONTO"
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        val offer = if (ofertaFrases.isNotEmpty()) {
-            PriceOffer(
-                enabled = true,
-                title = ofertaFrases.joinToString("  •  "),
-                description = null,
-                secondUnit = null,
-                type = "extra",
-            )
-        } else null
-
-        val localImagePath = localProductImagePathIfExists(ean)
 
         return PriceProduct(
             id = null,
             ean = ean,
             description = description,
-            price = preco,
+            price = preco1,
             originalPrice = null,
-            clubPrice = precoClube,
-            priceClub = precoClube,
+            clubPrice = null,
+            priceClub = null,
             priceWholesale = precoPromo,
             pricePromotional = precoPromo,
             priceFrom = null,
             priceWeighable = null,
             cardPrice = null,
             stock = null,
-            image = localImagePath,
+            image = null,
             clientImageUrl = null,
-            offer = offer,
+            offer = null,
             packs = emptyList(),
             theme = null,
             offline = false,
@@ -2566,50 +2882,113 @@ class PriceQueryEngine(
         )
     }
 
-    private fun formatMoneyBr(v: Double): String =
-        "R$ " + String.format(Locale.US, "%.2f", v).replace(".", ",")
+    // ─────────────────────────────────────────────────────────────
+    // Conversão de moeda estrangeira (Dólar/Peso) via TCServer
+    //
+    // Duas linhas especiais cadastradas pelo cliente na MESMA tabela de produtos do TCServer
+    // (PRICETAB.txt), com barcode literal "moeda_dolar"/"moeda_peso" — ex:
+    //   moeda_dolar|Cotação Dólar|5,34|
+    //   moeda_peso|Cotação Peso|0,0061|
+    // "Preco1" é a cotação: quantos reais vale 1 unidade daquela moeda. Convertido aqui como
+    // preco_em_reais / cotacao. Reaproveita o MESMO endpoint /barcode?param= já usado pra
+    // produtos normais, sem cache — mesmo motivo do resto do TCServer (comentário em
+    // queryTcServer): é local/rápido, e cachear aqui só atrasava o cliente ver uma cotação nova
+    // (achado real, 2026-10-21: usuário trocou a cotação na PRICETAB.txt e a conversão não
+    // mudou — tinha um cache de 10min aqui que não existe em nenhum outro lugar da integração).
+    // ─────────────────────────────────────────────────────────────
+
+    private suspend fun appendForeignCurrencySlots(baseAddr: String, product: PriceProduct): PriceProduct {
+        val price = product.price ?: return product
+        val settings = SettingsManager(context)
+        if (!settings.getForeignCurrencyEnabled()) return product
+
+        // Produto em oferta (Preco2 < Preco1, ver parseTcServerHtml): converte o preço de
+        // OFERTA, não o preço cheio — é o que o cliente realmente vai pagar.
+        val activePrice = product.priceSlots?.firstOrNull { it.isPromo }?.value ?: price
+
+        val extraSlots = ArrayList<ProductPriceSlot>()
+        if (settings.getShowUsdCurrency()) {
+            fetchCurrencyQuote(baseAddr, "moeda_dolar")?.let { rate ->
+                extraSlots += ProductPriceSlot(
+                    label = "DÓLAR",
+                    value = activePrice / rate,
+                    field = "price_usd",
+                    isPromo = false,
+                    isClub = false,
+                    currencySymbol = "US$",
+                )
+            }
+        }
+        if (settings.getShowArsCurrency()) {
+            fetchCurrencyQuote(baseAddr, "moeda_peso")?.let { rate ->
+                extraSlots += ProductPriceSlot(
+                    label = "PESO",
+                    value = activePrice / rate,
+                    field = "price_ars",
+                    isPromo = false,
+                    isClub = false,
+                    currencySymbol = "$",
+                )
+            }
+        }
+        if (extraSlots.isEmpty()) return product
+
+        val baseSlots = product.priceSlots ?: listOf(
+            ProductPriceSlot(label = "PREÇO NORMAL", value = price, field = "price", isPromo = false, isClub = false),
+        )
+        return product.copy(priceSlots = baseSlots + extraSlots)
+    }
+
+    /** Busca a cotação de uma moeda ("moeda_dolar"/"moeda_peso") no TCServer. Sem cache. */
+    private suspend fun fetchCurrencyQuote(baseAddr: String, code: String): Double? {
+        val html = runCatching { fetchTcServerBarcodeHtml(baseAddr, code) }.getOrNull()
+        if (html == null || html.contains("nao foi encontrado")) {
+            Log.w("MPlayerPrice", "currency_quote_not_found code=$code addr=$baseAddr")
+            return null
+        }
+        val rate = Regex("Preco1:\\s*([^<]*)").find(html)?.groupValues?.get(1)?.trim()
+            ?.replace(",", ".")?.toDoubleOrNull()?.takeIf { it > 0.0 }
+        if (rate == null) {
+            Log.w("MPlayerPrice", "currency_quote_parse_failed code=$code addr=$baseAddr")
+            return null
+        }
+        return rate
+    }
 
     // ─────────────────────────────────────────────────────────────
     // integra-unidasul  (terminal de consulta UnidaSul Distribuidora
-    // Alimentícia) — reverse-engenheirado de um app legado Kodular/App
-    // Inventor (App_TC_Unidasul.aia, fornecido pelo usuário em
-    // 2026-10-13, ver docs/FEATURE_INTEGRACAO_UNIDASUL.md pro
-    // levantamento completo). Mesmo padrão de servidor local do
-    // queryTcServer acima: endereço configurado em Configurações
-    // (SettingsManager unidasul_server_address, "ip" ou "ip:porta",
-    // porta default 5000 — é o que o app original sempre usou, nunca
-    // configurável nele).
+    // Alimentícia, bandeiras Macromix/Rissul/etc.) — API oficial
+    // "UnidaSul.Api.TerminalConsulta" (2026-11-11, pedido do usuário pra
+    // ajustar o flavor de consulta pra essa API), substituindo o bridge
+    // local raspado (/get_price) usado até então (ver histórico no fim
+    // de docs/FEATURE_INTEGRACAO_UNIDASUL.md). Mesmo padrão de servidor
+    // configurável do queryTcServer acima: host configurado em
+    // Configurações (SettingsManager unidasul_server_address), blank =
+    // integração desativada.
     //
-    // GET http://{endereco}/get_price?num_filial={filial}&ean={ean}
+    // GET http://f{filial}srvhml01.filial.unidasul.local/UnidaSul.Api.TerminalConsulta/api/ObterDadosPrecoProduto/{ean}
     //
-    // O servidor da loja é uma ponte que raspa um sistema ASP.NET
-    // WebForms antigo da UnidaSul (os campos "lblXxx" são literalmente
-    // os IDs dos <asp:Label> da página raspada) e devolve JSON. Resposta
-    // real capturada em produção (filial 035):
-    // {
-    //   "elementos": {
-    //     "ean": "7896423456561",
-    //     "lblDcrProduto": "CHOC SNICKERS MOUSSE MARACUJA 42G",
-    //     "lblPreco": "3,79",                          // string, vírgula BR
-    //     "lblPrecoDC": "A partir de  3 Un:",           // rótulo da oferta por quantidade
-    //     "lblPrecoDC2": "3,33 cada",                   // valor da oferta por quantidade
-    //     "lblScanner": "Na compra de 3 ou mais unidades, você economiza: R$ 0,46 por unidade"
-    //     // demais campos (__VIEWSTATE, __EVENTTARGET, divCabecalho, tmrTemporizador, txtBarras,
-    //     // uplConsulta etc.) são artefatos do ASP.NET raspado, sem uso aqui.
-    //   },
-    //   "imagem_status": "disponivel" | "indisponivel",
-    //   "imagem_url": null | "/imagem-produto/<ean>" | "http://...",
-    //   "success": true
-    // }
-    // Erro de conexão com o servidor da filial: {"error": "...", "details": "...",
-    // "device_info": {...}} (sem "elementos" nem "success"). "Não encontrado": o
-    // app original detectava checando se lblPreco contém o texto literal "null".
+    // Confirmado ao vivo (2026-11-11) contra o Swagger de Homolog
+    // (http://f001srvhml01.filial.unidasul.local/UnidaSul.Api.TerminalConsulta/swagger):
+    // - Sucesso (HTTP 200): {"Descricao":"...", "Preco":"R$ 4,29", "Condicoes":[],
+    //   "Codigo":"Código: 2365121 - 7896423456561", "ImagemUrl":"https://..."}.
+    // - Não encontrado: HTTP 404 de verdade com {"mensagem":"Produto não encontrado."}
+    //   — diferente do bridge antigo, que sempre respondia 200 com "error" no corpo.
+    // - Swagger declara Bearer/JWT, mas respondeu sem token nenhum em Homolog;
+    //   segundo o usuário, em produção também não exige (só funciona dentro da
+    //   rede da loja).
+    // - 2026-11-11 assumia que Produção usava um host/virtual-directory diferentes de Homolog
+    //   (detectado pelo "hml" no host). 2026-11-13, em campo (device ST103ANLFKBC092, filial
+    //   074): o host "de produção" sem "hml" respondeu HTTP 503 (serviço fora do ar na loja,
+    //   não é problema do app), e o ÚNICO caminho confirmado funcionando de verdade (Swagger +
+    //   navegador do aparelho) foi sempre "f{filial}srvhml01..." +
+    //   "UnidaSul.Api.TerminalConsulta" — por isso a consulta agora só extrai os 3 dígitos da
+    //   filial do host configurado (ver unidasulBuildUrl) e monta a URL sempre com esse padrão
+    //   fixo, em vez de tentar adivinhar o ambiente pelo "hml" no host.
     //
-    // Achado de negócio (não técnico, confirmado com o usuário 2026-10-13): o app
-    // original CAPTURAVA lblPrecoDC/lblPrecoDC2/lblScanner (oferta por quantidade)
-    // mas tinha o bloco que EXIBIA isso na tela desativado — só mostrava o preço
-    // normal. Aqui vira um 2º price slot (mesmo padrão multi_price do Komprão/
-    // TCServer) em vez de descartar informação que o servidor já manda.
+    // Campo "Condicoes" (oferta por quantidade) é parseado como 2º price slot — ver
+    // parseUnidasulProdutoJson e PriceQueryEngineUnidasulTest para os 3 formatos reais
+    // confirmados em ~230 EANs de campo (2026-11-11).
     // ─────────────────────────────────────────────────────────────
 
     private suspend fun queryUnidasul(ean: String, config: PriceConfig, filial: String): PriceProduct? {
@@ -2628,24 +3007,14 @@ class PriceQueryEngine(
             Log.w("MPlayerPrice", "unidasul_address_not_configured ean=$ean")
             return null
         }
-        val baseAddr = address.removePrefix("http://").removePrefix("https://").trimEnd('/')
-        // address pode vir só "ip" (porta implícita 5000, igual o app original sempre usou)
-        // ou "ip:porta" explícito, pra não travar se algum dia mudar na loja.
-        val hostPort = if (baseAddr.contains(":")) baseAddr else "$baseAddr:5000"
-        // Servidor espera num_filial com 3 dígitos (ex.: "035", "086") — normaliza só quando
-        // o valor armazenado é puramente numérico e mais curto, nunca força em algo não-numérico.
-        val numFilial = filial.trim().let { f -> if (f.isNotEmpty() && f.all { it.isDigit() } && f.length < 3) f.padStart(3, '0') else f }
-        if (numFilial.isBlank()) {
-            Log.w("MPlayerPrice", "unidasul_filial_not_configured ean=$ean")
-            return null
-        }
+        val host = address.removePrefix("http://").removePrefix("https://").trimEnd('/')
 
         val startedAt = System.currentTimeMillis()
         var product: PriceProduct? = null
         try {
-            val json = fetchUnidasulPrice(hostPort, numFilial, ean)
+            val json = fetchUnidasulPrice(host, ean)
             Log.d("MPlayerPrice", "unidasul_resp ean=$ean resp=${json?.toString()?.take(600)}")
-            product = json?.let { parseUnidasulResponse(ean, it, hostPort) }?.let { attachLocalImageIfExists(it) }
+            product = json?.let { parseUnidasulResponse(ean, it) }?.let { attachLocalImageIfExists(it) }
 
             if (product != null) {
                 db.priceCacheDao().upsert(
@@ -2657,9 +3026,8 @@ class PriceQueryEngine(
                 )
             }
         } catch (t: Throwable) {
-            Log.w("MPlayerPrice", "query_unidasul_failed ean=$ean addr=$hostPort err=${t.javaClass.simpleName}:${t.message}")
-            // Fallback para cache mesmo expirado quando o servidor da filial está inacessível
-            // (achado real do .aia: isso é comum — "f086srv01.filial.unidasul.local" fora do ar).
+            Log.w("MPlayerPrice", "query_unidasul_failed ean=$ean host=$host err=${t.javaClass.simpleName}:${t.message}")
+            // Fallback para cache mesmo expirado quando o servidor da filial está inacessível.
             if (cache != null) {
                 product = normalizeCachedProduct(parseProductFromCache(ean, cache))?.copy(offline = true)
             }
@@ -2670,71 +3038,122 @@ class PriceQueryEngine(
         return product
     }
 
-    private fun fetchUnidasulPrice(hostPort: String, numFilial: String, ean: String): JSONObject? {
-        val url = "http://$hostPort/get_price?num_filial=$numFilial&ean=$ean"
+    private fun fetchUnidasulPrice(host: String, ean: String): JSONObject? {
+        val url = unidasulBuildUrl(host, "api/ObterDadosPrecoProduto/$ean")
+        if (url == null) {
+            Log.w("MPlayerPrice", "unidasul_filial_code_not_found host=$host ean=$ean")
+            return null
+        }
         val req = Request.Builder().url(url).header("accept", "application/json").get().build()
         http.newCall(req).execute().use { resp ->
             val body = resp.body?.string().orEmpty()
             Log.d("MPlayerPrice", "unidasul_price_resp ean=$ean status=${resp.code} body=${body.take(600)}")
-            // Erro de conexão com o servidor da filial chega como 200 com {"error":...} no corpo
-            // (comportamento real observado no .aia) — por isso não filtra por resp.isSuccessful
-            // sozinho, deixa parseUnidasulResponse decidir pelo campo "error"/"success".
+            // "Produto não encontrado" chega com HTTP 404 de verdade (API oficial, diferente do
+            // bridge antigo que sempre respondia 200) — qualquer status não-2xx é tratado como
+            // "sem produto" aqui; a decisão de cair pro cache fica pro catch acima (erro de rede).
+            if (!resp.isSuccessful) return null
             return runCatching { JSONObject(body) }.getOrNull()
         }
     }
 
     // Fina casca com acesso a Context (cache de imagem local) em volta da função pura
     // abaixo — mantém a lógica de parsing de verdade 100% testável sem Android.
-    private fun parseUnidasulResponse(ean: String, json: JSONObject, hostPort: String): PriceProduct? {
-        val parsed = parseUnidasulElementosJson(ean, json, hostPort) ?: return null
-        val localImagePath = localProductImagePathIfExists(ean)
-        return if (localImagePath != null) parsed.copy(image = localImagePath) else parsed
+    private fun parseUnidasulResponse(ean: String, json: JSONObject): PriceProduct? {
+        return parseUnidasulProdutoJson(ean, json)
     }
 }
 
-// Função pura (sem Context/AppDatabase) com a lógica de "regras de resposta" de verdade do
-// servidor da UnidaSul — extraída fora da classe de propósito pra dar pra testar direto com
-// as respostas REAIS capturadas em produção no App_TC_Unidasul.aia (ver
-// PriceQueryEngineUnidasulTest.kt), sem precisar instanciar PriceQueryEngine nem mockar
-// Android. `image` sempre sai null aqui (cache de imagem local é resolvido pelo wrapper
-// acima, que tem Context); `parseUnidasulResponse` é quem decide a versão final.
-internal fun parseUnidasulElementosJson(ean: String, json: JSONObject, hostPort: String): PriceProduct? {
-    if (json.has("error")) return null
-    if (!json.optBoolean("success", false)) return null
-    val elementos = json.optJSONObject("elementos") ?: return null
+// "A partir de N Un:" seguido de "R$ Y,YY cada" — mesmo padrão de oferta por quantidade já
+// existia no bridge antigo (lblPrecoDC/lblPrecoDC2), só que ali vinha em 2 campos fixos; aqui
+// vem como 2 strings consecutivas dentro de "Condicoes" (ver parseUnidasulProdutoJson).
+private val UNIDASUL_QTY_LABEL_REGEX = Regex("""A partir de\s+(\d+)\s*Un""", RegexOption.IGNORE_CASE)
+private val UNIDASUL_QTY_PRICE_REGEX = Regex("""R\$\s*([0-9.,]+)\s*cada""", RegexOption.IGNORE_CASE)
 
-    val precoStr = elementos.optString("lblPreco", "").trim()
-    if (precoStr.isBlank() || precoStr.equals("null", ignoreCase = true)) return null
-    val preco = precoStr.replace(".", "").replace(",", ".").toDoubleOrNull()?.takeIf { it > 0.0 } ?: return null
+// Achado real em campo (2026-11-13, device ST103ANLFKBC092, filial 074): o host de "produção"
+// sem "hml" (ex. "f074srv01.filial.unidasul.local") respondeu 503 (serviço fora do ar na IIS da
+// loja) — problema do lado da UnidaSul, não do app. O único caminho confirmado funcionando de
+// verdade (testado contra o Swagger e direto no navegador do aparelho) é sempre
+// "f{3 dígitos}srvhml01.filial.unidasul.local" com o virtual directory
+// "UnidaSul.Api.TerminalConsulta" — por isso a consulta não depende mais do host inteiro
+// digitado nas Configurações, só extrai os 3 dígitos da filial dele e monta a URL sempre com
+// esse mesmo padrão fixo. Função de topo (não um método privado da engine) pra dar pra reusar em
+// SettingsActivity (botão "Testar Conexão" precisa do mesmo cálculo, sem precisar instanciar
+// PriceQueryEngine).
+private val UNIDASUL_FILIAL_CODE_REGEX = Regex("""f(\d{3})""", RegexOption.IGNORE_CASE)
 
-    val description = elementos.optString("lblDcrProduto", "").trim().ifBlank { null }
+internal fun unidasulFilialCode(host: String): String? =
+    UNIDASUL_FILIAL_CODE_REGEX.find(host)?.groupValues?.get(1)
 
-    // Oferta por quantidade ("A partir de 3 Un:" + "3,33 cada") — decisão do usuário
-    // (2026-10-13): vira um 2º slot em vez de ser descartada como no app original.
-    val precoDcLabel = elementos.optString("lblPrecoDC", "").trim().removeSuffix(":").trim()
-    val precoDc2Raw = elementos.optString("lblPrecoDC2", "").trim()
-    val precoQtd = Regex("[0-9]+(?:[.,][0-9]+)?").find(precoDc2Raw)
-        ?.value?.replace(".", "")?.replace(",", ".")?.toDoubleOrNull()
-        ?.takeIf { it > 0.0 && it < preco }
+internal fun unidasulBuildUrl(host: String, pathSuffix: String): String? {
+    val filial = unidasulFilialCode(host) ?: return null
+    return "http://f${filial}srvhml01.filial.unidasul.local/UnidaSul.Api.TerminalConsulta/$pathSuffix"
+}
+
+// Função pura (sem Context/AppDatabase) com a lógica de parsing de verdade da resposta da
+// API oficial UnidaSul.Api.TerminalConsulta — extraída fora da classe de propósito pra dar
+// pra testar direto com respostas REAIS capturadas contra o Swagger de Homolog em 2026-11-11
+// (ver PriceQueryEngineUnidasulTest.kt), sem precisar instanciar PriceQueryEngine nem mockar
+// Android. `image` sempre sai null aqui (cache de imagem local é resolvido por
+// attachLocalImageIfExists, chamado pelo caller que tem Context).
+internal fun parseUnidasulProdutoJson(ean: String, json: JSONObject): PriceProduct? {
+    val precoRaw = json.optString("Preco", "").trim()
+    if (precoRaw.isBlank()) return null
+    val preco = precoRaw
+        .replace("R$", "")
+        .trim()
+        .replace(".", "")
+        .replace(",", ".")
+        .toDoubleOrNull()
+        ?.takeIf { it > 0.0 } ?: return null
+
+    val description = json.optString("Descricao", "").trim().ifBlank { null }
+    val imagemUrl = json.optString("ImagemUrl", "").trim().ifBlank { null }
+
+    // "Condicoes" — array de objetos de 1 campo cada, "Condicao_1"/"Condicao_2"/... → texto
+    // livre. Confirmado em campo (2026-11-11, ~230 EANs reais) 3 formatos distintos:
+    // 1. Oferta por quantidade: "A partir de N Un:" + "R$ Y,YY cada" + (opcional) "Na compra de
+    //    N ou mais unidades, você economiza: ...". Os 2 primeiros virão em sequência — é o único
+    //    formato que entra como 2º price slot (mesmo tratamento do bridge antigo).
+    // 2. Preço normal repetido: "********** R$ X,XX por Unidade **********" — sempre igual ao
+    //    `Preco` já mostrado, não é uma variação real. Ignorado de propósito.
+    // 3. Promoção de combo/cross-sell em texto livre ("..::: ATENÇÃO: Promoção especial...",
+    //    "NA COMPRA DE X LEVE GRÁTIS Y") — não dá pra extrair um preço com segurança disso,
+    //    então também é ignorado por ora (não derruba o parse, só não gera slot).
+    val condicoesTexts = ArrayList<String>()
+    val condicoesArray = json.optJSONArray("Condicoes")
+    if (condicoesArray != null) {
+        for (i in 0 until condicoesArray.length()) {
+            val obj = condicoesArray.optJSONObject(i) ?: continue
+            val key = obj.keys().asSequence().firstOrNull() ?: continue
+            val text = obj.optString(key, "").trim()
+            if (text.isNotBlank()) condicoesTexts += text
+        }
+    }
+
+    var precoQtd: Double? = null
+    var precoQtdLabel: String? = null
+    for (i in condicoesTexts.indices) {
+        val labelMatch = UNIDASUL_QTY_LABEL_REGEX.find(condicoesTexts[i]) ?: continue
+        val priceMatch = UNIDASUL_QTY_PRICE_REGEX.find(condicoesTexts.getOrNull(i + 1) ?: "") ?: continue
+        val value = priceMatch.groupValues[1].replace(".", "").replace(",", ".").toDoubleOrNull()
+            ?.takeIf { it > 0.0 && it < preco } ?: continue
+        precoQtd = value
+        precoQtdLabel = "A partir de ${labelMatch.groupValues[1]} Un"
+        break
+    }
 
     val slots = ArrayList<ProductPriceSlot>()
     slots += ProductPriceSlot(label = "PREÇO NORMAL", value = preco, field = "price", isPromo = false, isClub = false)
     if (precoQtd != null) {
         slots += ProductPriceSlot(
-            label = precoDcLabel.ifBlank { "OFERTA POR QUANTIDADE" },
+            label = precoQtdLabel ?: "OFERTA POR QUANTIDADE",
             value = precoQtd,
             field = "price_wholesale",
             isPromo = true,
             isClub = false,
-            fromValue = preco, // "de" riscado dentro do box, igual TCServer
+            fromValue = preco,
         )
     }
-
-    val imagemStatus = json.optString("imagem_status", "")
-    val imagemUrlRaw = json.optString("imagem_url", "").trim().takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
-    val clientImageUrl = if (imagemStatus == "disponivel" && imagemUrlRaw != null) {
-        if (imagemUrlRaw.startsWith("http")) imagemUrlRaw else "http://$hostPort${if (imagemUrlRaw.startsWith("/")) "" else "/"}$imagemUrlRaw"
-    } else null
 
     return PriceProduct(
         id = null,
@@ -2751,7 +3170,7 @@ internal fun parseUnidasulElementosJson(ean: String, json: JSONObject, hostPort:
         cardPrice = null,
         stock = null,
         image = null,
-        clientImageUrl = clientImageUrl,
+        clientImageUrl = imagemUrl,
         offer = null,
         packs = emptyList(),
         theme = null,

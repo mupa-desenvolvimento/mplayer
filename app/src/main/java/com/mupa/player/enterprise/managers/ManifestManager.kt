@@ -54,6 +54,14 @@ data class ManifestItem(
     val endTime: String?,
 )
 
+// Porte de mPlayer_x96 (commits c3de040/fadc1dc, 2026-10-19): bloqueio nativo de
+// dispositivo inoperante — mesmo recurso que já existe na X96. `reason` é lido mas
+// não exibido na tela (removido no fix original, fadc1dc) — só loga internamente.
+data class InoperativeInfo(
+    val isInoperative: Boolean,
+    val reason: String? = null,
+)
+
 // Consulta Patrocinada (docs/2026-11-23-mplayer-android-sponsored-lookup.md, Mupa Connect):
 // peças publicitárias vinculadas a Tags do dispositivo, entregues na raiz do manifesto —
 // substitui o endpoint /patrocinio-ativo (nunca chegou a existir em produção) do recurso
@@ -305,6 +313,10 @@ class ManifestManager(private val context: Context) {
     }
 
     private fun parseItems(json: String): List<ManifestItem> {
+        val inoperative = parseInoperativeInfo(json)
+        if (inoperative.isInoperative) {
+            return emptyList()
+        }
         return try {
             val root = JSONObject(json)
             val manifestObj = root.optJSONObject("manifest") ?: root
@@ -422,6 +434,33 @@ class ManifestManager(private val context: Context) {
             val manifestObj = root.optJSONObject("manifest") ?: root
             manifestObj.optString("name", "").takeIf { it.isNotBlank() }
         }.getOrNull()
+    }
+
+    // Porte de mPlayer_x96 (docs/PLANO_PORTE_MANIFEST_EVENTS_LISTENER.md, 2026-10-19):
+    // tenant_id do manifesto é o filtro do ManifestEventsListener pra saber se um
+    // evento broadcast (sem serials) é deste dispositivo — mantido em DeviceCache
+    // separadamente pra não depender de reparsear o manifesto a cada evento.
+    fun parseTenantId(manifestJson: String): String? {
+        val trimmed = manifestJson.trim()
+        if (trimmed.isBlank()) return null
+        return runCatching {
+            val root = JSONObject(trimmed)
+            val dev = root.optJSONObject("device")
+            dev?.optString("tenant_id")?.takeIf { it.isNotBlank() && it != "null" }
+        }.getOrNull()
+    }
+
+    fun parseInoperativeInfo(json: String): InoperativeInfo {
+        return runCatching {
+            val root = JSONObject(json)
+            val manifestObj = root.optJSONObject("manifest") ?: root
+            val isInoperative = manifestObj.optBoolean("is_inoperative", false) ||
+                root.optBoolean("is_inoperative", false)
+            val reason = manifestObj.optString("inoperative_reason", "").ifBlank {
+                root.optString("inoperative_reason", "")
+            }.takeIf { it.isNotBlank() }
+            InoperativeInfo(isInoperative, reason)
+        }.getOrDefault(InoperativeInfo(false, null))
     }
 
     /** Lê `sponsored_lookups` da raiz do manifesto (docs/2026-11-23-mplayer-android-sponsored-

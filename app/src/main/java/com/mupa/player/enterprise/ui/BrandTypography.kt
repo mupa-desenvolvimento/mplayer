@@ -65,6 +65,15 @@ object BrandTypography {
             ResourcesCompat.getFont(context, R.font.poppins_extrabold)
         }.getOrNull()?.also { poppinsExtraBold = it }
 
+    /** Bebas Neue, cacheado — mesma fonte usada em todos os preços fora da arte (ver
+     * [BEBAS_NEUE_IDS]), exposta aqui pra PlayerActivity.updatePriceBadge poder usá-la também
+     * no preço montado programaticamente sobre a arte publicitária (pedido do usuário,
+     * 2026-11-17: a fonte dos preços precisa ser a mesma em qualquer lugar da tela). */
+    fun bebasNeue(context: Context): Typeface? =
+        bebasNeue ?: runCatching {
+            ResourcesCompat.getFont(context, R.font.bebas_neue_regular)
+        }.getOrNull()?.also { bebasNeue = it }
+
     fun applyBrandTypography(root: View, context: Context) {
         val bebas = bebasNeue ?: runCatching {
             ResourcesCompat.getFont(context, R.font.bebas_neue_regular)

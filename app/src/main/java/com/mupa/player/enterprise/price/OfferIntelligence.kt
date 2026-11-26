@@ -193,11 +193,11 @@ object OfferIntelligence {
         return String.format(Locale("pt", "BR"), "R$ %.2f", value)
     }
 
-    fun buildSpokenPrice(value: Double): String {
+    fun buildSpokenPrice(value: Double, unitSingular: String = "real", unitPlural: String = "reais"): String {
         val cents = (value * 100.0).roundToInt().coerceAtLeast(0)
         val reais = cents / 100
         val cent = cents % 100
-        val reaisStr = if (reais == 1) "real" else "reais"
+        val reaisStr = if (reais == 1) unitSingular else unitPlural
         return when {
             reais == 0 -> "$cent centavos"
             cent == 0 -> "$reais $reaisStr"

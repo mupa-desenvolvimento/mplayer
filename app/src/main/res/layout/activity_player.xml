@@ -19,7 +19,7 @@
                 android:id="@+id/playerViewA"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
-                app:resize_mode="zoom"
+                app:resize_mode="fill"
                 app:surface_type="texture_view"
                 app:use_controller="false" />
 
@@ -27,7 +27,7 @@
                 android:id="@+id/imageViewA"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
-                android:scaleType="centerCrop" />
+                android:scaleType="fitXY" />
         </FrameLayout>
 
         <FrameLayout
@@ -40,7 +40,7 @@
                 android:id="@+id/playerViewB"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
-                app:resize_mode="zoom"
+                app:resize_mode="fill"
                 app:surface_type="texture_view"
                 app:use_controller="false" />
 
@@ -48,7 +48,7 @@
                 android:id="@+id/imageViewB"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
-                android:scaleType="centerCrop" />
+                android:scaleType="fitXY" />
         </FrameLayout>
     </FrameLayout>
 
@@ -633,6 +633,72 @@
         android:alpha="0.34"
         android:textColor="@color/enterprise_on_muted"
         android:textSize="11sp" />
+
+    <!-- Inoperative / Blocked Overlay — porte de mPlayer_x96 (commits c3de040/fadc1dc,
+         2026-10-19) + docs/portabilidade_bloqueio_tenant_main.md: tela de bloqueio quando
+         o manifesto marca is_inoperative, mesmo recurso que já existe na X96. Sem o motivo
+         visível (removido no fix original, fadc1dc) — só o aviso genérico + ID do
+         dispositivo pra contato com suporte. elevation/clickable/focusable garantem que
+         fica por cima de tudo (inclusive consulta de preço) e captura todo toque, sem
+         deixar passar clique pra interface de fundo. -->
+    <androidx.constraintlayout.widget.ConstraintLayout
+        android:id="@+id/inoperativeOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#F00B0F14"
+        android:clickable="true"
+        android:focusable="true"
+        android:elevation="100dp"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:padding="32dp"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="parent"
+            app:layout_constraintWidth_max="640dp">
+
+            <ImageView
+                android:id="@+id/inoperativeIcon"
+                android:layout_width="84dp"
+                android:layout_height="84dp"
+                android:src="@drawable/ic_inoperative_lock" />
+
+            <TextView
+                android:id="@+id/inoperativeTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:text="Dispositivo Inoperante"
+                android:textColor="#FFFFFF"
+                android:textSize="26sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/inoperativeHelp"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:gravity="center"
+                android:text="Entre em contato com o suporte ou administrador da sua conta."
+                android:textColor="#CBD5E1"
+                android:textSize="16sp" />
+
+            <TextView
+                android:id="@+id/inoperativeDeviceDetails"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="28dp"
+                android:textColor="#64748B"
+                android:textSize="12sp"
+                android:text="ID: -" />
+        </LinearLayout>
+    </androidx.constraintlayout.widget.ConstraintLayout>
 
     <!-- Dev Mode Overlay Container -->
     <LinearLayout

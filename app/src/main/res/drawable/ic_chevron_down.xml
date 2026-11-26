@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Ícone de expandir/recolher usado pelas seções (cards) da tela de Configurações —
+     ver SettingsActivity.setupCollapsibleCards (pedido do usuário, 2026-11-13: deixar
+     tudo minimizado, com um ícone pra expandir cada seção). Path do Material Design
+     "expand_more" (24x24), girado 180° em código quando a seção está aberta. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="@color/mupa_cyan"
+        android:pathData="M7.41,8.59L12,13.17l4.59,-4.58L18,10l-6,6l-6,-6z" />
+</vector>

@@ -26,9 +26,11 @@ import android.media.ToneGenerator
 import android.Manifest
 import android.content.pm.PackageManager
 import android.speech.tts.TextToSpeech
+import android.text.SpannableString
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.style.StrikethroughSpan
+import android.text.style.StyleSpan
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
@@ -83,6 +85,7 @@ import com.mupa.player.enterprise.player.PlayerEngine
 import com.mupa.player.enterprise.player.TransitionConfig
 import com.mupa.player.enterprise.price.PriceConfig
 import com.mupa.player.enterprise.price.PriceConfigParser
+import com.mupa.player.enterprise.price.PriceConfigXmlImporter
 import com.mupa.player.enterprise.price.PriceAnalyticsSyncManager
 import com.mupa.player.enterprise.price.MissingProductImageSyncManager
 import com.mupa.player.enterprise.price.PriceOffer
@@ -107,6 +110,8 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import androidx.constraintlayout.widget.Guideline
 import android.widget.FrameLayout
+import android.widget.ProgressBar
+import androidx.core.view.doOnLayout
 import android.text.style.RelativeSizeSpan
 import android.text.style.AbsoluteSizeSpan
 import android.text.style.ForegroundColorSpan
@@ -150,19 +155,33 @@ class PlayerActivity : ComponentActivity() {
 
     /** Tag do badge de preço sobreposto na arte publicitária (ver [updatePriceBadge]). */
     private val PRICE_ART_BADGE_TAG = "price_art_badge"
+
+    /** Tag das caixas de conversão de moeda (Dólar/Peso) sobrepostas na arte (ver [updatePriceBadge]). */
+    private val PRICE_ART_CURRENCY_TAG = "price_art_currency"
+
+    /** Tag da foto do produto na Consulta Patrocinada (ver [updatePriceBadge]) — view separada do
+     * [PRICE_ART_BADGE_TAG] (nome/preço) de propósito: fica atrás da arte do patrocínio (pedido
+     * do usuário, 2026-11-26), então a arte (com seu recorte transparente) cobre o que passar da
+     * área reservada em vez de aparecer por cima dela. */
+    private val PRICE_ART_SPONSORED_PHOTO_TAG = "price_art_sponsored_photo"
+
+    /** Telas Patrocinadas: última região reservada conhecida (ver [PriceQueryEngine.SponsorRegion]).
+     * O render INICIAL de cada scan usa o produto já em cache (sem chamar
+     * preloadProductImageAndTheme de novo), então não tem a região fresca na hora — fica com a
+     * última vista nesta sessão até o fetch em segundo plano (sempre disparado pelo menos 1x por
+     * janela de 60 min) confirmar/atualizar. Nula = sem campanha patrocinada ativa. */
+    private var lastSponsorRegion: PriceQueryEngine.SponsorRegion? = null
+
+    /** Mesma lógica "sticky" de [lastSponsorRegion], pro modo de composição (foto+nome+preço)
+     * da Consulta Patrocinada — ver updatePriceBadge. */
+    private var lastIsSponsoredLookup: Boolean = false
+    private var lastSponsorProductPhotoPath: String? = null
     private lateinit var deviceId: String
     private lateinit var playerEngine: PlayerEngine
     private val barcodeSimulationReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             val ean = intent.getStringExtra("ean") ?: return
             onBarcodeCaptured(ean)
-        }
-    }
-
-    // Scanner integrado Gertec (SK100 etc.): ativado automaticamente via SDK EasyLayer
-    private val gertecScanner by lazy {
-        com.mupa.player.enterprise.managers.GertecScannerManager { code ->
-            runOnUiThread { onBarcodeCaptured(code) }
         }
     }
 
@@ -186,6 +205,11 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private lateinit var manifestManager: ManifestManager
+    // Porte de mPlayer_x96 (docs/PLANO_PORTE_MANIFEST_EVENTS_LISTENER.md, 2026-10-19):
+    // tenant atual (do manifesto, não das Configurações) pra filtrar eventos broadcast
+    // do canal manifest-events sem serials explícitos — ver syncTenantFromManifest.
+    private var currentTenantId: String? = null
+    private var manifestEventsListener: com.mupa.player.enterprise.network.ManifestEventsListener? = null
     private var audienceManager: AudienceAnalyticsManager? = null
     private var audienceStarted = false
     private var playlistName: String? = null
@@ -422,18 +446,6 @@ class PlayerActivity : ComponentActivity() {
         }
         binding.hiddenBarcodeInput.post { ensureBarcodeFocus() }
         lifecycleScope.launch {
-            // SK100/Gertec: pedido do usuário (2026-10-04) — o leitor não pode nunca ficar
-            // desligado nesses terminais, então ignoramos o valor salvo (o toggle em
-            // Configurações vira só um indicador travado pra esse caso — ver SettingsActivity).
-            // Em qualquer outro terminal o comportamento de sempre continua (toggle manual).
-            val gertecEnabled = com.mupa.player.enterprise.managers.GertecScannerManager.isGertecDevice() ||
-                runCatching { SettingsManager(applicationContext).getGertecScannerEnabled() }.getOrDefault(false)
-            if (gertecEnabled && !gertecScanner.isStarted()) {
-                // post: garante que a janela já está montada antes do SDK iniciar
-                binding.root.post { gertecScanner.start(this@PlayerActivity) }
-            } else if (!gertecEnabled && gertecScanner.isStarted()) {
-                gertecScanner.stop()
-            }
             val settings = runCatching { SettingsManager(applicationContext).getSettings() }.getOrNull()
             devMode = settings?.devMode ?: false
             demoMode = settings?.demoMode ?: false
@@ -462,11 +474,6 @@ class PlayerActivity : ComponentActivity() {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        // Leitor Gertec em modo CDC: a captura é EXCLUSIVA pelo callback do SDK. Não
-        // acumulamos código por teclado (wedge/HID) pra não duplicar a leitura.
-        if (gertecScanner.isStarted()) {
-            return super.dispatchKeyEvent(event)
-        }
         if (event.action == KeyEvent.ACTION_DOWN) {
             val keyCode = event.keyCode
             val now = SystemClock.elapsedRealtime()
@@ -518,9 +525,10 @@ class PlayerActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        manifestEventsListener?.stop()
+        manifestEventsListener = null
         runCatching { unregisterReceiver(barcodeSimulationReceiver) }
         runCatching { unregisterReceiver(meferiScanReceiver) }
-        runCatching { gertecScanner.stop() }
         priceAnimator?.cancel()
         mainHandler.removeCallbacks(ttsAutoDismissRunnable)
         tts?.stop()
@@ -552,6 +560,53 @@ class PlayerActivity : ComponentActivity() {
         if (deviceId.isBlank()) {
             deviceId = DeviceIdentityManager(applicationContext).getPersistentId().trim()
         }
+
+        // Porte de mPlayer_x96 (docs/PLANO_PORTE_MANIFEST_EVENTS_LISTENER.md, 2026-10-19):
+        // escuta o canal Supabase Realtime manifest-events pra sincronizar na hora que o
+        // painel publica, em vez de esperar o polling horário mais abaixo neste método
+        // (que continua existindo como rede de segurança). currentTenantId começa com o
+        // valor em cache; syncTenantFromManifest mantém em dia a cada fetch bem-sucedido.
+        val cacheForTenant = runCatching { DeviceCacheManager(applicationContext).load() }.getOrNull()
+        currentTenantId = cacheForTenant?.tenant?.trim()?.ifBlank { null }
+        manifestEventsListener?.stop()
+        manifestEventsListener = com.mupa.player.enterprise.network.ManifestEventsListener(
+            getDeviceId = { deviceId },
+            getTenantId = { currentTenantId },
+            onReloadRequested = { reason ->
+                Log.i("PlayerActivity", "Recarga de manifesto solicitada via manifest-events ($reason)")
+                lifecycleScope.launch {
+                    // Atalho pragmático (2026-10-19): enquanto device-api-v2 não devolver
+                    // is_inoperative no manifesto (confirmado ao vivo que ainda não devolve —
+                    // ver docs/portabilidade_bloqueio_tenant_main.md), reage direto ao texto
+                    // do evento realtime pros dois motivos que o backend já manda hoje.
+                    //
+                    // Achado real em teste ao vivo (2026-10-20, G-BOT): chamar
+                    // refreshInBackground() logo depois de mostrar o bloqueio desfazia o
+                    // bloqueio sozinho — o manifesto buscado não tem is_inoperative (mesma
+                    // lacuna), então refreshInBackground() caía no ramo "else" e chamava
+                    // hideInoperativeScreen() de novo, ~1s depois, com o player já parado
+                    // (playerEngine.stop() do showInoperativeScreen) e nada reiniciando a
+                    // reprodução — tela preta. Fix: em "tenant_blocked", mostra a tela e
+                    // PÁRA aqui — não busca manifesto nenhum, que só ia contradizer o que
+                    // acabamos de aplicar. Em "tenant_unblocked" o refreshInBackground()
+                    // continua necessário: é quem traz o conteúdo de verdade de volta e
+                    // reinicia a reprodução.
+                    if (reason == "tenant_blocked") {
+                        runCatching { showInoperativeScreen(reason) }
+                        return@launch
+                    }
+                    if (reason == "tenant_unblocked") {
+                        runCatching { hideInoperativeScreen() }
+                    }
+                    try {
+                        refreshInBackground()
+                    } catch (e: Exception) {
+                        Log.e("PlayerActivity", "Erro no refreshInBackground via manifest-events", e)
+                    }
+                }
+            }
+        ).also { it.start() }
+
         val settings = runCatching { SettingsManager(applicationContext).getSettings() }.getOrNull()
         devMode = settings?.devMode ?: false
         demoMode = settings?.demoMode ?: false
@@ -576,6 +631,10 @@ class PlayerActivity : ComponentActivity() {
         lifecycleScope.launch {
             refreshUnidasulServerAddress()
             ensureUnidasulDefaultPriceConfigIfNeeded()
+        }
+        lifecycleScope.launch {
+            refreshCustomQueryXml()
+            ensureCustomQueryDefaultPriceConfigIfNeeded()
         }
 
         ensureStoragePermissionIfNeeded()
@@ -764,9 +823,76 @@ class PlayerActivity : ComponentActivity() {
         }
     }
 
+    // Porte de mPlayer_x96 (commits c3de040/fadc1dc) + docs/portabilidade_bloqueio_tenant_main.md
+    // (2026-10-19): bloqueio nativo de dispositivo inoperante, mesmo recurso que já existe na
+    // X96. Sem motivo visível na tela (removido no fix original) — só o aviso genérico + ID,
+    // pra suporte. Na `main` (diferente da x96) isso também precisa isolar os recursos que só
+    // existem aqui: scanner/consulta de preço (dismissPriceDialogIfOpen) e audiência facial
+    // via câmera (pauseAudienceTracking) — ver doc §2.
+    private suspend fun showInoperativeScreen(reason: String?) {
+        pauseAudienceTracking()
+        dismissPriceDialogIfOpen()
+        withContext(Dispatchers.Main) {
+            playerEngine.stop()
+            setSyncOverlayVisible(false)
+            binding.inoperativeOverlay.visibility = View.VISIBLE
+            val devName = binding.deviceNameText.text.toString().takeIf { it.isNotBlank() } ?: deviceId
+            binding.inoperativeDeviceDetails.text = "Dispositivo: $devName • ID: $deviceId"
+        }
+        Log.w("PlayerActivity", "Dispositivo inoperante ativo. Motivo interno: ${reason ?: "não especificado"}")
+    }
+
+    private suspend fun hideInoperativeScreen() {
+        val wasVisible = withContext(Dispatchers.Main) {
+            val visible = binding.inoperativeOverlay.visibility != View.GONE
+            if (visible) binding.inoperativeOverlay.visibility = View.GONE
+            visible
+        }
+        if (wasVisible) {
+            resumeAudienceTracking()
+            Log.i("PlayerActivity", "Dispositivo reativado. Ocultando tela de bloqueio.")
+        }
+    }
+
+    // Equivalente ao stop() já usado em ensureAudienceStarted() quando a licença/hardware não
+    // permite mais rodar — aqui é o mesmo desligamento, só que disparado pelo bloqueio, não por
+    // mudança de licença. audienceStarted=false faz ensureAudienceStarted() (chamado por
+    // resumeAudienceTracking) reconstruir tudo do zero quando desbloquear, sem estado zumbi.
+    private suspend fun pauseAudienceTracking() {
+        if (audienceStarted) {
+            runCatching { audienceManager?.stop() }
+            audienceManager = null
+            audienceStarted = false
+            withContext(Dispatchers.Main) { binding.txtTransparencyWarning.visibility = View.GONE }
+        }
+    }
+
+    // ensureAudienceStarted() já é idempotente e confere licença/hardware/permissão sozinha —
+    // só reaproveita a mesma função que starLoop() chama no boot normal.
+    private suspend fun resumeAudienceTracking() {
+        runCatching { ensureAudienceStarted() }
+    }
+
+    // Fecha qualquer consulta de preço em tela (overlay + TTS falando) antes do bloqueio tomar
+    // conta — sem isso, o overlay de preço (menor elevation) continuaria visível por baixo do
+    // aviso de inoperante, e o TTS podia ficar falando sobre uma tela já bloqueada.
+    private suspend fun dismissPriceDialogIfOpen() {
+        withContext(Dispatchers.Main) {
+            cancelReturnToMedia()
+            runCatching { tts?.stop() }
+            priceVoiceSynth.stop()
+            setPriceOverlayVisible(false)
+        }
+    }
+
     private suspend fun tryStartOfflinePlayback(): Boolean {
         val offlineJson = manifestManager.loadOfflineManifest(deviceId).orEmpty().trim()
         if (offlineJson.isBlank()) return false
+        val inopOffline = manifestManager.parseInoperativeInfo(offlineJson)
+        if (inopOffline.isInoperative) {
+            showInoperativeScreen(inopOffline.reason)
+            return true
+        }
         val items = manifestManager.parseItemsPublic(offlineJson)
         playlistName = manifestManager.parsePlaylistName(offlineJson) ?: playlistName
         itemNameById = items.mapNotNull { it.name?.let { n -> it.id to n } }.toMap()
@@ -779,6 +905,23 @@ class PlayerActivity : ComponentActivity() {
             return true
         }
         return false
+    }
+
+    // Porte de mPlayer_x96 (docs/PLANO_PORTE_MANIFEST_EVENTS_LISTENER.md, 2026-10-19):
+    // mantém currentTenantId (e o DeviceCache) em dia a cada manifesto buscado com
+    // sucesso — é o filtro que o ManifestEventsListener usa pra aceitar/ignorar um
+    // evento broadcast do canal manifest-events sem lista de serials explícita.
+    private suspend fun syncTenantFromManifest(manifestJson: String) {
+        val parsedTenant = manifestManager.parseTenantId(manifestJson)
+        if (!parsedTenant.isNullOrBlank() && parsedTenant != currentTenantId) {
+            Log.i("PlayerActivity", "Tenant atualizado a partir do manifesto: $parsedTenant")
+            currentTenantId = parsedTenant
+            runCatching {
+                val cm = DeviceCacheManager(applicationContext)
+                val c = cm.load()
+                if (c != null) cm.save(c.copy(tenant = parsedTenant))
+            }
+        }
     }
 
     // Backoff exponencial com jitter pro retry do manifesto — evita que uma falha determinística
@@ -880,6 +1023,16 @@ class PlayerActivity : ComponentActivity() {
             fetchResult = manifestManager.fetchManifest(deviceId)
         }
         val remote = fetchResult.json.trim()
+
+        syncTenantFromManifest(remote)
+
+        val inop = manifestManager.parseInoperativeInfo(remote)
+        if (inop.isInoperative) {
+            manifestManager.saveManifest(deviceId, remote)
+            showInoperativeScreen(inop.reason)
+            return
+        }
+        hideInoperativeScreen()
 
         val changed = !manifestManager.compareManifest(deviceId, remote)
         if (changed) {
@@ -1064,6 +1217,16 @@ class PlayerActivity : ComponentActivity() {
             return false
         }
         val remote = fetchResult.json.trim()
+        syncTenantFromManifest(remote)
+
+        val inop = manifestManager.parseInoperativeInfo(remote)
+        if (inop.isInoperative) {
+            manifestManager.saveManifest(deviceId, remote)
+            showInoperativeScreen(inop.reason)
+            return true
+        }
+        hideInoperativeScreen()
+
         val changed = !manifestManager.compareManifest(deviceId, remote)
         if (!changed) return true
 
@@ -1198,6 +1361,7 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private fun updatePlaylistIfActiveItemsChanged() {
+        if (binding.inoperativeOverlay.visibility == View.VISIBLE) return
         lifecycleScope.launch {
             val offlineJson = manifestManager.loadOfflineManifest(deviceId).orEmpty().trim()
             if (offlineJson.isBlank()) return@launch
@@ -1492,6 +1656,12 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private fun onBarcodeCaptured(raw: String) {
+        // docs/portabilidade_bloqueio_tenant_main.md §3.E.6: dispositivo bloqueado não abre
+        // consulta de preço — o leitor pode continuar lendo (hardware), mas a UI nunca reage.
+        if (binding.inoperativeOverlay.visibility == View.VISIBLE) {
+            Log.d("PlayerActivity", "Código de barras ignorado: dispositivo bloqueado.")
+            return
+        }
         val ean = raw.trim()
         if (ean.isBlank()) return
         val now = SystemClock.elapsedRealtime()
@@ -1593,6 +1763,8 @@ class PlayerActivity : ComponentActivity() {
                 priceConfig ?: run {
                     if (shouldForceTcServerIntegration()) {
                         ensureTcServerDefaultPriceConfigIfNeeded()
+                    } else if (shouldForceCustomQueryIntegration()) {
+                        ensureCustomQueryDefaultPriceConfigIfNeeded()
                     } else if (shouldForceAssaiIntegration()) {
                         ensureAssaiDefaultPriceConfigIfNeeded()
                     } else if (shouldForceAmericanasIntegration()) {
@@ -2144,6 +2316,11 @@ class PlayerActivity : ComponentActivity() {
             Log.i("MPlayerPrice", "price_config_applied forced_integration=integra-unidasul")
             return
         }
+        if (shouldForceCustomQueryIntegration()) {
+            ensureCustomQueryDefaultPriceConfigIfNeeded()
+            Log.i("MPlayerPrice", "price_config_applied forced_integration=custom_query_xml")
+            return
+        }
         val json = manifestManager.parsePriceConfigJson(manifestJson) ?: return
         val cfg = runCatching { PriceConfigParser.parse(json) }.getOrNull() ?: return
         if (shouldForceAssaiIntegration()) {
@@ -2242,6 +2419,31 @@ class PlayerActivity : ComponentActivity() {
             analyticsUploadUrl = null,
         )
         Log.i("MPlayerPrice", "price_config_default_tcserver_applied address=$tcServerAddress")
+    }
+
+    // Importador manual do "XML da consulta" (Mupa Studio): colado em Configurações, tem
+    // prioridade sobre a integração automática da empresa (igual TCServer/UnidaSul acima) — serve
+    // pra testar a configuração de um cliente novo sem precisar de código nativo (PriceQueryEngine
+    // só sabe lidar com steps genéricos: authenticate/lookup_price/mapping, ver PriceConfigParser).
+    @Volatile private var customQueryXml: String = ""
+
+    private suspend fun refreshCustomQueryXml() {
+        customQueryXml = runCatching {
+            SettingsManager(applicationContext).getCustomQueryXml()
+        }.getOrDefault("")
+    }
+
+    private fun shouldForceCustomQueryIntegration(): Boolean = customQueryXml.isNotBlank()
+
+    private fun ensureCustomQueryDefaultPriceConfigIfNeeded() {
+        if (!shouldForceCustomQueryIntegration()) return
+        val parsed = runCatching { PriceConfigXmlImporter.parse(customQueryXml) }.getOrNull()
+        if (parsed == null) {
+            Log.w("MPlayerPrice", "price_config_custom_query_xml_invalid")
+            return
+        }
+        priceConfig = parsed
+        Log.i("MPlayerPrice", "price_config_custom_query_applied integration=${parsed.integration} steps=${parsed.steps.size}")
     }
 
     // UnidaSul: mesmo padrão exato do TCServer acima — endereço do servidor da
@@ -2465,7 +2667,16 @@ class PlayerActivity : ComponentActivity() {
                 // a arte pode ter sido gerada depois da última consulta (ver
                 // PriceQueryEngine.preloadProductImageAndTheme, que só re-baixa a foto se
                 // realmente precisar).
-                val needsBackgroundImageFetch = imageSearchEnabled && (localPath.isNullOrBlank() || imageStale || !effectiveHasArt)
+                //
+                // Consulta Patrocinada (achado real de bancada, 2026-11-24): "tem prioridade
+                // sobre a foto do produto" só é aplicado dentro do fetch em segundo plano — um
+                // produto com arte publicitária PRÓPRIA já fresca em cache (`effectiveHasArt`)
+                // pulava esse fetch inteiro e nunca via a verificação de patrocínio, ficando preso
+                // no layout de arte por produto. Com patrocínio configurado neste dispositivo, o
+                // fetch sempre roda, nem que seja só pra essa checagem (ela mesma é barata —
+                // normalmente a peça já está pré-cacheada por precacheSponsoredLookups).
+                val needsBackgroundImageFetch = imageSearchEnabled &&
+                    (localPath.isNullOrBlank() || imageStale || !effectiveHasArt || engine?.hasSponsoredLookupsConfigured() == true)
                 var finalImagePath: String? = localPath
                 val finalTheme: PriceTheme? = product.theme
 
@@ -2603,12 +2814,18 @@ class PlayerActivity : ComponentActivity() {
                         )
                         val imgView = binding.priceResultRoot.findViewById<ImageView>(R.id.priceProductImage)
                         prepared.drawable?.let { imgView?.setImageDrawable(it) }
-                        updatePriceBadge(imgView, updatedProduct, updatedProduct.hasArt, prepared)
+                        updatePriceBadge(imgView, updatedProduct, updatedProduct.hasArt, prepared, lastSponsorRegion, lastIsSponsoredLookup, lastSponsorProductPhotoPath)
                     } else {
                         val imgView = binding.priceResultRoot.findViewById<ImageView>(R.id.priceProductImage)
                         imgView?.setImageResource(com.mupa.player.enterprise.R.drawable.ic_mplayer)
-                        updatePriceBadge(imgView, updatedProduct, false, null)
+                        updatePriceBadge(imgView, updatedProduct, false, null, lastSponsorRegion, lastIsSponsoredLookup, lastSponsorProductPhotoPath)
                     }
+
+                    // Mostra o spinner por cima da foto enquanto a imagem real ainda não chegou
+                    // (needsBackgroundImageFetch) — a busca em segundo plano logo abaixo o esconde
+                    // quando a foto de verdade (ou a falha) chegar.
+                    binding.priceResultRoot.findViewWithTag<ProgressBar>("priceImageLoadingSpinner")
+                        ?.visibility = if (needsBackgroundImageFetch) View.VISIBLE else View.GONE
 
                     applyThemeColors(binding.priceResultRoot, updatedProduct, priceConfig?.layout)
 
@@ -2715,12 +2932,29 @@ class PlayerActivity : ComponentActivity() {
                         val downloadedPath = preloaded?.path
                         val lateTheme = preloaded?.theme
                         val lateHasArt = preloaded?.hasArt ?: false
-                        if (downloadedPath.isNullOrBlank()) return@launch
+                        // Telas Patrocinadas: este fetch em segundo plano é a fonte de verdade da
+                        // região (ver preloadProductImageAndTheme) — guarda pra o render INICIAL
+                        // do próximo scan já nascer com a posição certa, sem esperar este fetch.
+                        lastSponsorRegion = preloaded?.sponsorRegion
+                        lastIsSponsoredLookup = preloaded?.isSponsoredLookup ?: false
+                        lastSponsorProductPhotoPath = preloaded?.productPhotoPath
+                        if (downloadedPath.isNullOrBlank()) {
+                            // Falhou (ou o produto ficou sem imagem mesmo) — esconde o spinner pra
+                            // não girar pra sempre; fica só o placeholder já exibido antes.
+                            withContext(Dispatchers.Main) {
+                                if (overlayEan == expectedEan && binding.priceOverlay.visibility == View.VISIBLE) {
+                                    binding.priceResultRoot.findViewWithTag<ProgressBar>("priceImageLoadingSpinner")
+                                        ?.visibility = View.GONE
+                                }
+                            }
+                            return@launch
+                        }
 
                         val preparedLate = prepareOverlayFromImage(url = downloadedPath, theme = lateTheme ?: product.theme)
 
                         withContext(Dispatchers.Main) {
                             if (overlayEan != expectedEan || binding.priceOverlay.visibility != View.VISIBLE) return@withContext
+                            binding.priceResultRoot.findViewWithTag<ProgressBar>("priceImageLoadingSpinner")?.visibility = View.GONE
                             if (preparedLate != null) {
                                 applyOverlayColors(
                                     dominant = preparedLate.dominant,
@@ -2741,7 +2975,7 @@ class PlayerActivity : ComponentActivity() {
                                     animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(320).start()
                                 }
                             }
-                            updatePriceBadge(imgView, product.copy(hasArt = lateHasArt), lateHasArt, preparedLate)
+                            updatePriceBadge(imgView, product.copy(hasArt = lateHasArt), lateHasArt, preparedLate, lastSponsorRegion, lastIsSponsoredLookup, lastSponsorProductPhotoPath)
                         }
                     }
                 }
@@ -3159,7 +3393,9 @@ class PlayerActivity : ComponentActivity() {
             lp.bottomToBottom = parent; lp.startToStart = parent; lp.endToEnd = parent
         } else {
             gp.orientation = ConstraintLayout.LayoutParams.VERTICAL
-            guide.setGuidelinePercent(0.45f)
+            // Pedido do usuário (2026-11-17): 60% pra descrição/preço (esquerda), 40% pra imagem
+            // (direita) — antes era 45/55, espaço curto demais pro preço com Dólar/Peso.
+            guide.setGuidelinePercent(0.60f)
 
             // Infos (left) à ESQUERDA
             lp.width = match; lp.height = match
@@ -3280,7 +3516,83 @@ class PlayerActivity : ComponentActivity() {
         return GradientDrawable().apply {
             setColor(color)
             cornerRadius = radiusDp * resources.displayMetrics.density
+            // Bug real (2026-11-17, Oral-B): a cor de destaque extraída da imagem às vezes sai
+            // igual (ou quase) ao fundo do painel — que pode ser BRANCO (priceRightPanel) ou
+            // escuro, dependendo do layout/tema. Uma borda clara só resolvia contra fundo
+            // escuro; contra o painel branco ela ficava invisível também (branco sobre branco).
+            // Cinza médio semi-transparente dá contorno visível nos dois casos.
+            setStroke((1.5f * resources.displayMetrics.density).toInt(), Color.argb(130, 140, 140, 140))
         }
+    }
+
+    private var artLetterboxBackground: android.graphics.drawable.Drawable? = null
+
+    /**
+     * Preenche as tarjas (letterbox) deixadas pelo FIT_CENTER com um degradê que nasce na cor real
+     * da borda da arte e escurece até a borda da tela — sem esticar nem cortar a imagem (pedido do
+     * usuário, 2026-11-19: o SK315 em pé tinha faixas brancas em cima/embaixo com a arte 1200x1920
+     * numa tela 1080x1920). Funciona nos dois eixos: tarja vertical (cima/baixo) ou horizontal
+     * (esquerda/direita), conforme a proporção da tela. Sem arte, remove só o fundo que ele mesmo pôs.
+     */
+    private fun applyArtLetterboxGradient(imgView: ImageView, hasArt: Boolean) {
+        if (!hasArt) {
+            if (artLetterboxBackground != null && imgView.background === artLetterboxBackground) imgView.background = null
+            artLetterboxBackground = null
+            return
+        }
+        val bmp = (imgView.drawable as? android.graphics.drawable.BitmapDrawable)?.bitmap ?: return
+        val bw = bmp.width
+        val bh = bmp.height
+        if (bw < 2 || bh < 2) return
+        val src = try {
+            if (bmp.config == Bitmap.Config.HARDWARE) bmp.copy(Bitmap.Config.ARGB_8888, false) else bmp
+        } catch (_: Throwable) { null } ?: return
+
+        fun avg(x0: Int, y0: Int, x1: Int, y1: Int): Int {
+            var r = 0L; var g = 0L; var b = 0L; var n = 0
+            var y = y0
+            while (y < y1) {
+                var x = x0
+                while (x < x1) {
+                    val c = src.getPixel(x, y)
+                    r += Color.red(c); g += Color.green(c); b += Color.blue(c); n++
+                    x += 4
+                }
+                y += 2
+            }
+            return if (n == 0) Color.BLACK else Color.rgb((r / n).toInt(), (g / n).toInt(), (b / n).toInt())
+        }
+        fun darken(c: Int, f: Float) = Color.rgb((Color.red(c) * f).toInt(), (Color.green(c) * f).toInt(), (Color.blue(c) * f).toInt())
+
+        val band = maxOf(2, minOf(bw, bh) / 40)
+        val first: Int; val last: Int
+        val vertical: Boolean
+        // Eixo da tarja: se a tela é mais "alta" que a arte, sobra em cima/embaixo; senão, nas laterais.
+        val viewW = imgView.width.takeIf { it > 0 } ?: imgView.resources.displayMetrics.widthPixels
+        val viewH = imgView.height.takeIf { it > 0 } ?: imgView.resources.displayMetrics.heightPixels
+        vertical = viewW.toFloat() / viewH <= bw.toFloat() / bh
+        if (vertical) {
+            first = avg(0, 0, bw, band); last = avg(0, bh - band, bw, bh)
+        } else {
+            first = avg(0, 0, band, bh); last = avg(bw - band, 0, bw, bh)
+        }
+        if (src !== bmp) src.recycle()
+
+        val shape = android.graphics.drawable.ShapeDrawable(android.graphics.drawable.shapes.RectShape())
+        shape.shaderFactory = object : android.graphics.drawable.ShapeDrawable.ShaderFactory() {
+            override fun resize(width: Int, height: Int): Shader {
+                val scale = minOf(width.toFloat() / bw, height.toFloat() / bh)
+                val total = if (vertical) height.toFloat() else width.toFloat()
+                val art = (if (vertical) bh else bw) * scale
+                val f = (((total - art) / 2f) / total).coerceIn(0.001f, 0.49f)
+                val colors = intArrayOf(darken(first, 0.45f), first, last, darken(last, 0.45f))
+                val pos = floatArrayOf(0f, f, 1f - f, 1f)
+                return if (vertical) android.graphics.LinearGradient(0f, 0f, 0f, height.toFloat(), colors, pos, Shader.TileMode.CLAMP)
+                else android.graphics.LinearGradient(0f, 0f, width.toFloat(), 0f, colors, pos, Shader.TileMode.CLAMP)
+            }
+        }
+        artLetterboxBackground = shape
+        imgView.background = shape
     }
 
     /**
@@ -3291,11 +3603,45 @@ class PlayerActivity : ComponentActivity() {
      * paleta já extraída da própria imagem ([prepared]), para sempre combinar com a arte exibida.
      * Sem arte, remove qualquer badge existente e não faz mais nada — comportamento inalterado.
      */
+    /** As N primeiras palavras de [text] em negrito numa 1ª linha, o resto (peso base do
+     * TextView, normalmente NORMAL) FORÇADO pra uma 2ª linha — usado pelo nome do produto na
+     * Consulta Patrocinada (pedido do usuário, 2026-11-24: "quebrar as 3 primeiras palavras, o
+     * restante [na] segunda linha"). Quebra explícita (não só `maxWidth`/wrap natural) porque o
+     * pedido é especificamente 3 palavras na linha 1 — `maxWidth` (aplicado separadamente no
+     * TextView) ainda cuida de nenhuma das duas linhas passar da largura do oval, quebrando mais
+     * se precisar. */
+    private fun boldFirstWordsOnFirstLine(text: String, wordCount: Int): CharSequence {
+        if (text.isBlank() || wordCount <= 0) return text
+        val words = text.trim().split(Regex("\\s+"))
+        if (words.size <= wordCount) {
+            return SpannableString(text).apply {
+                setSpan(StyleSpan(android.graphics.Typeface.BOLD), 0, text.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+        }
+        val firstLine = words.take(wordCount).joinToString(" ")
+        val secondLine = words.drop(wordCount).joinToString(" ")
+        val combined = "$firstLine\n$secondLine"
+        return SpannableString(combined).apply {
+            setSpan(StyleSpan(android.graphics.Typeface.BOLD), 0, firstLine.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+    }
+
     private fun updatePriceBadge(
         imgView: ImageView?,
         product: PriceProduct,
         hasArt: Boolean,
         prepared: PreparedOverlay?,
+        // Telas Patrocinadas (2026-11-17): quando uma campanha patrocinada está ativa, a região
+        // reservada pro badge vem do servidor (ver PriceQueryEngine.SponsorRegion), em vez das
+        // constantes fixas calibradas pra arte por produto (produtos-imgs gera sempre no mesmo
+        // canvas 1280x800/1200x1920). Nula = comportamento de hoje, sem nenhuma mudança.
+        sponsorRegion: PriceQueryEngine.SponsorRegion? = null,
+        // Consulta Patrocinada (2026-11-24, 2ª rodada): true quando a arte em tela é uma peça
+        // genérica de marca (sem nome/foto do produto embutidos) — diferente de Telas
+        // Patrocinadas, aqui o badge precisa compor foto+nome+preço reais dentro de
+        // [sponsorRegion], não só o preço.
+        isSponsoredLookup: Boolean = false,
+        productPhotoPath: String? = null,
     ) {
         if (imgView == null) return
         val parent = imgView.parent as? ViewGroup ?: return
@@ -3303,7 +3649,8 @@ class PlayerActivity : ComponentActivity() {
         // Remove qualquer badge de uma renderização anterior deste mesmo produto (o render
         // inicial e o fade-in tardio da imagem podem chamar esta função duas vezes em sequência).
         for (i in parent.childCount - 1 downTo 0) {
-            if (parent.getChildAt(i).tag == PRICE_ART_BADGE_TAG) {
+            val childTag = parent.getChildAt(i).tag
+            if (childTag == PRICE_ART_BADGE_TAG || childTag == PRICE_ART_CURRENCY_TAG || childTag == PRICE_ART_SPONSORED_PHOTO_TAG) {
                 parent.removeViewAt(i)
             }
         }
@@ -3330,18 +3677,25 @@ class PlayerActivity : ComponentActivity() {
         // menor lado, não pelo maior), nunca amplia mais do que amplicava antes, ou seja, nunca
         // piora a qualidade percebida.
         imgView.scaleType = ImageView.ScaleType.FIT_CENTER
+        // Consulta Patrocinada (2026-11-24, achado real de bancada): a peça tem áreas com
+        // transparência de verdade (ex. um recorte oval) — a tarja/gradiente escuro desta função
+        // pintava `imgView.background`, que vaza por trás de qualquer pixel transparente da PNG,
+        // revelando preto em vez do branco do próprio priceRightPanel. Pulando aqui (como se
+        // hasArt=false só pra esta chamada) resolve sem tocar no caso de arte por produto/Telas
+        // Patrocinadas, que precisam da tarja pra letterbox.
+        applyArtLetterboxGradient(imgView, hasArt && !isSponsoredLookup)
 
         if (!hasArt) return
         val price = product.pricePromotional ?: product.price ?: return
         if (price <= 0.0) return
 
         // Layout vertical (terminal em pé, ver price_check_vertical_image_top/bottom.xml) usa uma
-        // arte com composição totalmente diferente da horizontal — cena só na faixa de cima +
-        // painel com nome já desenhado por baixo, reservando uma caixa BRANCA com sombra pro
-        // preço (ver compor_arte_vertical no produtos-imgs). Detecção estrutural (a guideline
+        // arte com composição totalmente diferente da horizontal — cena em tela cheia com painel
+        // de nome no topo, reservando (SEM desenhar nada) o canto inferior esquerdo pro preço (ver
+        // compor_arte_vertical no produtos-imgs). Detecção estrutural (a guideline
         // 'priceImageSplitGuide' só existe nesses dois layouts), calculada aqui em cima porque
-        // decide o estilo do card de preço logo abaixo (sem fundo colorido próprio — a caixa já
-        // está desenhada na arte, não faz sentido desenhar uma segunda por cima).
+        // decide o estilo do card de preço logo abaixo (cartão branco próprio, texto na cor de
+        // destaque do produto).
         val isVerticalArtLayout = binding.priceResultRoot.findViewById<View>(R.id.priceImageSplitGuide) != null
 
         // "secondary" é a cor vibrante/saturada da paleta (Palette.getVibrantColor, com
@@ -3349,10 +3703,21 @@ class PlayerActivity : ComponentActivity() {
         // frequente da imagem, quase sempre um tom neutro de fundo) pra o card de preço se
         // destacar de verdade em vez de ficar esmaecido/sem graça.
         val badgeColor = prepared?.secondary ?: prepared?.dominant ?: Color.parseColor("#DC2626")
-        // No vertical o preço é desenhado direto sobre a caixa branca já existente na arte — a
-        // cor do texto é o próprio acento do produto (sem precisar de idealTextColor, que existe
-        // pra garantir contraste contra um fundo variável; aqui o fundo é sempre branco/claro).
-        val textColor = if (isVerticalArtLayout) badgeColor else idealTextColor(badgeColor)
+        // No vertical o preço é desenhado sobre o cartão branco do próprio app (ver o container
+        // abaixo) — a cor do texto é o acento do produto (sem precisar de idealTextColor, que
+        // existe pra garantir contraste contra um fundo variável; aqui o fundo é sempre branco).
+        //
+        // Consulta Patrocinada (2026-11-24, 2ª rodada): aqui não existe caixa colorida nem
+        // "fundo sempre branco conhecido" — o nome/preço são compostos DIRETO sobre a peça da
+        // marca (ver referência visual do usuário: Nestlé/Colgate), sem nenhum card por baixo.
+        // `badgeColor` vem da paleta DA PEÇA PATROCINADA (não do produto), então não serve de
+        // acento aqui — usa um vermelho de preço fixo, igual ao fallback padrão de sempre.
+        val textColor = when {
+            isSponsoredLookup -> Color.parseColor("#DC2626")
+            isVerticalArtLayout -> badgeColor
+            else -> idealTextColor(badgeColor)
+        }
+        val sponsoredLookupNameColor = Color.parseColor("#1A1A2E")
 
         // Até 3 níveis de preço (ex.: "Preço Normal" + "OFERTA" + "Oferta Clube K") — o mesmo
         // `prices[]` que a API do Komprão retorna. Era `take(2)` até um produto real (Perdigão
@@ -3365,7 +3730,12 @@ class PlayerActivity : ComponentActivity() {
         // aparece riscado dentro do box de oferta — sem isso, com oferta + 2 moedas o take(3)
         // cortava silenciosamente uma das conversões (achado real, 2026-10-21, EAN 7891010980061:
         // só o dólar aparecia, o peso ficava de fora).
-        val dedupedArteSlots = product.priceSlots?.filter { it.value > 0.0 }?.let { s ->
+        // Pedido do usuário (2026-11-17): Dólar/Peso não entram empilhados dentro do card de
+        // oferta/clube (são conversão de unidade, não "mais uma faixa de preço") — saem como
+        // caixas vermelha/azul à parte, igual ao padrão sem arte (ver buildArteCurrencyBadge).
+        fun isCurrencyConversionSlot(s: ProductPriceSlot) = s.field == "price_usd" || s.field == "price_ars"
+        val currencySlots = product.priceSlots?.filter { isCurrencyConversionSlot(it) && it.value > 0.0 }.orEmpty()
+        val dedupedArteSlots = product.priceSlots?.filter { it.value > 0.0 && !isCurrencyConversionSlot(it) }?.let { s ->
             val promoFromValues = s.filter { it.isPromo }.mapNotNull { it.fromValue }
             if (promoFromValues.isEmpty()) s else s.filterNot { !it.isPromo && !it.isClub && it.value in promoFromValues }
         }?.sortedBy { if (it.isPromo) 0 else 1 }
@@ -3390,18 +3760,124 @@ class PlayerActivity : ComponentActivity() {
         // 30% a fonte do preço (moeda/inteiro/decimal) em TODAS as linhas quando há 3 faixas.
         val compactShrink = if (rows.size >= 3) 0.7f else 1.0f
 
+        // Consulta Patrocinada (pedido do usuário, 2026-11-24, 3ª rodada): "pode dobrar o
+        // tamanho" das fontes, só neste modo — não mexe no badge de arte por produto/Telas
+        // Patrocinadas, que já têm seus tamanhos calibrados.
+        val sponsoredLookupFontScale = if (isSponsoredLookup) 2f else 1f
+
+        // 5ª rodada: uma 1ª tentativa reduziu a foto 30% (150dp→105dp), pensando que o estouro de
+        // largura vinha do tamanho da foto — na verdade era o nome sem `maxWidth` (corrigido
+        // abaixo, em `sponsoredLookupTextMaxWidthPx`, que já desconta o espaço da foto do texto).
+        // 7ª rodada (pedido do usuário, 2026-11-24): "ainda não está legal"/"pequena demais" —
+        // volta pro tamanho base de 150dp, já que a causa real do estouro foi corrigida à parte.
+        //
+        // 6ª rodada (pedido do usuário, com imagem de exemplo: oferta + preço normal, 2 faixas):
+        // "diminuir 20% quando tiver mais de um preço" — com `rows.size > 1` o card fica bem mais
+        // alto (2 blocos de preço + divisor), e a foto no mesmo tamanho de sempre ficava
+        // desproporcional perto dele. 150dp * 0.8 = 120dp.
+        // 8ª rodada (pedido do usuário, 2026-11-26): "+50% no tamanho, atrás da arte do
+        // patrocínio" — a foto deixa de ser filha de `container` (ver abaixo) e passa a ser uma
+        // view própria, inserida ATRÁS de `imgView` (índice 0 de `parent`); com a foto maior,
+        // o que passar da área branca reservada da peça fica coberto pelos pixels opacos da
+        // própria arte (o recorte transparente é o que revela a foto), em vez de aparecer por
+        // cima dela.
+        val sponsoredLookupPhotoSizeDp = ((if (rows.size > 1) (150 * 0.8) else 150.0) * 1.5).toInt()
+
+        // Nome de produto comprido (ex. "LEITE CONDENSADO TRADICIONAL MOCA LATA 395G") sem
+        // largura máxima estourava a tela — `WRAP_CONTENT` só quebra linha (maxLines=2) quando a
+        // view tem um teto de largura real pra "estourar" contra. Estimativa a partir da fração
+        // de tela que [sponsorRegion] reserva (a peça ocupa a tela toda, full-bleed, então a
+        // largura da região ≈ largura em pixels), descontando o espaço da foto à esquerda.
+        val sponsoredLookupTextMaxWidthPx = if (isSponsoredLookup) {
+            val screenWidthPx = resources.displayMetrics.widthPixels
+            val regionWidthPx = sponsorRegion?.let { ((it.x1 - it.x0) * screenWidthPx).toInt() } ?: screenWidthPx
+            (regionWidthPx - dpToPx(sponsoredLookupPhotoSizeDp) - dpToPx(18) - dpToPx(48)).coerceAtLeast(dpToPx(160))
+        } else {
+            Int.MAX_VALUE
+        }
+
         val container = LinearLayout(this).apply {
             tag = PRICE_ART_BADGE_TAG
-            orientation = LinearLayout.VERTICAL
-            if (isVerticalArtLayout) {
-                // Sem fundo/elevação próprios — a caixa branca com sombra já está desenhada na
-                // própria arte (compor_arte_vertical); um segundo fundo aqui em cima criaria uma
-                // "caixa dentro de caixa". Só um respiro pra não colar nas bordas dela.
-                setPadding(dpToPx(8), dpToPx(4), dpToPx(8), dpToPx(4))
+            // Consulta Patrocinada (pedido do usuário, 2026-11-24, 4ª rodada, com imagem de
+            // referência): foto do produto ao LADO do nome/preço, não empilhada em cima — por
+            // isso HORIZONTAL só neste modo (foto + coluna de texto), igual ao exemplo
+            // (Colgate à esquerda, nome/preço à direita).
+            orientation = if (isSponsoredLookup) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+            gravity = if (isSponsoredLookup) android.view.Gravity.CENTER_VERTICAL else android.view.Gravity.CENTER_HORIZONTAL
+            if (isSponsoredLookup) {
+                // Consulta Patrocinada: SEM caixa colorida — a peça já traz seu próprio fundo
+                // (branco, na referência do usuário) e a composição foto+nome+preço fica direto
+                // em cima dele, igual ao exemplo (Nestlé/Colgate). Só padding, pra não grudar a
+                // foto/texto um no outro nem nas bordas da área reservada.
+                setPadding(dpToPx(12), dpToPx(12), dpToPx(12), dpToPx(12))
+            } else if (isVerticalArtLayout) {
+                // A arte vertical só RESERVA o espaço do preço (canto inferior esquerdo) e não
+                // desenha caixa nenhuma (pedido do usuário, 05/11/2026) — o cartão branco com
+                // sombra é desenhado aqui, pelo app, do tamanho do conteúdo (1 a 3 faixas de preço).
+                setPadding(dpToPx(20), dpToPx(12), dpToPx(20), dpToPx(12))
+                background = roundedBg(Color.argb(242, 255, 255, 255), radiusDp = 16f)
+                elevation = dpToPx(16).toFloat()
             } else {
                 setPadding(dpToPx(18), dpToPx(14), dpToPx(18), dpToPx(14))
                 background = roundedBg(badgeColor, radiusDp = 16f)
                 elevation = dpToPx(32).toFloat()
+            }
+        }
+
+        // Consulta Patrocinada: nome/preço numa coluna vertical própria (`rowsTarget`) — a foto
+        // do produto fica À ESQUERDA dela visualmente, mas (desde 2026-11-26) como VIEW PRÓPRIA
+        // (`sponsoredPhotoView` abaixo), não mais filha de `container`, pra poder ficar atrás da
+        // arte do patrocínio (ver posicionamento em `imgView.post` mais abaixo). Nos outros modos
+        // (arte por produto/Telas Patrocinadas), `rowsTarget` é o próprio `container` vertical
+        // de sempre — comportamento 100% inalterado.
+        val rowsTarget: ViewGroup = if (isSponsoredLookup) {
+            LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        } else {
+            container
+        }
+        // Consulta Patrocinada: foto do produto como view própria (não mais filha de `container`
+        // — ver [PRICE_ART_SPONSORED_PHOTO_TAG] acima), posicionada depois, atrás da arte.
+        var sponsoredPhotoView: ImageView? = null
+        if (isSponsoredLookup) {
+            Log.d("MPlayerSponsoredLookup", "updatePriceBadge ean=${product.ean} productPhotoPath=$productPhotoPath")
+            if (!productPhotoPath.isNullOrBlank()) {
+                sponsoredPhotoView = ImageView(this).apply {
+                    tag = PRICE_ART_SPONSORED_PHOTO_TAG
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                    val photoFile = File(productPhotoPath)
+                    Log.d(
+                        "MPlayerSponsoredLookup",
+                        "loading product photo path=$productPhotoPath exists=${photoFile.exists()} size=${photoFile.length()}",
+                    )
+                    load(photoFile) {
+                        listener(
+                            onSuccess = { _, _ -> Log.d("MPlayerSponsoredLookup", "photo load SUCCESS path=$productPhotoPath") },
+                            onError = { _, result -> Log.w("MPlayerSponsoredLookup", "photo load ERROR path=$productPhotoPath err=${result.throwable}") },
+                        )
+                    }
+                }
+            }
+            container.addView(rowsTarget, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            if (!product.description.isNullOrBlank()) {
+                rowsTarget.addView(
+                    MaterialTextView(this).apply {
+                        // Pedido do usuário (2026-11-24: "quebrar as 3 primeiras palavras, o
+                        // restante [na] segunda linha, não pode passar a largura do oval") —
+                        // quebra EXPLÍCITA entre a 3ª e a 4ª palavra (não só wrap natural), com
+                        // `maxWidth` abaixo garantindo que nenhuma das duas linhas (nem uma 3ª,
+                        // se o restante ainda não couber) ultrapasse a área reservada.
+                        text = boldFirstWordsOnFirstLine(product.description.orEmpty(), wordCount = 3)
+                        setTextColor(sponsoredLookupNameColor)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f * sponsoredLookupFontScale)
+                        setTypeface(typeface, android.graphics.Typeface.NORMAL)
+                        includeFontPadding = false
+                        maxWidth = sponsoredLookupTextMaxWidthPx
+                        maxLines = 3
+                    },
+                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                        bottomMargin = dpToPx(6)
+                    },
+                )
             }
         }
 
@@ -3410,12 +3886,12 @@ class PlayerActivity : ComponentActivity() {
                 // "match_parent" dentro de um LinearLayout "wrap_content" mede contra a TELA, não
                 // contra os irmãos — estica o card inteiro. Por isso medimos a largura que o card
                 // JÁ tem (só com a 1ª linha) e damos essa largura fixa ao divisor.
-                container.measure(
+                rowsTarget.measure(
                     View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
                     View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
                 )
-                val dividerWidth = container.measuredWidth
-                container.addView(
+                val dividerWidth = rowsTarget.measuredWidth
+                rowsTarget.addView(
                     View(this).apply {
                         setBackgroundColor(adjustAlpha(textColor, 0.28f))
                     },
@@ -3429,11 +3905,11 @@ class PlayerActivity : ComponentActivity() {
             // deixar clara a hierarquia entre o preço principal e os secundários.
             val scale = if (index == 0) 1f else 0.78f
             if (!label.isNullOrBlank()) {
-                container.addView(
+                rowsTarget.addView(
                     MaterialTextView(this).apply {
                         text = label
                         setTextColor(adjustAlpha(textColor, 0.9f))
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f * scale)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f * scale * sponsoredLookupFontScale)
                         includeFontPadding = false
                     },
                 )
@@ -3441,7 +3917,7 @@ class PlayerActivity : ComponentActivity() {
             // "De: X" riscado (pedido do usuário, 2026-10-23) — sem isso, o preço normal
             // deduplicado acima (ver `dedupedArteSlots`) não aparecia em lugar nenhum da tela.
             if (fromValue != null && fromValue > value) {
-                container.addView(
+                rowsTarget.addView(
                     MaterialTextView(this).apply {
                         text = "De: ${formatCurrency(fromValue)}"
                         setTextColor(adjustAlpha(textColor, 0.75f))
@@ -3451,23 +3927,37 @@ class PlayerActivity : ComponentActivity() {
                     },
                 )
             }
+            // Pedido do usuário (2026-11-17): mesma fonte (Bebas Neue, antes era Poppins
+            // ExtraBold) e +20% de tamanho dos preços fora da arte (ver emphasizePriceSlot) —
+            // "sizeBump" é cumulativo com o scale/compactShrink já existentes, não os substitui.
+            val sizeBump = 1.2f * sponsoredLookupFontScale
             val precoView = MaterialTextView(this).apply {
                 text = buildPriceSpannable(
                     value = value,
                     textColor = textColor,
-                    cifraoSp = (if (isVerticalArtLayout) 17f else 19.8f) * scale * compactShrink,
-                    valueSp = (if (isVerticalArtLayout) 92f else 105.6f) * scale * compactShrink,
-                    decimalsSp = (if (isVerticalArtLayout) 46f else 52.8f) * scale * compactShrink,
+                    cifraoSp = (if (isVerticalArtLayout) 17f else 19.8f) * scale * compactShrink * sizeBump,
+                    valueSp = (if (isVerticalArtLayout) 92f else 105.6f) * scale * compactShrink * sizeBump,
+                    decimalsSp = (if (isVerticalArtLayout) 46f else 52.8f) * scale * compactShrink * sizeBump,
                     currencySymbol = symbol,
                 )
-                typeface = BrandTypography.poppinsExtraBold(this@PlayerActivity)
-                    ?: android.graphics.Typeface.create(typeface, android.graphics.Typeface.BOLD)
+                // Consulta Patrocinada (pedido do usuário, 2026-11-24, 3ª rodada): "usar as
+                // fontes bebas negrito no preço" — força o estilo negrito sobre a Bebas Neue
+                // (que só existe em peso regular), em vez de só cair pro fallback bold quando a
+                // fonte não carrega.
+                typeface = if (isSponsoredLookup) {
+                    BrandTypography.bebasNeue(this@PlayerActivity)
+                        ?.let { android.graphics.Typeface.create(it, android.graphics.Typeface.BOLD) }
+                        ?: android.graphics.Typeface.create(typeface, android.graphics.Typeface.BOLD)
+                } else {
+                    BrandTypography.bebasNeue(this@PlayerActivity)
+                        ?: android.graphics.Typeface.create(typeface, android.graphics.Typeface.BOLD)
+                }
                 includeFontPadding = false
             }
             if (isVerticalArtLayout) {
                 // "R$ 4,99 un" na mesma linha (referência do usuário) — sufixo de unidade
                 // discreto, cinza, alinhado pela base do preço.
-                container.addView(
+                rowsTarget.addView(
                     LinearLayout(this).apply {
                         orientation = LinearLayout.HORIZONTAL
                         gravity = android.view.Gravity.BOTTOM
@@ -3484,8 +3974,19 @@ class PlayerActivity : ComponentActivity() {
                     },
                 )
             } else {
-                container.addView(precoView)
+                rowsTarget.addView(precoView)
             }
+        }
+
+        sponsoredPhotoView?.let {
+            // Índice 0 = desenhado primeiro = fica embaixo de TUDO (inclusive `imgView`, a arte do
+            // patrocínio) — o recorte transparente da arte é o que revela a foto; o resto da arte
+            // (opaco) cobre naturalmente o que a foto maior passar da área reservada.
+            parent.addView(
+                it,
+                0,
+                FrameLayout.LayoutParams(dpToPx(sponsoredLookupPhotoSizeDp), dpToPx(sponsoredLookupPhotoSizeDp)),
+            )
         }
 
         parent.addView(
@@ -3493,9 +3994,91 @@ class PlayerActivity : ComponentActivity() {
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT),
         )
 
+        // Pedido do usuário (2026-11-17): Dólar/Peso aparecem como caixas vermelha/azul à parte,
+        // lado a lado — mesmas cores fixas e mesmo estilo da versão sem arte (ver populatePriceSlots/
+        // styleSlotBox: US$ = #C8102E, ARS = #1E4FD8), em vez de empilhados dentro do card de oferta.
+        val currencyContainer: LinearLayout? = if (currencySlots.isNotEmpty()) {
+            LinearLayout(this).apply {
+                tag = PRICE_ART_CURRENCY_TAG
+                orientation = LinearLayout.HORIZONTAL
+                currencySlots.forEachIndexed { index, slot ->
+                    val boxColor = if (slot.field == "price_usd") Color.parseColor("#C8102E") else Color.parseColor("#1E4FD8")
+                    val box = MaterialTextView(this@PlayerActivity).apply {
+                        // Pedido do usuário (2026-11-17): +50% na fonte das caixas de Dólar/Peso,
+                        // também na arte (mesmo bump aplicado em emphasizePriceSlot/populatePriceSlots).
+                        val currencyBump = 1.5f
+                        text = buildPriceSpannable(
+                            value = slot.value,
+                            textColor = Color.WHITE,
+                            cifraoSp = 15f * currencyBump,
+                            valueSp = 34f * currencyBump,
+                            decimalsSp = 18f * currencyBump,
+                            currencySymbol = slot.currencySymbol,
+                        )
+                        typeface = BrandTypography.bebasNeue(this@PlayerActivity)
+                            ?: android.graphics.Typeface.create(typeface, android.graphics.Typeface.BOLD)
+                        includeFontPadding = false
+                        setPadding(dpToPx(15), dpToPx(15), dpToPx(15), dpToPx(15))
+                        background = roundedBg(boxColor, radiusDp = 14f)
+                        // Bug real (2026-11-17): sem isso, colocar a caixa dentro da coluna com o
+                        // label acima (ver abaixo) fazia o texto quebrar letra por letra ("U"/"S"/"$"
+                        // empilhados) — a LinearLayout vertical mede a largura do filho de forma
+                        // diferente de quando ele é filho direto da LinearLayout horizontal.
+                        isSingleLine = true
+                        ellipsize = null
+                    }
+                    // Pedido do usuário (2026-11-17): label acima da caixa ("DÓLAR"/"PESO"), igual
+                    // ao "PREÇO" acima do card principal — sem isso o cliente via só números
+                    // coloridos, sem saber qual caixa era qual moeda.
+                    val column = LinearLayout(this@PlayerActivity).apply {
+                        orientation = LinearLayout.VERTICAL
+                        addView(
+                            MaterialTextView(this@PlayerActivity).apply {
+                                text = slot.label
+                                // Bug real (2026-11-17, teste com imagem patrocinada real): usar
+                                // `textColor` (calculado pro card principal, contra badgeColor) às
+                                // vezes dava branco sobre uma região BRANCA da imagem patrocinada —
+                                // label sumia (igual ao bug já visto na caixa de PREÇO). Pílula com
+                                // o mesmo fundo da caixa abaixo garante contraste sempre, não importa
+                                // o que tem atrás.
+                                setTextColor(Color.WHITE)
+                                setBackgroundColor(boxColor)
+                                setPadding(dpToPx(6), dpToPx(2), dpToPx(6), dpToPx(2))
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                                includeFontPadding = false
+                            },
+                            LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                                bottomMargin = dpToPx(6)
+                            },
+                        )
+                        // Bug real (2026-11-17): LinearLayout VERTICAL dá MATCH_PARENT por padrão
+                        // pra filho sem LayoutParams explícito (generateDefaultLayoutParams) — a
+                        // caixa esticava pra largura do label curto "DÓLAR"/"PESO" e cortava quase
+                        // tudo ("U" sozinho). WRAP_CONTENT explícito aqui é o que já funcionava
+                        // antes de existir esta coluna.
+                        addView(box, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                    }
+                    addView(
+                        column,
+                        LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                            if (index > 0) marginStart = dpToPx(10)
+                        },
+                    )
+                }
+            }
+        } else {
+            null
+        }
+        currencyContainer?.let {
+            parent.addView(it, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
+
         imgView.post {
             if (container.tag != PRICE_ART_BADGE_TAG || container.parent == null) return@post
             if (imgView.width <= 0 || imgView.height <= 0) return@post
+
+            val hasCurrencyContainer = currencyContainer != null && currencyContainer.parent != null
 
             if (isVerticalArtLayout) {
                 // Arte vertical sempre gerada em 1200x1920 (produtos-imgs: ARTE_LARGURA_VERTICAL/
@@ -3504,28 +4087,87 @@ class PlayerActivity : ComponentActivity() {
                 // do início do painel, não derivada do texto do nome — ver CAIXA_PRECO_* em
                 // compor_arte_vertical) exatamente pra este cálculo poder replicar sem adivinhar
                 // quantas linhas o nome ocupou no servidor.
-                val arteLarguraVertical = 1200f
-                val arteAlturaVertical = 1920f
-                val alturaFotoPct = 0.45f
-                val caixaPrecoY0Pct = 0.16f
-                val caixaPrecoAlturaPct = 0.14f
-                val margemPct = 0.07f
+                // Layout novo da arte vertical (referência do usuário, 05/11/2026): painel de cor no
+                // TOPO e a caixa do preço no canto INFERIOR ESQUERDO. Estes 4 percentuais ESPELHAM
+                // VERT_PRECO_X0/X1/Y0/Y1_PCT de produtos-imgs (app.py) — mantenha os dois lados iguais.
+                // Artes verticais geradas antes dessa mudança têm a caixa em outro lugar e precisam
+                // ser regeneradas pro preço cair certo.
+                // Sem patrocínio: canvas fixo de sempre (produtos-imgs gera sempre 1200x1920) +
+                // frações hardcoded, calibradas visualmente. Com patrocínio: o "canvas" é a
+                // imagem de verdade (resolução arbitrária, enviada pelo Mupa Studio) e as frações
+                // vêm da região desenhada lá — mesma matemática de escala/tarja, fonte diferente.
+                val arteLarguraVertical = sponsorRegion?.let { imgView.drawable?.intrinsicWidth?.toFloat() } ?: 1200f
+                val arteAlturaVertical = sponsorRegion?.let { imgView.drawable?.intrinsicHeight?.toFloat() } ?: 1920f
+                val caixaX0Pct = sponsorRegion?.x0 ?: 0.05f
+                val caixaX1Pct = sponsorRegion?.x1 ?: 0.55f
+                val caixaY0Pct = sponsorRegion?.y0 ?: 0.80f
+                val caixaY1Pct = sponsorRegion?.y1 ?: 0.94f
 
                 val escalaFitCenter = minOf(imgView.width / arteLarguraVertical, imgView.height / arteAlturaVertical)
                 val tarjaEsquerda = (imgView.width - arteLarguraVertical * escalaFitCenter) / 2f
                 val tarjaSuperior = (imgView.height - arteAlturaVertical * escalaFitCenter) / 2f
 
-                val alturaFotoPx = arteAlturaVertical * alturaFotoPct
-                val caixaX0 = arteLarguraVertical * margemPct
-                val caixaX1 = arteLarguraVertical * (1f - margemPct)
-                val caixaY0 = alturaFotoPx + arteAlturaVertical * caixaPrecoY0Pct
-                val caixaAltura = arteAlturaVertical * caixaPrecoAlturaPct
+                val caixaX0 = arteLarguraVertical * caixaX0Pct
+                val caixaX1 = arteLarguraVertical * caixaX1Pct
+                val caixaY0 = arteAlturaVertical * caixaY0Pct
+                val caixaY1 = arteAlturaVertical * caixaY1Pct
 
                 val caixaXCentro = imgView.left + tarjaEsquerda + (caixaX0 + caixaX1) / 2f * escalaFitCenter
-                val caixaYCentro = imgView.top + tarjaSuperior + (caixaY0 + caixaAltura / 2f) * escalaFitCenter
+                val caixaYCentro = imgView.top + tarjaSuperior + (caixaY0 + caixaY1) / 2f * escalaFitCenter
 
                 container.x = caixaXCentro - container.width / 2f
                 container.y = caixaYCentro - container.height / 2f
+                if (hasCurrencyContainer) {
+                    // Abaixo do cartão branco de preço, alinhado à esquerda com ele.
+                    currencyContainer!!.x = container.x
+                    currencyContainer.y = container.y + container.height + dpToPx(10)
+                }
+                return@post
+            }
+
+            // A arte horizontal é sempre gerada em 1280x800 (produtos-imgs: ARTE_LARGURA_HORIZONTAL /
+            // ARTE_ALTURA_HORIZONTAL), com o texto (nome/descrição) desenhado a partir de uma
+            // margem de 6% dessa largura (`margin = width * 0.06` em compor_texto_na_arte). O
+            // ImageView usa FIT_CENTER (a arte nunca pode passar da borda da tela) — escala pelo
+            // MENOR fator entre largura/altura da view e centraliza o resultado, sobrando uma
+            // tarja (letterbox) de cada lado no eixo que não bateu a proporção. Usar só
+            // "imgView.width * fração" pra posicionar o preço IGNORA essa tarja: o card ficaria
+            // desalinhado com o texto desenhado na arte, que está relativo à imagem, não à view.
+            if (sponsorRegion != null) {
+                // Telas Patrocinadas: a região reservada já diz exatamente onde o badge cabe —
+                // mesma matemática de escala/tarja da arte vertical (ver acima), centralizado na
+                // região em vez do ancoramento por topo/altura-da-tela usado pra arte por
+                // produto (que não tem uma área reservada conhecida de antemão).
+                val naturalW = imgView.drawable?.intrinsicWidth?.toFloat() ?: 1280f
+                val naturalH = imgView.drawable?.intrinsicHeight?.toFloat() ?: 800f
+                val escala = minOf(imgView.width / naturalW, imgView.height / naturalH)
+                val tarjaH = (imgView.width - naturalW * escala) / 2f
+                val tarjaV = (imgView.height - naturalH * escala) / 2f
+                val centroX = naturalW * (sponsorRegion.x0 + sponsorRegion.x1) / 2f
+                val centroY = naturalH * (sponsorRegion.y0 + sponsorRegion.y1) / 2f
+                val baseX = imgView.left + tarjaH + centroX * escala
+                val baseY = imgView.top + tarjaV + centroY * escala
+
+                // Consulta Patrocinada (pedido do usuário, 2026-11-26): foto como par com o
+                // container de texto (mesmo visual de "foto à esquerda, texto à direita" de
+                // antes, quando a foto era filha de `container`), os dois centralizados juntos
+                // no centro da região reservada — sem foto (Telas Patrocinadas/arte por
+                // produto), photoWidth=0 e isso reduz exatamente ao cálculo de sempre.
+                val photoGap = if (sponsoredPhotoView != null) dpToPx(18).toFloat() else 0f
+                val photoWidth = sponsoredPhotoView?.width?.toFloat() ?: 0f
+                val pairWidth = photoWidth + photoGap + container.width
+                val pairLeft = baseX - pairWidth / 2f
+
+                sponsoredPhotoView?.let {
+                    it.x = pairLeft
+                    it.y = baseY - it.height / 2f
+                }
+                container.x = pairLeft + photoWidth + photoGap
+                container.y = baseY - container.height / 2f
+                if (hasCurrencyContainer) {
+                    currencyContainer!!.x = container.x + container.width + dpToPx(16)
+                    currencyContainer.y = container.y + (container.height - currencyContainer.height) / 2f
+                }
                 return@post
             }
 
@@ -3566,6 +4208,12 @@ class PlayerActivity : ComponentActivity() {
             val yDesejado = imgView.top + imgView.height / 2f + 50f
             val yMaximo = imgView.top + imgView.height - margemInferiorCard - container.height
             container.y = minOf(yDesejado, yMaximo)
+
+            if (hasCurrencyContainer) {
+                // À direita do card de preço, centralizado verticalmente com ele.
+                currencyContainer!!.x = container.x + container.width + dpToPx(16)
+                currencyContainer.y = container.y + (container.height - currencyContainer.height) / 2f
+            }
         }
     }
 
@@ -3809,8 +4457,21 @@ class PlayerActivity : ComponentActivity() {
      * Ex: "7 reais e 19 centavos. A partir de 3 unidades, a unidade sai por 6 reais e 79 centavos."
      */
     private fun speakSlotsIfPossible(ean: String, slots: List<ProductPriceSlot>) {
-        if (!ttsReady) return
+        // Pedido/bug real (2026-11-17): NÃO gatear na flag do TTS nativo — ela só reflete se o
+        // Android tem um motor de TTS instalado (ex: aparelhos TV box sem nenhum, como o K11
+        // rk3576, onde TextToSpeech nunca inicializa). A voz Azure (ver speakWithVoiceSynth) não
+        // depende disso; só o fallback nativo dela depende, e esse já é gateado dentro de
+        // speakNative(). Gatear aqui também deixava a loja muda pra sempre nesses aparelhos
+        // (nem o cache Azure chegava a ser alimentado, porque a função nunca era chamada).
+        // Mesma dedup + ordem de populatePriceSlots (ver comentário lá) — o que é falado
+        // precisa bater com o que está escrito na tela: oferta primeiro, sem repetir o preço
+        // cheio como slot separado quando ele já aparece riscado dentro do box de oferta.
         val validos = slots.filter { it.value > 0.0 }
+            .let { s ->
+                val promoFromValues = s.filter { it.isPromo }.mapNotNull { it.fromValue }
+                if (promoFromValues.isEmpty()) s else s.filterNot { !it.isPromo && !it.isClub && it.value in promoFromValues }
+            }
+            .sortedBy { if (it.isPromo) 0 else 1 }
         if (validos.isEmpty()) return
 
         val now = SystemClock.elapsedRealtime()
@@ -3820,9 +4481,21 @@ class PlayerActivity : ComponentActivity() {
 
         val fala = StringBuilder()
         for (slot in validos) {
+            // Conversão de moeda estrangeira (ver PriceQueryEngine.appendForeignCurrencySlots):
+            // fala sempre com a unidade certa (dólar/dólares, peso/pesos). Bug real (2026-10-21):
+            // caindo no ramo genérico abaixo, buildSpokenPrice (sem parâmetro de unidade) chamava
+            // TUDO de "reais" — inclusive os valores já convertidos pra dólar/peso.
+            if (slot.field == "price_usd" || slot.field == "price_ars") {
+                val (singular, plural) = if (slot.field == "price_usd") "dólar" to "dólares" else "peso" to "pesos"
+                fala.append("${OfferIntelligence.buildSpokenPrice(slot.value, singular, plural)}. ")
+                continue
+            }
             val valor = buildSpokenPrice(slot.value)
-            val ehOferta = slot.isPromo || slot.isClub
-            if (ehOferta) {
+            if (slot.isPromo && slot.fromValue != null && slot.fromValue > slot.value) {
+                // "Produto em oferta, de X por Y" (pedido do usuário, 2026-10-21) — mesma
+                // estrutura de frase que OfferIntelligence já usa pra desconto percentual.
+                fala.append("Produto em oferta! De ${buildSpokenPrice(slot.fromValue)} por $valor. ")
+            } else if (slot.isPromo || slot.isClub) {
                 val rotulo = slot.label.trim().trimEnd(':', '.').trim()
                 if (rotulo.isNotBlank()) fala.append("$rotulo, ")
                 fala.append("$valor. ")
@@ -3843,6 +4516,7 @@ class PlayerActivity : ComponentActivity() {
 
         val texto = fala.toString().trim()
         if (texto.isBlank()) return
+        Log.d("MPlayerPrice", "tts_slots_text ean=$ean texto=$texto")
         speakWithVoiceSynth(texto)
     }
 
@@ -3851,13 +4525,24 @@ class PlayerActivity : ComponentActivity() {
      * selo/explicação decide o texto, então nunca diverge do que está escrito na tela.
      */
     private fun speakPriceIfPossible(product: PriceProduct) {
-        if (!ttsReady) return
-
+        // Ver nota em speakSlotsIfPossible: não gatear em ttsReady aqui.
         val now = SystemClock.elapsedRealtime()
         if (product.ean == lastSpokenEan && now - lastSpokenAtMs < 3500L) return
 
-        val textToSpeak = OfferIntelligence.analyze(product).ttsPhrase
-        if (textToSpeak.isBlank()) return
+        val basePhrase = OfferIntelligence.analyze(product).ttsPhrase
+        if (basePhrase.isBlank()) return
+
+        // Conversão de moeda estrangeira (ver PriceQueryEngine.appendForeignCurrencySlots): fala
+        // os valores convertidos depois do preço em reais, cada um com a unidade certa (dólar/
+        // dólares, peso/pesos) — independente do OfferIntelligence, que é só reais.
+        val currencyPhrase = product.priceSlots
+            ?.filter { it.field == "price_usd" || it.field == "price_ars" }
+            ?.joinToString(separator = " ") { slot ->
+                val (singular, plural) = if (slot.field == "price_usd") "dólar" to "dólares" else "peso" to "pesos"
+                "e ${OfferIntelligence.buildSpokenPrice(slot.value, singular, plural)}."
+            }
+            .orEmpty()
+        val textToSpeak = if (currencyPhrase.isBlank()) basePhrase else "$basePhrase $currencyPhrase"
 
         lastSpokenEan = product.ean
         lastSpokenAtMs = now
@@ -3866,7 +4551,7 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private fun speakNotFoundIfPossible(ean: String) {
-        if (!ttsReady) return
+        // Ver nota em speakSlotsIfPossible: não gatear em ttsReady aqui.
         val normalized = ean.trim()
         if (normalized.isBlank()) return
 
@@ -3889,6 +4574,10 @@ class PlayerActivity : ComponentActivity() {
     }
 
     private fun speakNative(texto: String) {
+        // Só este caminho (voz Azure indisponível: cache frio + rede/Edge Function fora do ar)
+        // realmente depende do motor de TTS nativo do Android — aparelhos sem nenhum (ex: TV
+        // boxes genéricas) ficam só sem o fallback aqui, não sem a voz Azure inteira.
+        if (!ttsReady) return
         val utteranceId = UUID.randomUUID().toString()
         if (Build.VERSION.SDK_INT >= 21) {
             tts?.speak(texto, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
@@ -3900,8 +4589,8 @@ class PlayerActivity : ComponentActivity() {
 
     private fun buildSpokenPrice(value: Double): String = OfferIntelligence.buildSpokenPrice(value)
 
-    private fun formatCurrency(value: Double): String {
-        return String.format(Locale("pt", "BR"), "R$ %.2f", value)
+    private fun formatCurrency(value: Double, symbol: String = "R$"): String {
+        return String.format(Locale("pt", "BR"), "%s %.2f", symbol, value)
     }
 
     private fun parseColorOrNull(value: String?): Int? {
@@ -4029,6 +4718,30 @@ class PlayerActivity : ComponentActivity() {
         // Clear the default drawable (ic_mplayer) immediately to prevent logo flashing
         val imgView = container.findViewById<ImageView>(R.id.priceProductImage)
         imgView?.setImageDrawable(null)
+
+        // Spinner de carregamento sobre a foto do produto, enquanto a imagem real (ImagemUrl
+        // da API, baixada e cacheada em segundo plano por PriceQueryEngine.preloadProductImageAndTheme)
+        // ainda não chegou — pedido do usuário (2026-11-13) pra não deixar a área da foto vazia/
+        // com o placeholder genérico enquanto baixa. `container` é recriado do zero
+        // (removeAllViews + inflate) a cada produto escaneado, então criar e adicionar aqui de
+        // novo a cada chamada não acumula views órfãs. Usa tag em vez de um R.id próprio — mais
+        // simples que declarar um id novo só pra isso. Posicionado via translationX/Y depois do
+        // layout, em vez de LayoutParams do tipo do pai, porque os layouts split/universal/
+        // backdrop/etc. usam ViewGroups diferentes (FrameLayout, ConstraintLayout...) e isso
+        // funciona igual em qualquer um deles.
+        val imageParent = imgView?.parent as? ViewGroup
+        if (imageParent != null) {
+            val spinner = ProgressBar(container.context).apply {
+                tag = "priceImageLoadingSpinner"
+                isIndeterminate = true
+                visibility = View.GONE
+            }
+            imageParent.addView(spinner, ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            imgView.doOnLayout { iv ->
+                spinner.translationX = iv.x + iv.width / 2f - spinner.width / 2f
+                spinner.translationY = iv.y + iv.height / 2f - spinner.height / 2f
+            }
+        }
     }
 
     /**
@@ -4158,9 +4871,33 @@ class PlayerActivity : ComponentActivity() {
             // tela sem nenhum preço enquanto o TTS, que não passa por essa dedup, falava
             // normalmente).
             val validSlots = dedupedSlots.ifEmpty { positiveSlots }
-            val bestValue = validSlots.minOfOrNull { it.value }
+                .let { slots ->
+                    // Quando há oferta (Preco2 do TCServer < Preco1), o preço cheio já aparece
+                    // riscado ("De: X") dentro do próprio box de oferta — mostrar também como box
+                    // separado é redundante e ocupa espaço à toa (achado real, 2026-10-21, EAN
+                    // 7891010980061). Remove o box "preço normal" cujo valor é o "De:" da oferta.
+                    val promoFromValues = slots.filter { it.isPromo }.mapNotNull { it.fromValue }
+                    if (promoFromValues.isEmpty()) {
+                        slots
+                    } else {
+                        slots.filterNot { !it.isPromo && !it.isClub && it.value in promoFromValues }
+                    }
+                }
+                // Produto em oferta tem prioridade visual: aparece primeiro na tela.
+                .sortedBy { if (it.isPromo) 0 else 1 }
+            // Slots de conversão de moeda estrangeira (ver PriceQueryEngine.queryTcServer, moeda_dolar/
+            // moeda_peso) não competem pelo destaque "melhor preço" — o valor numérico é menor só por
+            // causa da unidade (dólar/peso), não porque é uma oferta melhor. Excluídos do cálculo de
+            // bestValue para não ficarem destacados como se fossem a opção mais vantajosa.
+            fun isCurrencyConversionSlot(s: ProductPriceSlot) = s.field == "price_usd" || s.field == "price_ars"
+            val bestValue = validSlots.filterNot { isCurrencyConversionSlot(it) }.minOfOrNull { it.value }
             val compact = validSlots.size >= 3
             lastRenderedPriceSlotCount = validSlots.size.coerceAtLeast(1)
+            // Pedido do usuário (2026-11-17): preço em real continua na coluna principal; as
+            // conversões de moeda estrangeira (Dólar/Peso) vão pra uma coluna à direita, lado a
+            // lado — não mais empilhadas embaixo do preço em real. Ver addPriceSlotColumns.
+            val mainViews = ArrayList<Pair<View, Double>>()
+            val currencyViews = ArrayList<Pair<View, Double>>()
             for (slot in validSlots) {
                 val itemView = inflater.inflate(R.layout.item_price_slot, container, false)
 
@@ -4171,9 +4908,25 @@ class PlayerActivity : ComponentActivity() {
                 val currencyTextView = itemView.findViewById<TextView>(R.id.slotCurrency)
 
                 labelTextView.text = slot.label
+                currencyTextView.text = slot.currencySymbol
+                // Bug real (2026-11-17): a fonte Bebas Neue só era aplicada DEPOIS de montar/medir
+                // as colunas (BrandTypography.applyBrandTypography, chamado mais tarde) — como ela
+                // é bem mais larga que a fonte default, trocar o typeface DEPOIS forçava um
+                // re-layout tardio que estourava a coluna da esquerda, empurrando a de moeda pra
+                // fora/zerando sua largura. Aplica aqui, ANTES de medir, pra já nascer com a
+                // largura final certa.
+                BrandTypography.bebasNeue(this)?.let {
+                    currencyTextView.typeface = it
+                    integerTextView.typeface = it
+                    decimalTextView.typeface = it
+                }
 
-                val isBest = bestValue != null && slot.value == bestValue
-                styleSlotBox(itemView, labelTextView, currencyTextView, integerTextView, decimalTextView, isBest = isBest, isClub = slot.isClub, isPromo = slot.isPromo, accentColor = accentColor)
+                val isBest = !isCurrencyConversionSlot(slot) && bestValue != null && slot.value == bestValue
+                styleSlotBox(
+                    itemView, labelTextView, currencyTextView, integerTextView, decimalTextView,
+                    isBest = isBest, isClub = slot.isClub, isPromo = slot.isPromo, accentColor = accentColor,
+                    isUsd = slot.field == "price_usd", isArs = slot.field == "price_ars",
+                )
 
                 animatePriceCount(integerTextView, decimalTextView, slot.value, container.childCount)
 
@@ -4182,6 +4935,9 @@ class PlayerActivity : ComponentActivity() {
                     isBest = isBest,
                     compact = compact,
                     value = slot.value,
+                    // Conversão de moeda (ver nota acima) não é "oferta pior" — usa o mesmo
+                    // tamanho de destaque do preço principal, só sem a cor de "melhor preço".
+                    isCurrencyConversion = isCurrencyConversionSlot(slot),
                 )
                 applyCompactSpacing(itemView, compact)
 
@@ -4195,7 +4951,12 @@ class PlayerActivity : ComponentActivity() {
                     fromPriceTextView.visibility = View.GONE
                 }
 
-                container.addView(itemView)
+                if (isCurrencyConversionSlot(slot)) currencyViews += itemView to slot.value else mainViews += itemView to slot.value
+            }
+            if (currencyViews.isEmpty()) {
+                mainViews.forEach { (view, _) -> container.addView(view) }
+            } else {
+                addPriceSlotColumns(container, mainViews, currencyViews)
             }
             return
         }
@@ -4282,6 +5043,106 @@ class PlayerActivity : ComponentActivity() {
     }
 
     /**
+     * Separa o(s) preço(s) principal(is) (coluna da esquerda, como já era) das conversões de
+     * moeda estrangeira — Dólar/Peso — numa coluna à direita, lado a lado dentro do mesmo
+     * price_container. Só chamada quando existe pelo menos uma conversão (ver populatePriceSlots);
+     * sem moeda estrangeira o comportamento continua idêntico ao de antes (tudo empilhado).
+     */
+    private fun addPriceSlotColumns(container: LinearLayout, mainViews: List<Pair<View, Double>>, currencyViews: List<Pair<View, Double>>) {
+        val row = LinearLayout(container.context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        }
+        val leftColumn = LinearLayout(container.context).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        }
+        val rightColumn = LinearLayout(container.context).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                marginStart = dpToPx(10)
+            }
+        }
+        // Bug real (2026-11-17): item_price_slot.xml tem o root "match_parent" — e o TCServer
+        // (único caminho que gera conversão de moeda) sempre usa price_check_multi_price.xml,
+        // cujo price_container vive dentro de um ScrollView. Só trocar o width pra WRAP_CONTENT
+        // não bastou: o ScrollView remede o conteúdo numa passada depois, e o "match_parent"
+        // original cascateava de novo, estourando a coluna esquerda e zerando a direita — sem
+        // nenhum erro, só colapsando visualmente (confirmado com uiautomator: os dois rótulos
+        // caíam na mesma posição X). Mede a largura NATURAL de cada caixa manualmente e fixa um
+        // valor em pixels (não uma palavra-chave) — assim nenhuma remedição posterior tem
+        // ambiguidade pra resolver.
+        // Bug real (2026-11-17, Novex/Colágeno): o valor exibido quando esta função mede a caixa
+        // ainda é "0,00" — animatePriceCount só põe o texto FINAL em frames futuros do
+        // ValueAnimator (ainda não disparados nesta mesma chamada síncrona). Peso/Dólar têm bem
+        // mais dígitos que o "0,00" inicial (ex.: conversão de R$20 vira "15880,88" em peso), e a
+        // largura fixada com o texto errado cortava o valor real assim que a animação chegava lá
+        // ("$3..."). Troca o texto pro valor final só pra medir, mede, e devolve pro estado que a
+        // animação espera encontrar — tudo síncrono, sem nenhum frame desenhado entre o troca-mede-
+        // devolve, então não pisca.
+        // Peso é a conversão com mais dígitos de longe (cotação alta faz R$20 virar "15880,88") —
+        // o "fit" de emphasizePriceSlot já encolhe por quantidade de dígitos do PRÓPRIO valor,
+        // mas foi calibrado antes de existir conversão de moeda, pra no máximo ~4 dígitos. Com 5+
+        // dígitos a caixa ainda estourava a tela (achado real, 2026-11-17, Colágeno: "15880,88"
+        // saía da borda direita). Trava final por largura disponível: mede, e se passar do teto,
+        // encolhe a fonte na proporção exata que falta e remede — robusto a qualquer cotação,
+        // não só aos dígitos de hoje.
+        val maxBoxWidthPx = dpToPx(300)
+        // Achado real (2026-11-17, Colágeno): view.measure(UNSPECIFIED) nesta árvore sempre
+        // devolvia um valor perto do minWidth=150dp da caixa (item_price_slot.xml), IGNORANDO o
+        // texto real já aplicado nos TextViews — confirmado comparando com
+        // TextView.paint.measureText() dos mesmos textos, que SEMPRE refletiu a diferença real
+        // entre "107,99" e "15880,88" (o view.measure() não). Por isso a largura "fixada" não
+        // tinha nenhuma relação com o conteúdo, e caixas com muitos dígitos (peso, cotação alta)
+        // estouravam a tela mesmo com o teto em vigor. Mede via Paint.measureText direto — não
+        // depende do pipeline de layout do Android, só do texto e do tamanho de fonte atual.
+        fun fixMeasuredWidth(view: View, finalValue: Double) {
+            val unitLabelTv = view.findViewById<TextView>(R.id.slotUnitLabel)
+            val currencyTv = view.findViewById<TextView>(R.id.slotCurrency)
+            val integerTv = view.findViewById<TextView>(R.id.slotIntegerPrice)
+            val decimalTv = view.findViewById<TextView>(R.id.slotDecimalPrice)
+
+            val formatted = String.format(Locale.US, "%.2f", finalValue)
+            val parts = formatted.split(".")
+            val integerText = parts[0]
+            val decimalText = ",${parts[1]}"
+
+            fun naturalWidthPx(): Int {
+                val unitLabelW = unitLabelTv?.text?.toString()?.split("\n")
+                    ?.maxOfOrNull { unitLabelTv.paint.measureText(it) } ?: 0f
+                val currencyW = currencyTv?.paint?.measureText(currencyTv.text?.toString().orEmpty()) ?: 0f
+                val integerW = integerTv?.paint?.measureText(integerText) ?: 0f
+                val decimalW = decimalTv?.paint?.measureText(decimalText) ?: 0f
+                // paddingStart+paddingEnd (16dp+16dp) e layout_margin (4dp*2 lados) do slotPriceBox,
+                // + marginEnd do unitLabel (8dp) e da moeda (3dp) — ver item_price_slot.xml.
+                val fixedSpacing = dpToPx(32) + dpToPx(8) + dpToPx(8) + dpToPx(3)
+                return (unitLabelW + currencyW + integerW + decimalW).toInt() + fixedSpacing
+            }
+
+            var width = naturalWidthPx()
+            if (width > maxBoxWidthPx) {
+                val scale = maxBoxWidthPx.toFloat() / width.toFloat()
+                // getTextSize() devolve em PX; o setter de 1 argumento interpreta em SP — misturar
+                // os dois reescala errado (bug clássico do Android). Usa COMPLEX_UNIT_PX nos dois
+                // lados pra não ter conversão de unidade nenhuma no meio.
+                listOfNotNull(integerTv, decimalTv, currencyTv).forEach {
+                    it.setTextSize(TypedValue.COMPLEX_UNIT_PX, it.textSize * scale)
+                }
+                width = naturalWidthPx()
+            }
+            val lp = view.layoutParams as? ViewGroup.LayoutParams
+                ?: ViewGroup.LayoutParams(width, ViewGroup.LayoutParams.WRAP_CONTENT)
+            lp.width = width
+            view.layoutParams = lp
+        }
+        mainViews.forEach { (view, value) -> fixMeasuredWidth(view, value); leftColumn.addView(view) }
+        currencyViews.forEach { (view, value) -> fixMeasuredWidth(view, value); rightColumn.addView(view) }
+        row.addView(leftColumn)
+        row.addView(rightColumn)
+        container.addView(row)
+    }
+
+    /**
      * Pinta a caixa do preço (fundo) e calcula a cor do texto sempre pelo contraste real do
      * fundo: fundo claro -> texto escuro; fundo escuro/colorido -> texto claro. A cor do fundo
      * não é fixa: clube=verde, oferta/promo=vermelho, melhor preço "normal"=cor de destaque
@@ -4297,8 +5158,16 @@ class PlayerActivity : ComponentActivity() {
         isClub: Boolean,
         isPromo: Boolean,
         accentColor: Int,
+        isUsd: Boolean = false,
+        isArs: Boolean = false,
     ) {
         val boxColor = when {
+            // Pedido do usuário (2026-11-17): Dólar sempre vermelho, Peso sempre azul — cor fixa,
+            // igual ao Mupa Studio (sample.ts RED/BLUE) — não a cor de destaque do produto, que
+            // varia e pode até coincidir com o fundo do painel (ficou "sem caixa" num teste real
+            // com Oral-B). O preço em real (isBest) continua com a cor extraída da imagem.
+            isUsd -> Color.parseColor("#C8102E")
+            isArs -> Color.parseColor("#1E4FD8")
             isClub -> Color.parseColor("#10b981")
             isPromo -> Color.parseColor("#ef4444")
             isBest -> accentColor
@@ -4329,6 +5198,7 @@ class PlayerActivity : ComponentActivity() {
         isBest: Boolean,
         compact: Boolean = false,
         value: Double = 0.0,
+        isCurrencyConversion: Boolean = false,
     ) {
         // Preços bem maiores para leitura a distância (item 1). O melhor preço é o
         // maior destaque da tela; com 3+ tipos, reduz um pouco (compact) pra caber sem rolar.
@@ -4346,18 +5216,29 @@ class PlayerActivity : ComponentActivity() {
         // estourava a caixa — reduz mais 30% (em cima do tamanho "compact" já existente),
         // em todos os slots (melhor preço e secundários), não só na fonte "fit" por dígitos.
         val compactShrink = if (compact) 0.7f else 1.0f
-        if (isBest) {
+        // Pedido do usuário (2026-11-13): +30% em cima do tamanho já existente (que já tinha um
+        // +25% de 2026-10-23 pra leitura a distância — este é cumulativo, não substitui aquele).
+        // Pedido do usuário (2026-11-17): +20% de novo em cima disso tudo, junto da troca de
+        // fonte pra Bebas Neue (ver BrandTypography) — "sizeBump2" é só mais uma camada, mesmo
+        // princípio das anteriores.
+        val emphasisBump = 1.3f
+        val sizeBump2 = 1.2f
+        // Pedido do usuário (2026-11-17): +50% na fonte das caixas de Dólar/Peso — e, no mesmo
+        // pedido, também no preço principal (isBest) deste layout, pra manter a proporção visual
+        // entre as 3 caixas (sem isso, PREÇO ficava menor que Dólar/Peso por comparação).
+        val currencyBump = if (isBest || isCurrencyConversion) 1.5f else 1.0f
+        if (isBest || isCurrencyConversion) {
             label.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 15f else 18f)
             label.alpha = 1f
-            currency?.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 33f else 43f) * fit * compactShrink)
-            integer.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 83f else 110f) * fit * compactShrink)
-            decimal.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 45f else 58f) * fit * compactShrink)
+            currency?.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 33f else 43f) * fit * compactShrink * emphasisBump * sizeBump2 * currencyBump)
+            integer.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 83f else 110f) * fit * compactShrink * emphasisBump * sizeBump2 * currencyBump)
+            decimal.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 45f else 58f) * fit * compactShrink * emphasisBump * sizeBump2 * currencyBump)
         } else {
             label.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) 12f else 14f)
             label.alpha = 0.85f
-            currency?.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 23f else 28f) * fit * compactShrink)
-            integer.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 50f else 65f) * fit * compactShrink)
-            decimal.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 28f else 35f) * fit * compactShrink)
+            currency?.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 23f else 28f) * fit * compactShrink * emphasisBump * sizeBump2)
+            integer.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 50f else 65f) * fit * compactShrink * emphasisBump * sizeBump2)
+            decimal.setTextSize(TypedValue.COMPLEX_UNIT_SP, (if (compact) 28f else 35f) * fit * compactShrink * emphasisBump * sizeBump2)
         }
     }
 

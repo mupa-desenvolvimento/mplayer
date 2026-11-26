@@ -21,6 +21,7 @@ import io.mockk.unmockkAll
 import io.mockk.spyk
 import io.mockk.verify
 import io.mockk.coVerify
+import com.mupa.player.enterprise.managers.ManifestFetchResult
 import com.mupa.player.enterprise.managers.ManifestManager
 import kotlinx.coroutines.runBlocking
 import okhttp3.ResponseBody.Companion.toResponseBody
@@ -387,7 +388,7 @@ class FacialRecognitionLicensingTest {
         deviceIdField.set(activity, "test-device-id")
 
         val manifestManager = mockk<ManifestManager>(relaxed = true)
-        coEvery { manifestManager.fetchManifest(any()) } returns ""
+        coEvery { manifestManager.fetchManifest(any()) } returns ManifestFetchResult.Success("")
         val manifestManagerField = PlayerActivity::class.java.getDeclaredField("manifestManager")
         manifestManagerField.isAccessible = true
         manifestManagerField.set(activity, manifestManager)
@@ -424,7 +425,7 @@ class FacialRecognitionLicensingTest {
         deviceIdField.set(activity, "test-device-id")
 
         val manifestManager = mockk<ManifestManager>(relaxed = true)
-        coEvery { manifestManager.fetchManifest(any()) } returns ""
+        coEvery { manifestManager.fetchManifest(any()) } returns ManifestFetchResult.Success("")
         val manifestManagerField = PlayerActivity::class.java.getDeclaredField("manifestManager")
         manifestManagerField.isAccessible = true
         manifestManagerField.set(activity, manifestManager)

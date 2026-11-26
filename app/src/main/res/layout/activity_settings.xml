@@ -557,20 +557,84 @@
                         android:textColor="@color/mupa_cyan"
                         app:strokeColor="@color/mupa_cyan" />
 
-                    <com.google.android.material.switchmaterial.SwitchMaterial
-                        android:id="@+id/switchGertecScanner"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="12dp"
-                        android:text="Leitor integrado Gertec (SK100)"
-                        android:textColor="@color/enterprise_on" />
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
+            <!-- Card: Importar XML da Consulta (Mupa Studio) — cola o XML exportado pelo botão
+                 "XML da consulta" do Studio (mupa-studio-query: steps de authenticate/
+                 lookup_price) pra testar a integração de um cliente novo sem precisar de código
+                 nativo. Mesma prioridade/padrão do card TCServer acima (blank = desativado). -->
+            <com.google.android.material.card.MaterialCardView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="16dp"
+                app:cardBackgroundColor="@color/enterprise_surface"
+                app:cardCornerRadius="12dp"
+                app:cardElevation="0dp"
+                app:strokeWidth="1dp"
+                app:strokeColor="#222C3D">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="16dp">
 
                     <com.google.android.material.textview.MaterialTextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Ativa o leitor de código de barras via SDK EasyLayer. Usar apenas em terminais Gertec SK."
+                        android:text="Importar XML da Consulta (Mupa Studio)"
+                        android:textColor="@color/mupa_cyan"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        android:layout_marginBottom="4dp"/>
+
+                    <com.google.android.material.textview.MaterialTextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Cole aqui o XML do botão &quot;XML da consulta&quot; do Studio para testar uma integração nova sem código. Tem prioridade sobre a empresa/manifesto. Deixe vazio para desativar."
                         android:textColor="#9CA3AF"
-                        android:textSize="12sp" />
+                        android:textSize="12sp"
+                        android:layout_marginBottom="12dp"/>
+
+                    <com.google.android.material.textfield.TextInputLayout
+                        android:id="@+id/inputLayoutCustomQueryXml"
+                        style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:hint="XML da consulta"
+                        app:hintTextColor="@color/mupa_cyan"
+                        app:boxStrokeColor="@color/mupa_cyan">
+
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/editCustomQueryXml"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:inputType="textMultiLine"
+                            android:minLines="4"
+                            android:maxLines="10"
+                            android:gravity="top"
+                            android:fontFamily="monospace"
+                            android:textSize="11sp"
+                            android:textColor="@color/enterprise_on" />
+                    </com.google.android.material.textfield.TextInputLayout>
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btnSaveCustomQueryXml"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="Importar e Salvar"
+                        android:backgroundTint="@color/mupa_cyan"
+                        android:textColor="@color/enterprise_bg" />
+
+                    <com.google.android.material.textview.MaterialTextView
+                        android:id="@+id/txtCustomQueryXmlStatus"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:textColor="#9CA3AF"
+                        android:textSize="12sp"
+                        android:layout_marginTop="8dp"/>
 
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
@@ -606,7 +670,7 @@
                     <com.google.android.material.textview.MaterialTextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Endereço do servidor local da filial (bridge pro sistema da UnidaSul). Porta padrão 5000 se não informada. Deixe vazio para desativar."
+                        android:text="Host da API oficial da filial (ex: f002srv01.filial.unidasul.local). Deixe vazio para desativar."
                         android:textColor="#9CA3AF"
                         android:textSize="12sp"
                         android:layout_marginBottom="12dp"/>
@@ -622,7 +686,7 @@
                             android:layout_width="0dp"
                             android:layout_height="wrap_content"
                             android:layout_weight="1"
-                            android:hint="IP ou IP:Porta (ex: 192.168.0.10)"
+                            android:hint="Host (ex: f002srv01.filial.unidasul.local)"
                             app:hintTextColor="@color/mupa_cyan"
                             app:boxStrokeColor="@color/mupa_cyan">
 
@@ -654,6 +718,122 @@
                         style="@style/Widget.MaterialComponents.Button.OutlinedButton"
                         android:textColor="@color/mupa_cyan"
                         app:strokeColor="@color/mupa_cyan" />
+
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
+            <!-- Card 2b: Moeda Estrangeira (conversão via TCServer, chaves "moeda_dolar"/"moeda_peso") -->
+            <com.google.android.material.card.MaterialCardView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="16dp"
+                app:cardBackgroundColor="@color/enterprise_surface"
+                app:cardCornerRadius="12dp"
+                app:cardElevation="0dp"
+                app:strokeWidth="1dp"
+                app:strokeColor="#222C3D">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="16dp">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Moeda Estrangeira (Dólar/Peso)"
+                        android:textColor="@color/mupa_cyan"
+                        android:textSize="15sp"
+                        android:textStyle="bold"
+                        android:layout_marginBottom="4dp"/>
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Converte o preço usando a cotação cadastrada no TCServer (barcode &quot;moeda_dolar&quot;/&quot;moeda_peso&quot;, coluna Preco1 = reais por unidade da moeda)."
+                        android:textColor="#9CA3AF"
+                        android:textSize="12sp"
+                        android:layout_marginBottom="12dp"/>
+
+                    <com.google.android.material.switchmaterial.SwitchMaterial
+                        android:id="@+id/switchForeignCurrency"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Habilitar Moeda Estrangeira"
+                        android:textColor="@color/enterprise_on"
+                        android:textSize="15sp"
+                        app:thumbTint="@color/mupa_cyan"
+                        app:trackTint="@color/mupa_cyan_dark"
+                        android:layout_marginBottom="8dp"/>
+
+                    <com.google.android.material.switchmaterial.SwitchMaterial
+                        android:id="@+id/switchShowUsd"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Mostrar Dólar (US$)"
+                        android:textColor="@color/enterprise_on"
+                        android:textSize="15sp"
+                        app:thumbTint="@color/mupa_cyan"
+                        app:trackTint="@color/mupa_cyan_dark"
+                        android:layout_marginBottom="8dp"/>
+
+                    <com.google.android.material.switchmaterial.SwitchMaterial
+                        android:id="@+id/switchShowArs"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Mostrar Peso ($)"
+                        android:textColor="@color/enterprise_on"
+                        android:textSize="15sp"
+                        app:thumbTint="@color/mupa_cyan"
+                        app:trackTint="@color/mupa_cyan_dark"/>
+
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
+            <!-- Card 2c: Modo Publicidade das Imagens (arte de IA do produtos-imgs/Gemini) -->
+            <com.google.android.material.card.MaterialCardView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="16dp"
+                app:cardBackgroundColor="@color/enterprise_surface"
+                app:cardCornerRadius="12dp"
+                app:cardElevation="0dp"
+                app:strokeWidth="1dp"
+                app:strokeColor="#222C3D">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="16dp">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Modo Publicidade das Imagens"
+                        android:textColor="@color/mupa_cyan"
+                        android:textSize="15sp"
+                        android:textStyle="bold"
+                        android:layout_marginBottom="4dp"/>
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Busca a arte publicitária gerada por IA pra cada produto (vira o fundo da tela toda). Desligado, mostra só a foto crua do produto."
+                        android:textColor="#9CA3AF"
+                        android:textSize="12sp"
+                        android:layout_marginBottom="12dp"/>
+
+                    <com.google.android.material.switchmaterial.SwitchMaterial
+                        android:id="@+id/switchAdArtwork"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Habilitar Modo Publicidade"
+                        android:textColor="@color/enterprise_on"
+                        android:textSize="15sp"
+                        app:thumbTint="@color/mupa_cyan"
+                        app:trackTint="@color/mupa_cyan_dark"/>
 
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>

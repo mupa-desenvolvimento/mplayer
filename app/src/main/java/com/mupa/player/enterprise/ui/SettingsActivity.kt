@@ -6,7 +6,10 @@ import android.content.Intent
 import android.os.Bundle
 import android.os.Process
 import android.view.View
+import android.view.ViewGroup
+import android.widget.TextView
 import android.widget.Toast
+import com.google.android.material.card.MaterialCardView
 import androidx.activity.ComponentActivity
 import androidx.datastore.preferences.core.edit
 import androidx.lifecycle.lifecycleScope
@@ -14,13 +17,14 @@ import com.mupa.player.enterprise.databinding.ActivitySettingsBinding
 import com.mupa.player.enterprise.managers.DeviceCache
 import com.mupa.player.enterprise.managers.DeviceCacheManager
 import com.mupa.player.enterprise.managers.DeviceIdentityManager
-import com.mupa.player.enterprise.managers.GertecScannerManager
 import com.mupa.player.enterprise.managers.ManifestFetchResult
 import com.mupa.player.enterprise.managers.ManifestManager
 import com.mupa.player.enterprise.managers.SettingsManager
 import com.mupa.player.enterprise.price.PriceConfig
 import com.mupa.player.enterprise.price.PriceConfigParser
+import com.mupa.player.enterprise.price.PriceConfigXmlImporter
 import com.mupa.player.enterprise.price.PriceQueryEngine
+import com.mupa.player.enterprise.price.unidasulBuildUrl
 import com.mupa.player.enterprise.storage.db.AppDatabase
 import com.mupa.player.enterprise.storage.settingsDataStore
 import com.mupa.player.enterprise.audience.AudienceSyncManager
@@ -47,11 +51,53 @@ class SettingsActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         binding = ActivitySettingsBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        setupCollapsibleCards()
 
         lifecycleScope.launch {
             deviceId = DeviceIdentityManager(applicationContext).getPersistentId().trim()
             loadDeviceInformation()
             setupListeners()
+        }
+    }
+
+    // Pedido do usuário (2026-11-13): tela de Configurações minimizada por padrão, com um
+    // ícone pra expandir cada seção — tela tinha ~12 cards sempre abertos ao mesmo tempo,
+    // exigindo muito scroll pra achar o campo certo. Genérico/baseado em código em vez de
+    // reescrever os 12 blocos de activity_settings.xml à mão: acha todo MaterialCardView da
+    // tela (não precisam de nenhum id/atributo novo no XML), e em cada um assume o padrão já
+    // usado em TODOS os cards hoje (1º filho do LinearLayout interno = título; o resto = corpo
+    // a esconder). Cards com estrutura fora desse padrão são ignorados (nunca quebram a tela).
+    private fun setupCollapsibleCards() {
+        val cards = mutableListOf<MaterialCardView>()
+        fun collectCards(view: View) {
+            if (view is MaterialCardView) {
+                cards.add(view)
+                return
+            }
+            if (view is ViewGroup) {
+                for (i in 0 until view.childCount) collectCards(view.getChildAt(i))
+            }
+        }
+        collectCards(binding.root)
+
+        for (card in cards) {
+            val content = (card.getChildAt(0) as? ViewGroup) ?: continue
+            if (content.childCount < 2) continue
+            val header = content.getChildAt(0) as? TextView ?: continue
+            val bodyViews = (1 until content.childCount).map { content.getChildAt(it) }
+
+            bodyViews.forEach { it.visibility = View.GONE }
+            header.setCompoundDrawablesWithIntrinsicBounds(0, 0, com.mupa.player.enterprise.R.drawable.ic_chevron_down, 0)
+            header.compoundDrawablePadding = 16
+            header.isClickable = true
+            header.isFocusable = true
+
+            header.setOnClickListener {
+                val expanding = bodyViews.firstOrNull()?.visibility != View.VISIBLE
+                bodyViews.forEach { v -> v.visibility = if (expanding) View.VISIBLE else View.GONE }
+                val chevron = if (expanding) com.mupa.player.enterprise.R.drawable.ic_chevron_up else com.mupa.player.enterprise.R.drawable.ic_chevron_down
+                header.setCompoundDrawablesWithIntrinsicBounds(0, 0, chevron, 0)
+            }
         }
     }
 
@@ -112,24 +158,22 @@ class SettingsActivity : ComponentActivity() {
             binding.editUnidasulServer.setText(
                 runCatching { SettingsManager(applicationContext).getUnidasulServerAddress() }.getOrDefault(""),
             )
-            // SK100/Gertec: o leitor tem que ficar sempre ligado (pedido do usuário,
-            // 2026-10-04) — o toggle aqui vira só um indicador travado em vez de uma opção
-            // real, pra não dar a impressão de que dá pra desligar. Em qualquer outro
-            // terminal (G-BOT, X96, ST-103, sem esse leitor embarcado) o toggle continua
-            // normal. Ver PlayerActivity.onResume, que ignora o valor salvo e força
-            // ligado quando GertecScannerManager.isGertecDevice() é true.
-            if (GertecScannerManager.isGertecDevice()) {
-                binding.switchGertecScanner.isChecked = true
-                binding.switchGertecScanner.isEnabled = false
-            } else {
-                binding.switchGertecScanner.isChecked =
-                    runCatching { SettingsManager(applicationContext).getGertecScannerEnabled() }.getOrDefault(false)
-            }
+            binding.editCustomQueryXml.setText(
+                runCatching { SettingsManager(applicationContext).getCustomQueryXml() }.getOrDefault(""),
+            )
             binding.editHeartbeatIdleMinutes.setText(
                 runCatching { SettingsManager(applicationContext).getHeartbeatIdleMinutes() }
                     .getOrDefault(SettingsManager.DEFAULT_HEARTBEAT_IDLE_MINUTES)
                     .toString(),
             )
+            binding.switchForeignCurrency.isChecked =
+                runCatching { SettingsManager(applicationContext).getForeignCurrencyEnabled() }.getOrDefault(false)
+            binding.switchShowUsd.isChecked =
+                runCatching { SettingsManager(applicationContext).getShowUsdCurrency() }.getOrDefault(true)
+            binding.switchShowArs.isChecked =
+                runCatching { SettingsManager(applicationContext).getShowArsCurrency() }.getOrDefault(true)
+            binding.switchAdArtwork.isChecked =
+                runCatching { SettingsManager(applicationContext).getAdArtworkEnabled() }.getOrDefault(true)
             binding.btnTestFaceRecognition.visibility = if (settings?.devMode == true) View.VISIBLE else View.GONE
             
             // Read Maintenance Mode setting
@@ -303,6 +347,29 @@ class SettingsActivity : ComponentActivity() {
             }
         }
 
+        binding.btnSaveCustomQueryXml.setOnClickListener {
+            val xml = binding.editCustomQueryXml.text.toString().trim()
+            if (xml.isBlank()) {
+                lifecycleScope.launch {
+                    SettingsManager(applicationContext).setCustomQueryXml("")
+                    binding.txtCustomQueryXmlStatus.text = "Desativado. Consulta volta a usar a empresa/manifesto."
+                }
+                return@setOnClickListener
+            }
+            val parsed = runCatching { PriceConfigXmlImporter.parse(xml) }.getOrNull()
+            if (parsed == null) {
+                binding.txtCustomQueryXmlStatus.text = "XML inválido — confira a tag raiz <mupa-studio-query> e os steps."
+                return@setOnClickListener
+            }
+            lifecycleScope.launch {
+                SettingsManager(applicationContext).setCustomQueryXml(xml)
+                binding.txtCustomQueryXmlStatus.text =
+                    "Importado: integration=${parsed.integration}, ${parsed.steps.size} step(s). " +
+                        "Reabra o app para aplicar."
+                Toast.makeText(this@SettingsActivity, "XML da consulta importado e salvo.", Toast.LENGTH_LONG).show()
+            }
+        }
+
         binding.btnTestTcServer.setOnClickListener {
             val address = binding.editTcServer.text.toString().trim()
             if (address.isBlank()) {
@@ -313,8 +380,13 @@ class SettingsActivity : ComponentActivity() {
             binding.txtSyncProgress.visibility = View.VISIBLE
             binding.txtSyncProgress.text = "Testando conexão com $baseAddr..."
             lifecycleScope.launch(Dispatchers.IO) {
+                // Achado real (2026-10-21): o TCServer não expõe /health nem JSON — é o
+                // endpoint HTML nativo dele (webroot/index.jsp), o mesmo que a página de
+                // consulta web do TCServer usa. "Consulta de Barcode" aparece tanto em
+                // product.jsp (encontrado) quanto em notfound.jsp (não encontrado), então
+                // serve como confirmação de que é mesmo um TCServer respondendo.
                 val result = runCatching {
-                    val url = java.net.URL("http://$baseAddr/health")
+                    val url = java.net.URL("http://$baseAddr/barcode?param=0000000000000")
                     val conn = url.openConnection() as java.net.HttpURLConnection
                     conn.connectTimeout = 3000
                     conn.readTimeout = 3000
@@ -326,9 +398,8 @@ class SettingsActivity : ComponentActivity() {
                 }
                 withContext(Dispatchers.Main) {
                     result.onSuccess { (code, text) ->
-                        if (code == 200 && text.contains("\"status\"")) {
-                            val prod = Regex("\"produtos\"\\s*:\\s*(\\d+)").find(text)?.groupValues?.get(1) ?: "?"
-                            binding.txtSyncProgress.text = "Conexão OK! TCServer Mupa online ($prod produtos)."
+                        if (code == 200 && text.contains("Consulta de Barcode")) {
+                            binding.txtSyncProgress.text = "Conexão OK! TCServer Mupa online."
                             Toast.makeText(this@SettingsActivity, "TCServer Mupa conectado!", Toast.LENGTH_SHORT).show()
                         } else {
                             binding.txtSyncProgress.text = "Conectou (HTTP $code), mas resposta inesperada."
@@ -344,7 +415,7 @@ class SettingsActivity : ComponentActivity() {
         binding.btnSaveUnidasulServer.setOnClickListener {
             val address = binding.editUnidasulServer.text.toString().trim()
             if (address.isNotBlank() && !address.matches(Regex("""^[\w.\-]+(:\d{1,5})?$"""))) {
-                Toast.makeText(this, "Formato inválido. Use IP ou IP:Porta (ex: 192.168.0.10:5000)", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Formato inválido. Use um host (ex: f002srv01.filial.unidasul.local)", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
             lifecycleScope.launch {
@@ -358,22 +429,31 @@ class SettingsActivity : ComponentActivity() {
             }
         }
 
-        // Sem endpoint de health dedicado no servidor da UnidaSul (achado do .aia — só existe
-        // /get_price) — testa batendo nele mesmo com um EAN qualquer; qualquer JSON de volta
-        // com "success" ou "error" já prova que o bridge da loja está respondendo.
+        // API oficial UnidaSul.Api.TerminalConsulta (2026-11-11, substituiu o bridge local
+        // /get_price — ver PriceQueryEngine.queryUnidasul) tem endpoint de status dedicado
+        // (GET /ObterStatus, sem autenticação dentro da rede da loja) — usa ele pro teste
+        // de conexão em vez de bater em ObterDadosPrecoProduto com um EAN fake.
         binding.btnTestUnidasulServer.setOnClickListener {
             val address = binding.editUnidasulServer.text.toString().trim()
             if (address.isBlank()) {
-                Toast.makeText(this, "Digite o endereço do servidor da UnidaSul primeiro.", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Digite o host do servidor da UnidaSul primeiro.", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
-            val baseAddr = address.removePrefix("http://").removePrefix("https://").trimEnd('/')
-            val hostPort = if (baseAddr.contains(":")) baseAddr else "$baseAddr:5000"
+            val host = address.removePrefix("http://").removePrefix("https://").trimEnd('/')
+            // Só os 3 dígitos da filial importam — a URL de verdade é sempre
+            // "f{filial}srvhml01.filial.unidasul.local/UnidaSul.Api.TerminalConsulta" (achado
+            // real 2026-11-13, ver comentário de com.mupa.player.enterprise.price.unidasulBuildUrl),
+            // reusada aqui em vez de duplicar a regra.
+            val testUrl = unidasulBuildUrl(host, "ObterStatus")
+            if (testUrl == null) {
+                Toast.makeText(this, "Host inválido — não achei os 3 dígitos da filial (ex: f002...).", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
             binding.txtSyncProgress.visibility = View.VISIBLE
-            binding.txtSyncProgress.text = "Testando conexão com $hostPort..."
+            binding.txtSyncProgress.text = "Testando conexão com $host..."
             lifecycleScope.launch(Dispatchers.IO) {
                 val result = runCatching {
-                    val url = java.net.URL("http://$hostPort/get_price?num_filial=000&ean=0000000000000")
+                    val url = java.net.URL(testUrl)
                     val conn = url.openConnection() as java.net.HttpURLConnection
                     conn.connectTimeout = 3000
                     conn.readTimeout = 3000
@@ -386,8 +466,8 @@ class SettingsActivity : ComponentActivity() {
                 }
                 withContext(Dispatchers.Main) {
                     result.onSuccess { (code, text) ->
-                        if (text.contains("\"success\"") || text.contains("\"error\"")) {
-                            binding.txtSyncProgress.text = "Conexão OK! Servidor da loja respondeu (HTTP $code)."
+                        if (code in 200..299 && text.contains("API Online", ignoreCase = true)) {
+                            binding.txtSyncProgress.text = "Conexão OK! API UnidaSul online (HTTP $code)."
                             Toast.makeText(this@SettingsActivity, "Servidor UnidaSul conectado!", Toast.LENGTH_SHORT).show()
                         } else {
                             binding.txtSyncProgress.text = "Conectou (HTTP $code), mas resposta inesperada."
@@ -400,23 +480,35 @@ class SettingsActivity : ComponentActivity() {
             }
         }
 
-        binding.switchGertecScanner.setOnCheckedChangeListener { _, isChecked ->
-            lifecycleScope.launch {
-                SettingsManager(applicationContext).setGertecScannerEnabled(isChecked)
-                Toast.makeText(
-                    this@SettingsActivity,
-                    if (isChecked) "Leitor Gertec será ativado ao voltar para o player" else "Leitor Gertec desativado",
-                    Toast.LENGTH_SHORT,
-                ).show()
-            }
-        }
-
         binding.switchDevMode.setOnCheckedChangeListener { _, isChecked ->
             lifecycleScope.launch {
                 SettingsManager(applicationContext).setDevMode(isChecked)
                 binding.btnTestFaceRecognition.visibility = if (isChecked) View.VISIBLE else View.GONE
                 Toast.makeText(this@SettingsActivity, if (isChecked) "Modo Dev Ativado" else "Modo Dev Desativado", Toast.LENGTH_SHORT).show()
             }
+        }
+
+        binding.switchForeignCurrency.setOnCheckedChangeListener { _, isChecked ->
+            lifecycleScope.launch {
+                SettingsManager(applicationContext).setForeignCurrencyEnabled(isChecked)
+                Toast.makeText(
+                    this@SettingsActivity,
+                    if (isChecked) "Moeda estrangeira ativada" else "Moeda estrangeira desativada",
+                    Toast.LENGTH_SHORT,
+                ).show()
+            }
+        }
+
+        binding.switchShowUsd.setOnCheckedChangeListener { _, isChecked ->
+            lifecycleScope.launch { SettingsManager(applicationContext).setShowUsdCurrency(isChecked) }
+        }
+
+        binding.switchShowArs.setOnCheckedChangeListener { _, isChecked ->
+            lifecycleScope.launch { SettingsManager(applicationContext).setShowArsCurrency(isChecked) }
+        }
+
+        binding.switchAdArtwork.setOnCheckedChangeListener { _, isChecked ->
+            lifecycleScope.launch { SettingsManager(applicationContext).setAdArtworkEnabled(isChecked) }
         }
 
         binding.btnSavePriceServer.setOnClickListener {

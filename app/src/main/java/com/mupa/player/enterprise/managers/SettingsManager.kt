@@ -43,13 +43,17 @@ class SettingsManager(private val context: Context) {
         val demoMode = booleanPreferencesKey("demo_mode")
         val tcServerAddress = stringPreferencesKey("tc_server_address")
         val unidasulServerAddress = stringPreferencesKey("unidasul_server_address")
-        val gertecScannerEnabled = booleanPreferencesKey("gertec_scanner_enabled")
+        val customQueryXml = stringPreferencesKey("custom_query_xml")
         val imageSearchEnabled = booleanPreferencesKey("image_search_enabled")
         val heartbeatIdleMinutes = intPreferencesKey("heartbeat_idle_minutes")
         val priceHost = stringPreferencesKey("price_host")
         val pricePort = stringPreferencesKey("price_port")
         val imageHost = stringPreferencesKey("image_host")
         val imagePort = stringPreferencesKey("image_port")
+        val foreignCurrencyEnabled = booleanPreferencesKey("foreign_currency_enabled")
+        val showUsdCurrency = booleanPreferencesKey("show_usd_currency")
+        val showArsCurrency = booleanPreferencesKey("show_ars_currency")
+        val adArtworkEnabled = booleanPreferencesKey("ad_artwork_enabled")
     }
 
     val settingsFlow: Flow<AppSettings> =
@@ -139,12 +143,69 @@ class SettingsManager(private val context: Context) {
         return context.settingsDataStore.data.first()[Keys.tcServerAddress]?.trim().orEmpty()
     }
 
-    // Servidor local da loja (UnidaSul) — mesmo padrão de tc_server_address acima,
-    // "ip" ou "ip:porta" (porta default 5000, ver PriceQueryEngine.queryUnidasul).
-    // Reverse-engenheirado de App_TC_Unidasul.aia (2026-10-13) — ver
-    // docs/FEATURE_INTEGRACAO_UNIDASUL.md.
+    // Importador manual do "XML da consulta" (Mupa Studio, botão "XML da consulta",
+    // mupa-studio-query): cola/importa o XML inteiro aqui pra testar uma integração nova sem
+    // precisar de código nativo — mesmo padrão de tc_server_address acima (blank = desativado,
+    // tem prioridade sobre a empresa/manifesto). Ver PriceConfigXmlImporter.
+    suspend fun setCustomQueryXml(value: String) {
+        context.settingsDataStore.edit { it[Keys.customQueryXml] = value.trim() }
+    }
+
+    suspend fun getCustomQueryXml(): String {
+        return context.settingsDataStore.data.first()[Keys.customQueryXml]?.trim().orEmpty()
+    }
+
+    // Host da API oficial UnidaSul.Api.TerminalConsulta da filial (ex:
+    // "f002srv01.filial.unidasul.local") — mesmo padrão de tc_server_address acima
+    // (blank = integração desativada). Trocou de bridge local scraped (/get_price,
+    // reverse-engenheirado de App_TC_Unidasul.aia em 2026-10-13) pra API oficial em
+    // 2026-11-11 — ver PriceQueryEngine.queryUnidasul e docs/FEATURE_INTEGRACAO_UNIDASUL.md.
     suspend fun setUnidasulServerAddress(value: String) {
         context.settingsDataStore.edit { it[Keys.unidasulServerAddress] = value.trim() }
+    }
+
+    // Conversão de moeda estrangeira via TCServer: duas linhas especiais cadastradas na mesma
+    // tabela de produtos do TCServer (barcode literal "moeda_dolar"/"moeda_peso", "Preco1" =
+    // quantos reais vale 1 unidade daquela moeda — ex: "moeda_dolar|Cotação Dólar|5,34|"). Ver
+    // PriceQueryEngine.fetchCurrencyQuote. "Mostrar X" controla só a exibição; a busca da
+    // cotação só acontece se a chave mestre (foreignCurrencyEnabled) estiver ligada.
+    suspend fun setForeignCurrencyEnabled(enabled: Boolean) {
+        context.settingsDataStore.edit { it[Keys.foreignCurrencyEnabled] = enabled }
+    }
+
+    suspend fun getForeignCurrencyEnabled(): Boolean {
+        return context.settingsDataStore.data.first()[Keys.foreignCurrencyEnabled] ?: false
+    }
+
+    suspend fun setShowUsdCurrency(enabled: Boolean) {
+        context.settingsDataStore.edit { it[Keys.showUsdCurrency] = enabled }
+    }
+
+    suspend fun getShowUsdCurrency(): Boolean {
+        return context.settingsDataStore.data.first()[Keys.showUsdCurrency] ?: true
+    }
+
+    suspend fun setShowArsCurrency(enabled: Boolean) {
+        context.settingsDataStore.edit { it[Keys.showArsCurrency] = enabled }
+    }
+
+    suspend fun getShowArsCurrency(): Boolean {
+        return context.settingsDataStore.data.first()[Keys.showArsCurrency] ?: true
+    }
+
+    // Modo Publicidade das Imagens (pedido do usuário, 2026-11-17): controla só o passo 0 de
+    // PriceQueryEngine.preloadProductImageAndTheme — a arte publicitária gerada por IA
+    // (produtos-imgs/Gemini, srv-mupa), que vira o fundo da tela toda. Desligado, pula direto
+    // pra foto crua do produto (passos 1-3), sem a camada de "peça de campanha". Hoje é
+    // configurado por dispositivo; a ideia é que no futuro venha do Mupa Connect por empresa.
+    // Default true: preserva o comportamento atual (busca de arte sempre ligada) pra toda a
+    // frota existente — só quem desligar explicitamente perde a arte.
+    suspend fun setAdArtworkEnabled(enabled: Boolean) {
+        context.settingsDataStore.edit { it[Keys.adArtworkEnabled] = enabled }
+    }
+
+    suspend fun getAdArtworkEnabled(): Boolean {
+        return context.settingsDataStore.data.first()[Keys.adArtworkEnabled] ?: true
     }
 
     suspend fun getUnidasulServerAddress(): String {
@@ -175,35 +236,6 @@ class SettingsManager(private val context: Context) {
         val host = getImageHost().ifBlank { DEFAULT_IMAGE_HOST }
         val port = getImagePort().ifBlank { DEFAULT_IMAGE_PORT }
         return "http://$host:$port"
-    }
-
-    suspend fun setGertecScannerEnabled(enabled: Boolean) {
-        // Persiste no DataStore E no SharedPreferences (legacyPrefs). O DataStore pode ser
-        // resetado por corrupção em reboot abrupto (ReplaceFileCorruptionHandler -> vazio); o
-        // fallback no SharedPreferences garante que o leitor continue ativado após o boot.
-        persistBoolean(Keys.gertecScannerEnabled, LEGACY_KEY_GERTEC_SCANNER_ENABLED, enabled)
-    }
-
-    // Achado real de campo (2026-10-08, MEFERI MC45 DER4BT125115002178):
-    // o default `true` aqui era INCONDICIONAL (todo aparelho, Gertec ou
-    // não), e o chamador (PlayerActivity.onResume) usa
-    // `GertecScannerManager.isGertecDevice() || getGertecScannerEnabled()`
-    // — como o lado direito do OR já vinha `true` por padrão em QUALQUER
-    // device, a checagem de `isGertecDevice()` nunca tinha efeito nenhum
-    // na prática. Resultado confirmado ao vivo via `adb logcat`: neste
-    // MC45 (sem hardware Gertec nenhum), `GertecScannerManager` ficava
-    // tentando se armar pra sempre, falhando a cada ~30s
-    // ("gertec_sdk_getInstance_failed"), gastando CPU/wakeups à toa num
-    // loop que nunca teria como funcionar. Fix: o default só vira `true`
-    // quando o aparelho É de fato Gertec (`isGertecDevice()`) — em
-    // qualquer outro, default `false`, preservando o comportamento
-    // "ativo sem configuração manual" só onde faz sentido. Um admin que
-    // precisar ligar manualmente num device fora da heurística ainda
-    // pode, via Configurações — só o DEFAULT mudou.
-    suspend fun getGertecScannerEnabled(): Boolean {
-        val default = GertecScannerManager.isGertecDevice()
-        return context.settingsDataStore.data.first()[Keys.gertecScannerEnabled]
-            ?: legacyPrefs.getBoolean(LEGACY_KEY_GERTEC_SCANNER_ENABLED, default)
     }
 
     suspend fun setImageSearchEnabled(enabled: Boolean) {
@@ -260,7 +292,12 @@ class SettingsManager(private val context: Context) {
         private const val DEFAULT_SERVER_URL = "https://midias.mupa.app"
         private const val DEFAULT_ENVIRONMENT = "prod"
         private const val DEFAULT_PRICE_PORT = "8000"
-        private const val DEFAULT_IMAGE_HOST = "srv-mupa.ddns.net"
+        // Achado real (2026-10-21): "srv-mupa.ddns.net" resolve pra uma máquina física
+        // diferente (177.10.108.33) do servidor atual do produtos-imgs/Mupa Brain. Essa
+        // máquina antiga só redireciona GET pra "2.25.239.153:5050" (302) — POST (usado por
+        // gerar-arte, upload de foto) nunca é encaminhado, cai direto num 405 do lado de lá.
+        // Servidor de verdade hoje é esta própria VPS do argos-remote, mesma porta 5050.
+        private const val DEFAULT_IMAGE_HOST = "2.25.239.153"
         private const val DEFAULT_IMAGE_PORT = "5050"
 
         private const val LEGACY_PREFS_NAME = "mupa_settings_legacy"
@@ -272,7 +309,6 @@ class SettingsManager(private val context: Context) {
         private const val LEGACY_KEY_DEV_MODE = "dev_mode"
         private const val LEGACY_KEY_DEMO_MODE = "demo_mode"
         private const val LEGACY_KEY_IMAGE_SEARCH_ENABLED = "image_search_enabled"
-        private const val LEGACY_KEY_GERTEC_SCANNER_ENABLED = "gertec_scanner_enabled"
         private const val LEGACY_KEY_PRICE_HOST = "price_host"
         private const val LEGACY_KEY_PRICE_PORT = "price_port"
         private const val LEGACY_KEY_IMAGE_HOST = "image_host"

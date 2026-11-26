@@ -334,3 +334,108 @@ na rede do cliente, servidor real `10.80.2.1:5000`, filial 080):
 Testado só com ESTE device/filial; outras filiais da UnidaSul usam o
 mesmo mecanismo (config local por device em Configurações), nenhuma
 mudança adicional deveria ser necessária pra elas.
+
+## Update 2026-11-11 — troca pra API oficial (Macromix/Rissul), fim do bridge local
+
+Pedido do usuário: "precisamos ajustar o flavor das consultas do
+Macromix e Rissul, mesma API (Unidasul)", com a URL do Swagger de
+Homolog: `http://f001srvhml01.filial.unidasul.local/UnidaSul.Api.TerminalConsulta/swagger/index.html`.
+
+**Decisão confirmada com o usuário**: a UnidaSul publicou uma API
+oficial (`UnidaSul.Api.TerminalConsulta`) que substitui o bridge local
+raspado (`/get_price`, descrito acima) **pra toda a rede UnidaSul**
+(não só Macromix/Rissul) — não existe mais a necessidade de manter as
+duas integrações em paralelo.
+
+**API nova, confirmada ao vivo contra o Swagger de Homolog**
+(`Banco: Filial043`, backend real é um sistema terceiro "Prixsia/Pricemet"):
+
+- `GET /api/ObterDadosPrecoProduto/{codigoBarras}` — sucesso (HTTP 200):
+  ```json
+  {
+    "Descricao": "CHOC SNICKERS MOUSSE MARAC ED LIMIT 42G",
+    "Preco": "R$ 4,29",
+    "Condicoes": [],
+    "Codigo": "Código: 2365121 - 7896423456561",
+    "ImagemUrl": "https://sabancoimagenspng.blob.core.windows.net/..."
+  }
+  ```
+  Não encontrado: **HTTP 404 de verdade** com `{"mensagem":"Produto não
+  encontrado."}` — diferente do bridge antigo, que sempre respondia 200
+  delegando erro pro corpo. `Preco` já vem formatado (`"R$ 4,29"`), ao
+  contrário do `lblPreco` cru do bridge antigo.
+- `GET /ObterStatus` — texto simples confirmando ambiente/banco/API
+  online, usado agora como o teste de conexão em Configurações (antes
+  não existia endpoint de health dedicado).
+- Swagger declara segurança Bearer/JWT, mas respondeu sem token em
+  Homolog; segundo o usuário, em produção **também não exige token** —
+  só funciona de dentro da rede da loja.
+- **Convenção de URL em produção**: host por filial
+  `f0XXsrv01.filial.unidasul.local` (ex.: filial 2 → `f002srv01...`), e
+  o virtual directory **não** tem o prefixo `UnidaSul.` — é
+  `api.terminalconsulta` (minúsculo). A rota em si
+  (`/api/ObterDadosPrecoProduto/...`, definida nos atributos `[Route]`
+  do controller .NET) não muda entre ambientes, só o alias do virtual
+  directory muda.
+
+**Update 2026-11-11 (2) — detecção automática Homolog x Produção**:
+achado real em campo no device ST103ANLFKBC092 (host configurado
+`f074srvhml01.filial.unidasul.local`, um host de Homolog) — assumir
+sempre a convenção de Produção batia num 404 do próprio IIS (caminho
+errado), não da API, e aparentava "produto não encontrado" sem ser
+isso de verdade. `unidasulVirtualDir(host)` (função de topo em
+`PriceQueryEngine.kt`, reusada em `SettingsActivity.kt`) detecta pelo
+substring `"hml"` no host (case-insensitive, confirmado em 2 hosts de
+Homolog reais até agora: `f001srvhml01...` e `f074srvhml01...`) e
+escolhe o virtual directory certo:
+- contém `"hml"` → `UnidaSul.Api.TerminalConsulta` (Homolog)
+- caso contrário → `api.terminalconsulta` (Produção)
+
+URL final montada pelo app:
+`http://{host}/{virtualDir}/api/ObterDadosPrecoProduto/{ean}`.
+
+**Update 2026-11-11 (3) — campo `Condicoes` parseado**: confirmado em
+campo (~230 EANs reais) 3 formatos distintos dentro do array
+`Condicoes` (ver `parseUnidasulProdutoJson` e
+`PriceQueryEngineUnidasulTest.kt`):
+1. Oferta por quantidade — `"A partir de N Un:"` seguido de `"R$ Y,YY
+   cada"` (e opcionalmente um 3º texto "...você economiza...") — vira
+   um 2º price slot (`priceWholesale`), mesmo tratamento do bridge
+   antigo.
+2. Preço normal repetido — `"********** R$ X,XX por Unidade
+   **********"` (sempre igual ao `Preco` já exibido) — ignorado de
+   propósito, não gera slot.
+3. Promoção de combo/cross-sell em texto livre (ex.: "..::: ATENÇÃO:
+   Promoção especial...", "NA COMPRA DE X LEVE GRÁTIS Y") — sem preço
+   seguro pra extrair, ignorado (não derruba o parse).
+
+**Arquivos alterados**:
+- `PriceQueryEngine.kt` — `queryUnidasul`/`fetchUnidasulPrice` trocaram
+  de `/get_price?num_filial=...` pra
+  `/api.terminalconsulta/api/ObterDadosPrecoProduto/{ean}`; `numFilial`
+  não é mais necessário (filial já vai embutida no host); nova função
+  pura `parseUnidasulProdutoJson` substitui `parseUnidasulElementosJson`
+  (assinatura mais simples, sem `hostPort` — a API já devolve
+  `ImagemUrl` absoluta).
+- `PriceQueryEngineUnidasulTest.kt` — reescrito do zero (6 testes, 2
+  baseados em captura real — sucesso e não-encontrado — e o resto
+  defensivo: preço ausente/branco, descrição ausente, imagem ausente).
+  Menos cobertura que a versão anterior (10 testes) porque só temos 2
+  capturas reais dessa API nova, contra as 10 do `.aia` antigo.
+- `SettingsActivity.kt`/`activity_settings.xml` — campo de endereço
+  passa a esperar um **host** (`f002srv01.filial.unidasul.local`), não
+  mais IP:porta; botão "Testar" agora bate em `/ObterStatus` em vez de
+  simular uma consulta de EAN fake.
+- `SettingsManager.kt` — comentário da chave `unidasul_server_address`
+  atualizado (mesmo comportamento: blank = desativado).
+- **Nada mudou** em `PlayerActivity.kt` (ativação da integração por
+  endereço não-blank) nem no valor de `config.integration` esperado
+  (continua `"integra-unidasul"`) — zero migração necessária na Policy
+  do painel ARGOS pras lojas já configuradas.
+
+**Validado**: 6 testes unitários passando + `assembleUnidasulDebug`
+sem erros. **NÃO testado end-to-end contra produção** (nenhum host de
+produção alcançável deste ambiente) — antes de liberar pra uma loja
+Macromix/Rissul de verdade: configurar o host real da filial em
+Configurações, usar "Testar" (deve mostrar "API Online"), e então ler
+um EAN real.

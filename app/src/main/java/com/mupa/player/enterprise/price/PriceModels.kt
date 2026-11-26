@@ -12,7 +12,10 @@ data class ProductPriceSlot(
     val field: String,
     val isPromo: Boolean,
     val isClub: Boolean,
-    val fromValue: Double? = null  // preço "de" riscado, exibido dentro do próprio box
+    val fromValue: Double? = null,  // preço "de" riscado, exibido dentro do próprio box
+    // Símbolo exibido no slot (item_price_slot.xml -> slotCurrency). Todo slot é "R$" por padrão;
+    // só muda pros slots de conversão de moeda estrangeira (ver PriceQueryEngine.queryTcServer).
+    val currencySymbol: String = "R$",
 )
 
 data class LayoutConfig(

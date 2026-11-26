@@ -7,218 +7,176 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Valida parseUnidasulElementosJson contra respostas REAIS capturadas em produção no
- * App_TC_Unidasul.aia (comentários "Do It Result:" do depurador do App Inventor/Kodular,
- * 2025-04/09). Sem servidor real da UnidaSul disponível neste ambiente para teste ao vivo —
- * este teste é a validação de "nenhuma falha" nas regras de resposta (ver
- * docs/FEATURE_INTEGRACAO_UNIDASUL.md).
+ * Valida parseUnidasulProdutoJson contra respostas REAIS da API oficial
+ * UnidaSul.Api.TerminalConsulta (confirmadas ao vivo em 2026-11-11 contra o Swagger de
+ * Homolog, GET /api/ObterDadosPrecoProduto/{codigoBarras} — ver
+ * docs/FEATURE_INTEGRACAO_UNIDASUL.md). Diferente da versão anterior (bridge local
+ * /get_price, reverse-engenheirado do App_TC_Unidasul.aia): só temos 2 amostras reais
+ * (sucesso e não-encontrado) — nenhum produto com "Condicoes" não-vazio foi capturado
+ * ainda, então esse campo não é parseado por ora (documentado no comentário acima de
+ * parseUnidasulProdutoJson).
  */
 class PriceQueryEngineUnidasulTest {
 
-    private val hostPort = "192.168.0.10:5000"
-
     @Test
-    fun `produto com oferta por quantidade vira 2 slots (amostra real CHOC SNICKERS)`() {
+    fun `produto encontrado (amostra real CHOC SNICKERS, Homolog filial043)`() {
         val json = JSONObject(
             """
             {
-              "elementos": {
-                "lblDcrProduto": "CHOC SNICKERS MOUSSE MARACUJA 42G",
-                "lblPreco": "3,79",
-                "lblPrecoDC": "A partir de  3 Un:",
-                "lblPrecoDC2": "3,33 cada",
-                "lblScanner": "Na compra de  3 ou mais unidades, você economiza: R$ 0,46 por unidade"
-              },
-              "imagem_status": "indisponivel",
-              "imagem_url": null,
-              "success": true
+              "Descricao": "CHOC SNICKERS MOUSSE MARAC ED LIMIT 42G",
+              "Preco": "R$ 4,29",
+              "Condicoes": [],
+              "Codigo": "Código: 2365121 - 7896423456561",
+              "ImagemUrl": "https://sabancoimagenspng.blob.core.windows.net/png1000x1000/7896423456561_1.png?sp=rl"
             }
             """.trimIndent(),
         )
 
-        val result = parseUnidasulElementosJson("7896423456561", json, hostPort)
+        val result = parseUnidasulProdutoJson("7896423456561", json)
 
         assertTrue(result != null)
-        assertEquals("CHOC SNICKERS MOUSSE MARACUJA 42G", result!!.description)
-        assertEquals(3.79, result.price!!, 0.001)
-        assertEquals(3.33, result.priceWholesale!!, 0.001)
+        assertEquals("CHOC SNICKERS MOUSSE MARAC ED LIMIT 42G", result!!.description)
+        assertEquals(4.29, result.price!!, 0.001)
+        assertEquals("https://sabancoimagenspng.blob.core.windows.net/png1000x1000/7896423456561_1.png?sp=rl", result.clientImageUrl)
+        assertEquals(1, result.priceSlots?.size)
+        assertEquals("PREÇO NORMAL", result.priceSlots!![0].label)
+        assertNull(result.priceWholesale)
+    }
+
+    @Test
+    fun `produto sem ImagemUrl nao crasha e fica sem imagem de cliente`() {
+        val json = JSONObject(
+            """
+            {
+              "Descricao": "PRODUTO QUALQUER",
+              "Preco": "R$ 12,50",
+              "Condicoes": [],
+              "Codigo": "Código: 123 - 7891000000000"
+            }
+            """.trimIndent(),
+        )
+
+        val result = parseUnidasulProdutoJson("7891000000000", json)
+
+        assertTrue(result != null)
+        assertEquals(12.50, result!!.price!!, 0.001)
         assertNull(result.clientImageUrl)
+    }
+
+    @Test
+    fun `preco em branco retorna null`() {
+        val json = JSONObject("""{"Descricao": "X", "Preco": "", "Condicoes": []}""")
+
+        val result = parseUnidasulProdutoJson("123", json)
+
+        assertNull(result)
+    }
+
+    @Test
+    fun `preco ausente retorna null`() {
+        val json = JSONObject("""{"Descricao": "X", "Condicoes": []}""")
+
+        val result = parseUnidasulProdutoJson("123", json)
+
+        assertNull(result)
+    }
+
+    @Test
+    fun `descricao ausente nao crasha, so fica null`() {
+        val json = JSONObject("""{"Preco": "R$ 1,00", "Condicoes": []}""")
+
+        val result = parseUnidasulProdutoJson("123", json)
+
+        assertTrue(result != null)
+        assertNull(result!!.description)
+    }
+
+    @Test
+    fun `oferta por quantidade vira 2o slot (amostra real REFRESCO TANG)`() {
+        val json = JSONObject(
+            """
+            {
+              "Descricao": "REFRESCO PO TANG TANGER 18G",
+              "Preco": "R$ 1,55",
+              "Condicoes": [
+                {"Condicao_1": "A partir de 6 Un:"},
+                {"Condicao_2": "R$ 0,89 cada"},
+                {"Condicao_3": "Na compra de 6 ou mais unidades, você economiza: R$ 0,66 por unidade"}
+              ],
+              "Codigo": "Código: 2361079 - 7622210571632",
+              "ImagemUrl": "https://sabancoimagenspng.blob.core.windows.net/png1000x1000/7622210571632_1.png"
+            }
+            """.trimIndent(),
+        )
+
+        val result = parseUnidasulProdutoJson("7622210571632", json)
+
+        assertTrue(result != null)
+        assertEquals(1.55, result!!.price!!, 0.001)
+        assertEquals(0.89, result.priceWholesale!!, 0.001)
         val slots = result.priceSlots!!
         assertEquals(2, slots.size)
         assertEquals("PREÇO NORMAL", slots[0].label)
-        assertEquals("A partir de  3 Un", slots[1].label)
-        assertEquals(3.33, slots[1].value, 0.001)
-        assertEquals(3.79, slots[1].fromValue!!, 0.001)
+        assertEquals("A partir de 6 Un", slots[1].label)
+        assertEquals(0.89, slots[1].value, 0.001)
+        assertEquals(1.55, slots[1].fromValue!!, 0.001)
         assertTrue(slots[1].isPromo)
     }
 
     @Test
-    fun `produto simples sem oferta e com imagem relativa (amostra real FILTRO PAPEL)`() {
+    fun `promocao de combo em texto livre e ignorada, sem crashar (amostra real PEPSI BLACK)`() {
         val json = JSONObject(
             """
             {
-              "ean": "7891021002127",
-              "elementos": {
-                "lblDcrProduto": "FILTRO PAPEL BRIGITTA 103 C/30 UN",
-                "lblPreco": "4,70",
-                "lblPrecoDC": "",
-                "lblScanner": null
-              },
-              "elementos_nao_encontrados": ["scanner"],
-              "filial": "035",
-              "imagem_status": "disponivel",
-              "imagem_url": "/imagem-produto/7891021002127",
-              "success": true
+              "Descricao": "REFRI PEPSI BLACK PET 2L",
+              "Preco": "R$ 8,49",
+              "Condicoes": [
+                {"Condicao_1": "..::: ATENÇÃO: Promoção especial para este Produto :::.."},
+                {"Condicao_2": "NA COMPRA DE 3 CARVAO IVOTI 3KG LEVE GRÁTIS 1 REFRI PEPSI PET 2L"}
+              ],
+              "Codigo": "Código: 9692084 - 7892840813444"
             }
             """.trimIndent(),
         )
 
-        val result = parseUnidasulElementosJson("7891021002127", json, hostPort)
+        val result = parseUnidasulProdutoJson("7892840813444", json)
 
         assertTrue(result != null)
-        assertEquals(4.70, result!!.price!!, 0.001)
-        assertEquals(1, result.priceSlots?.size)
-        assertEquals("http://$hostPort/imagem-produto/7891021002127", result.clientImageUrl)
-    }
-
-    @Test
-    fun `imagem_url absoluta passa direto sem prefixar host (amostra real LASANHA)`() {
-        val json = JSONObject(
-            """
-            {
-              "ean": "7894904201785",
-              "elementos": {
-                "lblDcrProduto": "LASANHA LEBON FGO 600G",
-                "lblPreco": "14,99",
-                "lblPrecoDC": "",
-                "lblScanner": null
-              },
-              "filial": "035",
-              "imagem_status": "disponivel",
-              "imagem_url": "http://localhost:5000/imagem-produto/7894904201785",
-              "success": true
-            }
-            """.trimIndent(),
-        )
-
-        val result = parseUnidasulElementosJson("7894904201785", json, hostPort)
-
-        assertEquals("http://localhost:5000/imagem-produto/7894904201785", result!!.clientImageUrl)
-    }
-
-    @Test
-    fun `imagem_status indisponivel nunca gera clientImageUrl mesmo com imagem_url presente`() {
-        val json = JSONObject(
-            """
-            {
-              "elementos": {
-                "lblDcrProduto": "MASSA ORQUIDEA SEMOLA CONCHA 500G",
-                "lblPreco": "3,99",
-                "lblPrecoDC": "Cliente CLUBE RISSUL paga R$ 3,29"
-              },
-              "imagem_status": "indisponivel",
-              "imagem_url": null,
-              "success": true
-            }
-            """.trimIndent(),
-        )
-
-        val result = parseUnidasulElementosJson("9099005", json, hostPort)
-
-        assertNull(result!!.clientImageUrl)
-        // lblPrecoDC sem lblPrecoDC2 numérico ("Cliente CLUBE RISSUL paga...") não é o formato
-        // "A partir de X Un:"/"Y cada" — regex não acha valor em lblPrecoDC2 inexistente, então
-        // fica só 1 slot (preço normal), nunca quebra.
-        assertEquals(1, result.priceSlots?.size)
-    }
-
-    @Test
-    fun `erro de conexão com o servidor da filial retorna null (amostra real filial 086)`() {
-        val json = JSONObject(
-            """
-            {
-              "details": "HTTPConnectionPool(...)",
-              "device_info": {"ip_address": "192.168.100.191"},
-              "error": "Não foi possível conectar ao servidor da filial 086."
-            }
-            """.trimIndent(),
-        )
-
-        val result = parseUnidasulElementosJson("7891021002127", json, hostPort)
-
-        assertNull(result)
-    }
-
-    @Test
-    fun `produto nao encontrado (lblPreco literal null) retorna null`() {
-        // Regra confirmada no .aia: o app original compara lblPreco (após troca de separador
-        // decimal) contra a string literal "null" para decidir "Produto não encontrado ou
-        // verifique o código de barras!" (ver Screen1.bky ~linha 21378).
-        val json = JSONObject(
-            """
-            {
-              "elementos": {
-                "lblDcrProduto": null,
-                "lblPreco": "null",
-                "lblPrecoDC": ""
-              },
-              "success": true
-            }
-            """.trimIndent(),
-        )
-
-        val result = parseUnidasulElementosJson("0000000000000", json, hostPort)
-
-        assertNull(result)
-    }
-
-    @Test
-    fun `success false sem campo error tambem retorna null`() {
-        val json = JSONObject("""{"success": false}""")
-
-        val result = parseUnidasulElementosJson("123", json, hostPort)
-
-        assertNull(result)
-    }
-
-    @Test
-    fun `elementos ausente retorna null em vez de crashar`() {
-        val json = JSONObject("""{"success": true}""")
-
-        val result = parseUnidasulElementosJson("123", json, hostPort)
-
-        assertNull(result)
-    }
-
-    @Test
-    fun `lblPreco em branco retorna null`() {
-        val json = JSONObject(
-            """{"success": true, "elementos": {"lblPreco": ""}}""",
-        )
-
-        val result = parseUnidasulElementosJson("123", json, hostPort)
-
-        assertNull(result)
-    }
-
-    @Test
-    fun `lblPrecoDC2 sem numero valido nao gera 2o slot`() {
-        val json = JSONObject(
-            """
-            {
-              "success": true,
-              "elementos": {
-                "lblPreco": "10,00",
-                "lblPrecoDC": "Alguma promoção",
-                "lblPrecoDC2": "sem valor numerico aqui"
-              }
-            }
-            """.trimIndent(),
-        )
-
-        val result = parseUnidasulElementosJson("123", json, hostPort)
-
-        assertEquals(1, result!!.priceSlots?.size)
+        assertEquals(8.49, result!!.price!!, 0.001)
         assertNull(result.priceWholesale)
+        assertEquals(1, result.priceSlots?.size)
+    }
+
+    @Test
+    fun `preco normal repetido em Condicoes nao gera 2o slot (amostra real AMACIANTE)`() {
+        val json = JSONObject(
+            """
+            {
+              "Descricao": "ACUCAR CRISTAL CARAVELAS COLOMBO 6X5KG",
+              "Preco": "R$ 105,60",
+              "Condicoes": [
+                {"Condicao_1": "********** R$ 17,60 por Unidade **********"}
+              ]
+            }
+            """.trimIndent(),
+        )
+
+        val result = parseUnidasulProdutoJson("7896894900112", json)
+
+        assertTrue(result != null)
+        assertNull(result!!.priceWholesale)
+        assertEquals(1, result.priceSlots?.size)
+    }
+
+    @Test
+    fun `mensagem de produto nao encontrado (amostra real HTTP 404) retorna null via ausencia de Preco`() {
+        // A API retorna isso com HTTP 404 de verdade (ver fetchUnidasulPrice, que já descarta
+        // qualquer resposta não-2xx antes de chegar aqui) — este teste cobre o shape do corpo
+        // isoladamente, caso algum dia essa mensagem venha acompanhada de um 200 por engano.
+        val json = JSONObject("""{"mensagem": "Produto não encontrado."}""")
+
+        val result = parseUnidasulProdutoJson("0000000000000", json)
+
+        assertNull(result)
     }
 }
